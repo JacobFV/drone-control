@@ -23,8 +23,9 @@ AUX_REQUEST = bytes.fromhex(
     "81c900077b7a79797b7a797800ffffff0001ed6e000000eb8c274b0200016a5f"
     "81ca00047b7a797901096c6f63616c686f737400"
 )
+VIDEO_INIT = bytes.fromhex("800000000000000000000000")
+AUX_INIT = bytes.fromhex("80c9000100000000")
 STREAM_START = b"\xef\x00\x04\x00"
-VIDEO_MAGIC = b"\x7b\x7a\x79\x78"
 
 
 def main() -> int:
@@ -34,6 +35,11 @@ def main() -> int:
     parser.add_argument("--video-port", type=int, default=32124, help="Local UDP port that receives video.")
     parser.add_argument("--aux-port", type=int, default=32125, help="Local UDP port used by the app for video aux traffic.")
     parser.add_argument("--drone-video-port", type=int, default=53797, help="Drone UDP aux/video-control port observed in captures.")
+    parser.add_argument(
+        "--drone-port-scan",
+        help="Optional drone video-port range to probe as start:end[:step]; aux port is video port + 1.",
+    )
+    parser.add_argument("--drone-port-scan-batch", type=int, default=64, help="Camera port pairs to probe per scan tick.")
     parser.add_argument("--control-port", type=int, default=56906, help="Local UDP port for neutral control packets.")
     parser.add_argument("--drone-control-port", type=int, default=7099)
     parser.add_argument("--no-control", action="store_true", help="Do not send neutral control while capturing.")
@@ -76,17 +82,22 @@ def main() -> int:
     aux_replay_pcap = args.aux_replay_pcap or (default_pcap if default_pcap.exists() else None)
     aux_requests = load_aux_requests(aux_replay_pcap) if aux_replay_pcap else [AUX_REQUEST]
     aux_iter = cycle(aux_requests)
+    scan_range = parse_port_range(args.drone_port_scan) if args.drone_port_scan else None
+    scan_cursor = scan_range[0] if scan_range else 0
     frames: OrderedDict[bytes, dict[int, bytes]] = OrderedDict()
     frame_count = 0
     packet_count = 0
     byte_count = 0
     last_probe = 0.0
+    last_scan = 0.0
     last_control = 0.0
     last_keepalive = 0.0
     deadline = time.monotonic() + args.seconds
 
     print(f"Video socket: 0.0.0.0:{args.video_port}")
     print(f"Aux socket:   0.0.0.0:{args.aux_port} -> {args.drone_ip}:{args.drone_video_port}")
+    if args.drone_port_scan:
+        print(f"Port scan:    {args.drone_port_scan} video ports; aux is video+1")
     if not args.no_control:
         print(f"Control:      0.0.0.0:{args.control_port} -> {args.drone_ip}:{args.drone_control_port}")
     print(f"Aux requests: {len(aux_requests)}" + (f" from {aux_replay_pcap}" if aux_replay_pcap else " built-in"))
@@ -100,9 +111,21 @@ def main() -> int:
                 now = time.monotonic()
                 if now - last_probe >= 0.5:
                     send_start_probes(start_sock, start_ips, args.start_port)
+                    send_camera_init(video_sock, aux_sock, args.drone_ip, args.drone_video_port - 1)
                     for _ in range(min(4, len(aux_requests))):
                         aux_sock.sendto(next(aux_iter), (args.drone_ip, args.drone_video_port))
                     last_probe = now
+
+                if scan_range and now - last_scan >= 0.05:
+                    scan_cursor = scan_camera_ports(
+                        video_sock,
+                        aux_sock,
+                        args.drone_ip,
+                        scan_range,
+                        scan_cursor,
+                        max(1, args.drone_port_scan_batch),
+                    )
+                    last_scan = now
 
                 if not args.no_control and now - last_control >= 0.05:
                     control_sock.sendto(neutral_packet, (args.drone_ip, args.drone_control_port))
@@ -162,6 +185,50 @@ def send_start_probes(sock: socket.socket, ips: list[str], port: int) -> None:
             print(f"start probe error {ip}:{port}: {exc}")
 
 
+def send_camera_init(video_sock: socket.socket, aux_sock: socket.socket, ip: str, video_port: int) -> None:
+    if video_port <= 0:
+        return
+    try:
+        video_sock.sendto(VIDEO_INIT, (ip, video_port))
+        aux_sock.sendto(AUX_INIT, (ip, video_port + 1))
+    except BlockingIOError:
+        return
+    except OSError as exc:
+        print(f"camera init error {ip}:{video_port}/{video_port + 1}: {exc}")
+
+
+def scan_camera_ports(
+    video_sock: socket.socket,
+    aux_sock: socket.socket,
+    ip: str,
+    port_range: tuple[int, int, int],
+    cursor: int,
+    batch: int,
+) -> int:
+    start, end, step = port_range
+    video_port = cursor
+    for _ in range(batch):
+        if video_port > end:
+            video_port = start
+        send_camera_init(video_sock, aux_sock, ip, video_port)
+        video_port += step
+    return video_port
+
+
+def parse_port_range(spec: str) -> tuple[int, int, int]:
+    parts = spec.split(":")
+    if len(parts) not in {2, 3}:
+        raise ValueError("expected start:end[:step]")
+    start = int(parts[0])
+    end = int(parts[1])
+    step = int(parts[2]) if len(parts) == 3 else 2
+    if not (1 <= start <= 65535 and 1 <= end <= 65535 and step >= 1):
+        raise ValueError("ports must be in 1..65535 and step must be positive")
+    if start > end:
+        raise ValueError("start must be <= end")
+    return start, end, step
+
+
 def drain_aux_replies(sock: socket.socket) -> None:
     while True:
         try:
@@ -187,7 +254,7 @@ def load_aux_requests(path: Path) -> list[bytes]:
 
 
 def parse_video_packet(payload: bytes) -> tuple[bytes | None, int | None, bytes | None]:
-    if len(payload) < 24 or payload[8:12] != VIDEO_MAGIC:
+    if len(payload) < 24:
         return None, None, None
     frame_key = payload[4:8]
     offset = int.from_bytes(payload[14:16], "big")

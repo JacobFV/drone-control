@@ -95,10 +95,37 @@ python3 tools/pcap_summary.py captures/<capture-file>.pcap
 
 ## Camera Capture
 
-The phone-app capture showed camera data as a high-volume UDP stream from
-`192.168.1.1:53796` to the app's local port `32124`. The stream is not plain
-JPEG or H.264 at the UDP payload boundary; packets have a WIFI_8K/Taixin-style
-chunk header with magic `7b 7a 79 78`, frame ids, and offsets.
+The phone-app captures show camera data as high-volume UDP streams from the
+drone to the phone. The stream is not plain JPEG or H.264 at the UDP payload
+boundary; packets have a WIFI_8K/Taixin-style chunk header with a per-session
+magic, frame ids, and offsets.
+
+Observed stream pairs:
+
+- `drone_monitor_20260512_110655_ch1.pcap`: `192.168.1.1:53796 -> 192.168.1.101:32124`, aux `32125 -> 53797`
+- `drone_monitor_20260512_140736_ch1.pcap`: `192.168.1.1:52042 -> 192.168.1.101:31364`, aux `31365 -> 52043`
+- `drone_monitor_20260512_140736_ch1.pcap`: `192.168.1.1:53214 -> 192.168.1.101:19402`, aux `19403 -> 53215`
+- `drone_monitor_20260512_141413_ch1.pcap`: `192.168.1.1:52612 -> 192.168.1.101:12186`, aux `12187 -> 52613`
+
+The local and drone-side ports are dynamic, but the aux port is consistently
+the corresponding video port plus one on both sides.
+
+For a camera-focused summary:
+
+```bash
+python3 tools/pcap_summary.py captures/drone_monitor_20260512_141413_ch1.pcap --limit 10
+```
+
+For offline frame chunk extraction from a monitor pcap:
+
+```bash
+tools/camera_pcap_extract.py captures/drone_monitor_20260512_141413_ch1.pcap \
+  --out-dir camera_captures/pcap_20260512_141413
+```
+
+This currently extracts frame-sized JPEG-like payloads. The payloads contain
+valid JPEG entropy/end markers but no normal SOI/JFIF wrapper, so image display
+still needs the remaining frame/header wrapping mapped.
 
 First-pass capture:
 
@@ -108,16 +135,33 @@ tools/drone_camera_session.sh wlP9s9 WIFI_8K-0c5b90 10
 
 This connects to the drone AP, sends the observed stream-start and aux-video
 probes, listens on UDP port `32124`, saves raw UDP payloads, and reassembles
-per-frame chunk binaries under `camera_captures/`. The current tool captures
-and chunks the stream; image decoding still needs the remaining frame-header
-format mapped.
+per-frame chunk binaries under `camera_captures/`.
 
 Autonomous camera-start tests on the laptop currently capture zero packets,
-even when replaying the app's captured aux-video request sequence and sending
-neutral control packets. Next camera step is a fresh monitor capture focused
-only on app startup: connect phone to the drone AP, open the app directly to
-camera view, wait for video, then stop. That should isolate the missing stream
-start/session handshake from stick-control noise.
+even when replaying the app's captured aux-video request sequence, sending
+neutral control packets, and probing the observed high camera ports.
+
+The startup capture shows this ordering for `drone_monitor_20260512_141413_ch1.pcap`:
+
+- `4.478s`: phone sends `80 00 00 00 00 00 00 00 00 00 00 00` from local video port `12186` to drone video port `52612`
+- `4.478s`: phone sends `80 c9 00 01 00 00 00 00` from local aux port `12187` to drone aux port `52613`
+- `4.520s`: phone begins `ef 00 04 00` probes to `192.168.169.1:8800`
+- `4.565s`: drone starts video from `52612` to `12186`
+
+The unresolved piece is how the app learns or selects the drone-side dynamic
+camera port pair before sending those first two packets. Until that is mapped,
+the Python live camera capture can parse a stream once one is flowing, but it
+cannot reliably start the stream by itself.
+
+Experimental live scan:
+
+```bash
+DRONE_CAMERA_PORT_SCAN=52000:54000:2 \
+  tools/drone_camera_session.sh wlP9s9 WIFI_8K-0c5b90 10
+```
+
+On 2026-05-12, a narrow scan over `52600:52624:2` and a broader scan over
+`52000:54000:2` still produced `Captured packets=0`.
 
 Capture `drone_monitor_20260512_140736_ch1.pcap` showed two simultaneous video
 streams already active from the first milliseconds of capture:

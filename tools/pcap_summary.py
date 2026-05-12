@@ -20,12 +20,18 @@ def main() -> int:
     flows: collections.Counter[tuple[str, int, str, int]] = collections.Counter()
     flow_bytes: collections.Counter[tuple[str, int, str, int]] = collections.Counter()
     flow_lengths: dict[tuple[str, int, str, int], collections.Counter[int]] = collections.defaultdict(collections.Counter)
+    flow_first: dict[tuple[str, int, str, int], float] = {}
+    flow_last: dict[tuple[str, int, str, int], float] = {}
     payloads: collections.Counter[tuple[str, int, str, int, bytes]] = collections.Counter()
     wifi8k: collections.Counter[tuple[str, int, str, int, bytes]] = collections.Counter()
 
     packets = 0
     udp_packets = 0
-    for frame in read_pcap(args.pcap):
+    first_ts: float | None = None
+    for ts, frame in read_pcap_records(args.pcap):
+        if first_ts is None:
+            first_ts = ts
+        rel_ts = ts - first_ts
         packets += 1
         parsed = parse_udp_from_radiotap(frame)
         if parsed is None:
@@ -36,6 +42,8 @@ def main() -> int:
         flows[flow] += 1
         flow_bytes[flow] += len(payload)
         flow_lengths[flow][len(payload)] += 1
+        flow_first.setdefault(flow, rel_ts)
+        flow_last[flow] = rel_ts
         if len(payload) <= 64:
             payloads[(src, sport, dst, dport, payload)] += 1
         if is_wifi8k_control(payload):
@@ -48,7 +56,28 @@ def main() -> int:
     for flow, count in flows.most_common(args.limit):
         src, sport, dst, dport = flow
         lens = ", ".join(f"{length}:{n}" for length, n in flow_lengths[flow].most_common(5))
-        print(f"{count:6d} packets {flow_bytes[flow]:8d} bytes  {src}:{sport} -> {dst}:{dport}  lens={lens}")
+        print(
+            f"{count:6d} packets {flow_bytes[flow]:8d} bytes  "
+            f"{src}:{sport} -> {dst}:{dport}  "
+            f"first={flow_first[flow]:7.3f}s last={flow_last[flow]:7.3f}s  lens={lens}"
+        )
+
+    print()
+    print("Likely camera streams:")
+    camera_rows = find_camera_streams(flows, flow_bytes)
+    if not camera_rows:
+        print("none")
+    for video_flow, aux_flow in camera_rows[:args.limit]:
+        src, sport, dst, dport = video_flow
+        aux_text = "aux=not found"
+        if aux_flow:
+            aux_src, aux_sport, aux_dst, aux_dport = aux_flow
+            aux_text = f"aux={aux_src}:{aux_sport} -> {aux_dst}:{aux_dport}"
+        print(
+            f"{flows[video_flow]:6d} packets {flow_bytes[video_flow]:8d} bytes  "
+            f"video={src}:{sport} -> {dst}:{dport}  "
+            f"first={flow_first[video_flow]:7.3f}s last={flow_last[video_flow]:7.3f}s  {aux_text}"
+        )
 
     print()
     print("Likely WIFI_8K controls:")
@@ -74,6 +103,11 @@ def main() -> int:
 
 
 def read_pcap(path: Path):
+    for _ts, frame in read_pcap_records(path):
+        yield frame
+
+
+def read_pcap_records(path: Path):
     with path.open("rb") as handle:
         header = handle.read(24)
         if len(header) != 24:
@@ -97,7 +131,7 @@ def read_pcap(path: Path):
             frame = handle.read(incl_len)
             if len(frame) != incl_len:
                 raise ValueError("pcap record body is truncated")
-            yield frame
+            yield _ts_sec + (_ts_usec / 1_000_000), frame
 
 
 def parse_udp_from_radiotap(frame: bytes) -> tuple[str, int, str, int, bytes] | None:
@@ -129,6 +163,24 @@ def parse_udp_from_radiotap(frame: bytes) -> tuple[str, int, str, int, bytes] | 
 
 def is_wifi8k_control(payload: bytes) -> bool:
     return len(payload) == 9 and payload[0] == 0x03 and payload[1] == 0x66 and payload[-1] == 0x99
+
+
+def find_camera_streams(
+    flows: collections.Counter[tuple[str, int, str, int]],
+    flow_bytes: collections.Counter[tuple[str, int, str, int]],
+) -> list[tuple[tuple[str, int, str, int], tuple[str, int, str, int] | None]]:
+    rows: list[tuple[tuple[str, int, str, int], tuple[str, int, str, int] | None]] = []
+    ignored_ports = {53, 5353, 7099, 8800, 3478}
+    for flow, count in flows.items():
+        src, sport, dst, dport = flow
+        if flow_bytes[flow] < 500_000 or count < 100:
+            continue
+        if sport in ignored_ports or dport in ignored_ports:
+            continue
+        aux_flow = (dst, dport + 1, src, sport + 1)
+        rows.append((flow, aux_flow if aux_flow in flows else None))
+    rows.sort(key=lambda item: flow_bytes[item[0]], reverse=True)
+    return rows
 
 
 def xor(values: bytes) -> int:

@@ -15,6 +15,7 @@ fi
 HOME_SSID="${HOME_SSID:-CircularEconomy}"
 DRONE_IP="${DRONE_IP:-192.168.1.1}"
 CAMERA_OUT_DIR="${CAMERA_OUT_DIR:-$ROOT_DIR/camera_captures}"
+DRONE_CAMERA_PORT_SCAN="${DRONE_CAMERA_PORT_SCAN:-}"
 BIND_DEVICE="${BIND_DEVICE:-0}"
 
 if [[ -z "$DRONE_SSID" ]]; then
@@ -83,6 +84,9 @@ ARGS=(
   --seconds "$DURATION"
   --out-dir "$CAMERA_OUT_DIR"
 )
+if [[ -n "$DRONE_CAMERA_PORT_SCAN" ]]; then
+  ARGS+=(--drone-port-scan "$DRONE_CAMERA_PORT_SCAN")
+fi
 if [[ "$BIND_DEVICE" != "1" ]]; then
   ARGS+=(--no-bind-device)
 fi
