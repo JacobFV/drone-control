@@ -95,10 +95,9 @@ python3 tools/pcap_summary.py captures/<capture-file>.pcap
 
 ## Camera Capture
 
-The phone-app captures show camera data as high-volume UDP streams from the
-drone to the phone. The stream is not plain JPEG or H.264 at the UDP payload
-boundary; packets have a WIFI_8K/Taixin-style chunk header with a per-session
-magic, frame ids, and offsets.
+The phone-app captures show camera data as RTP/JPEG UDP streams from the drone
+to the phone. The payload is JPEG type `65` at `640x384`, with RTP/JPEG headers,
+restart markers, dynamic quantization tables, frame ids, and offsets.
 
 Observed stream pairs:
 
@@ -130,16 +129,16 @@ For a camera-focused summary:
 python3 tools/pcap_summary.py captures/drone_monitor_20260512_141413_ch1.pcap --limit 10
 ```
 
-For offline frame chunk extraction from a monitor pcap:
+For offline JPEG extraction from a monitor pcap:
 
 ```bash
 tools/camera_pcap_extract.py captures/drone_monitor_20260512_141413_ch1.pcap \
   --out-dir camera_captures/pcap_20260512_141413
 ```
 
-This currently extracts frame-sized JPEG-like payloads. The payloads contain
-valid JPEG entropy/end markers but no normal SOI/JFIF wrapper, so image display
-still needs the remaining frame/header wrapping mapped.
+This writes ordinary `.jpg` files by rebuilding the omitted RTP/JPEG container
+headers: SOI, quantization tables, SOF0, Huffman tables, restart interval, SOS,
+and EOI.
 
 First-pass capture:
 
@@ -149,7 +148,7 @@ tools/drone_camera_session.sh wlP9s9 WIFI_8K-0c5b90 10
 
 This connects to the drone AP, sends the observed stream-start and aux-video
 probes, performs RTSP `OPTIONS`/`DESCRIBE`/`SETUP`/`PLAY`, listens on UDP port
-`32124`, saves raw UDP payloads, and reassembles per-frame chunk binaries under
+`32124`, saves raw UDP payloads, and writes per-frame JPEGs under
 `camera_captures/`.
 
 The startup capture shows this ordering for `drone_monitor_20260512_141413_ch1.pcap`:
@@ -163,16 +162,17 @@ Capture `drone_monitor_20260512_145202_ch1.pcap` exposed the RTSP negotiation:
 the app requested `client_port=33012-33013`, the drone replied
 `server_port=53796-53797`, and video began immediately after `PLAY`.
 
-Autonomous live camera startup is now confirmed working:
+Autonomous live camera startup and JPEG output are now confirmed working:
 
 ```text
 RTSP server ports: video=53796 aux=53797
 Captured packets=1936 bytes=2490879 frames=170
+Captured packets=1635 bytes=2235749 frames=126
+frame_00018_0528a40f.jpg: JPEG image data, baseline, precision 8, 640x384, components 3
 ```
 
-The remaining camera work is display/encoding: extracted frame chunks contain
-RTP/JPEG-like image payloads, but image display still needs a proper RTP/JPEG
-depacketizer or a handoff to ffmpeg/OpenCV's RTSP reader.
+The remaining camera work is convenience display/encoding, such as writing a
+preview loop, MJPEG file, or encoded video from the JPEG frame sequence.
 
 Optional experimental live scan, no longer needed for normal capture:
 

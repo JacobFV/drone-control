@@ -7,6 +7,16 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from drone_control.rtp_jpeg import (
+    RtpJpegFrame,
+    add_packet,
+    assemble_jpeg,
+    assemble_scan_data,
+    parse_rtp_jpeg_packet,
+    start_frame,
+)
 
 from pcap_summary import parse_udp_from_radiotap, read_pcap_records
 
@@ -33,26 +43,31 @@ def main() -> int:
         print(f"no Taixin-like video magic detected for {format_flow(flow)}", file=sys.stderr)
         return 1
 
-    frames: collections.OrderedDict[bytes, dict[int, bytes]] = collections.OrderedDict()
+    frames: collections.OrderedDict[bytes, RtpJpegFrame] = collections.OrderedDict()
+    last_quantization_tables: bytes | None = None
     packets = 0
     frame_count = 0
     raw_path = args.out_dir / "stream_payloads.bin"
     with raw_path.open("wb") as raw:
         for _ts, payload in iter_flow_payloads(args.pcap, flow):
-            if len(payload) < 24 or payload[8:12] != magic:
+            packet = parse_rtp_jpeg_packet(payload)
+            if packet is None or packet.frame_key != payload[4:8] or payload[8:12] != magic:
                 continue
             packets += 1
             raw.write(payload)
-            frame_key = payload[4:8]
-            offset = int.from_bytes(payload[14:16], "big")
-            header_len = 156 if offset == 0 and len(payload) >= 156 else 24
-            frames.setdefault(frame_key, {}).setdefault(offset, payload[header_len:])
+            if packet.quantization_tables:
+                last_quantization_tables = packet.quantization_tables
+            frame = frames.get(packet.frame_key)
+            if frame is None:
+                frame = start_frame(packet, last_quantization_tables)
+                frames[packet.frame_key] = frame
+            add_packet(frame, packet)
             while len(frames) > args.keep:
-                old_key, chunks = frames.popitem(last=False)
-                frame_count += write_frame(args.out_dir, frame_count, old_key, chunks)
+                _, frame = frames.popitem(last=False)
+                frame_count += write_frame(args.out_dir, frame_count, frame)
 
-    for frame_key, chunks in frames.items():
-        frame_count += write_frame(args.out_dir, frame_count, frame_key, chunks)
+    for frame in frames.values():
+        frame_count += write_frame(args.out_dir, frame_count, frame)
 
     print(f"flow={format_flow(flow)}")
     print(f"magic={magic.hex(' ')} packets={packets} frames={frame_count}")
@@ -106,16 +121,19 @@ def iter_flow_payloads(pcap: Path, flow: Flow):
             yield ts, payload
 
 
-def write_frame(out_dir: Path, index: int, frame_key: bytes, chunks: dict[int, bytes]) -> int:
-    if not chunks:
+def write_frame(out_dir: Path, index: int, frame: RtpJpegFrame) -> int:
+    if not frame.chunks:
         return 0
-    size = max(offset + len(data) for offset, data in chunks.items())
-    frame = bytearray(size)
-    for offset, data in chunks.items():
-        frame[offset:offset + len(data)] = data
-    suffix = "jpgish" if frame.find(b"\xff\xd9") >= 0 else "bin"
-    path = out_dir / f"frame_{index:05d}_{frame_key.hex()}.{suffix}"
-    path.write_bytes(frame)
+    jpeg = assemble_jpeg(frame)
+    if jpeg:
+        path = out_dir / f"frame_{index:05d}_{frame.frame_key.hex()}.jpg"
+        path.write_bytes(jpeg)
+        return 1
+
+    scan = assemble_scan_data(frame)
+    suffix = "jpgish" if scan.find(b"\xff\xd9") >= 0 else "bin"
+    path = out_dir / f"frame_{index:05d}_{frame.frame_key.hex()}.{suffix}"
+    path.write_bytes(scan)
     return 1
 
 

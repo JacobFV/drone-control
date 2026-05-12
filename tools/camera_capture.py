@@ -15,6 +15,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from drone_control.actions import DroneAction
 from drone_control.protocols import make_protocol
+from drone_control.rtp_jpeg import (
+    RtpJpegFrame,
+    add_packet,
+    assemble_jpeg,
+    assemble_scan_data,
+    parse_rtp_jpeg_packet,
+    start_frame,
+)
 from drone_control.transport import SO_BINDTODEVICE
 
 from pcap_summary import parse_udp_from_radiotap, read_pcap
@@ -90,7 +98,8 @@ def main() -> int:
     aux_iter = cycle(aux_requests)
     scan_range = parse_port_range(args.drone_port_scan) if args.drone_port_scan else None
     scan_cursor = scan_range[0] if scan_range else 0
-    frames: OrderedDict[bytes, dict[int, bytes]] = OrderedDict()
+    frames: OrderedDict[bytes, RtpJpegFrame] = OrderedDict()
+    last_quantization_tables: bytes | None = None
     frame_count = 0
     packet_count = 0
     byte_count = 0
@@ -172,17 +181,22 @@ def main() -> int:
                 raw.write(struct.pack("!H", source[1]))
                 raw.write(payload)
 
-                frame_key, offset, data = parse_video_packet(payload)
-                if frame_key is None or offset is None or data is None:
+                packet = parse_rtp_jpeg_packet(payload)
+                if packet is None:
                     continue
-                chunks = frames.setdefault(frame_key, {})
-                chunks.setdefault(offset, data)
+                if packet.quantization_tables:
+                    last_quantization_tables = packet.quantization_tables
+                frame = frames.get(packet.frame_key)
+                if frame is None:
+                    frame = start_frame(packet, last_quantization_tables)
+                    frames[packet.frame_key] = frame
+                add_packet(frame, packet)
                 while len(frames) > 4:
-                    old_key, old_chunks = frames.popitem(last=False)
-                    frame_count += write_frame(frame_dir, frame_count, old_key, old_chunks)
+                    _, old_frame = frames.popitem(last=False)
+                    frame_count += write_frame(frame_dir, frame_count, old_frame)
         finally:
-            for frame_key, chunks in frames.items():
-                frame_count += write_frame(frame_dir, frame_count, frame_key, chunks)
+            for frame in frames.values():
+                frame_count += write_frame(frame_dir, frame_count, frame)
             video_sock.close()
             aux_sock.close()
             start_sock.close()
@@ -377,27 +391,21 @@ def load_aux_requests(path: Path) -> list[bytes]:
     return requests or [AUX_REQUEST]
 
 
-def parse_video_packet(payload: bytes) -> tuple[bytes | None, int | None, bytes | None]:
-    if len(payload) < 24:
-        return None, None, None
-    frame_key = payload[4:8]
-    offset = int.from_bytes(payload[14:16], "big")
-    header_len = 156 if offset == 0 and len(payload) >= 156 else 24
-    return frame_key, offset, payload[header_len:]
-
-
-def write_frame(frame_dir: Path, index: int, frame_key: bytes, chunks: dict[int, bytes]) -> int:
-    if not chunks:
+def write_frame(frame_dir: Path, index: int, frame: RtpJpegFrame) -> int:
+    if not frame.chunks:
         return 0
-    size = max(offset + len(data) for offset, data in chunks.items())
-    if size <= 0:
+    jpeg = assemble_jpeg(frame)
+    if jpeg:
+        path = frame_dir / f"frame_{index:05d}_{frame.frame_key.hex()}.jpg"
+        path.write_bytes(jpeg)
+        return 1
+
+    scan = assemble_scan_data(frame)
+    if not scan:
         return 0
-    frame = bytearray(size)
-    for offset, data in chunks.items():
-        frame[offset:offset + len(data)] = data
-    suffix = "jpgish" if frame.find(b"\xff\xd9") >= 0 else "bin"
-    path = frame_dir / f"frame_{index:05d}_{frame_key.hex()}.{suffix}"
-    path.write_bytes(frame)
+    suffix = "jpgish" if scan.find(b"\xff\xd9") >= 0 else "bin"
+    path = frame_dir / f"frame_{index:05d}_{frame.frame_key.hex()}.{suffix}"
+    path.write_bytes(scan)
     return 1
 
 
