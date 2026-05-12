@@ -121,12 +121,15 @@ Tune it with `AXIS_TEST_AMPLITUDE`, `AXIS_TEST_PULSE_SECONDS`, and
 `AXIS_TEST_NEUTRAL_SECONDS`.
 
 `throttle-sweep` is the primary restrained motor test. It sends throttle values
-from `THROTTLE_SWEEP_VALUES` continuously, then ends with `throttle=0`.
+from `THROTTLE_SWEEP_VALUES` continuously, then ends with `throttle=0`. Current
+default values are `160,192,224,240,255`; lift was observed only once the sweep
+reached the higher part of that range.
 
 `mix-test` holds a base throttle and pulses pitch/yaw/roll around it so motor
-mixing can be observed while the props are already spinning. Tune it with
-`MIX_TEST_THROTTLE`, `AXIS_TEST_AMPLITUDE`, `AXIS_TEST_PULSE_SECONDS`, and
-`AXIS_TEST_NEUTRAL_SECONDS`.
+mixing can be observed while the props are already spinning. The default
+`MIX_TEST_THROTTLE` is `224` because `180` and `192` were below hover in live
+tests. Tune it with `MIX_TEST_THROTTLE`, `AXIS_TEST_AMPLITUDE`,
+`AXIS_TEST_PULSE_SECONDS`, and `AXIS_TEST_NEUTRAL_SECONDS`.
 
 For one explicit packet stream, use `manual` with `MANUAL_ROLL`,
 `MANUAL_PITCH`, `MANUAL_THROTTLE`, and `MANUAL_YAW`.
