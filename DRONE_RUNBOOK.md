@@ -93,6 +93,25 @@ For a focused UDP/control summary:
 python3 tools/pcap_summary.py captures/<capture-file>.pcap
 ```
 
+## Camera Capture
+
+The phone-app capture showed camera data as a high-volume UDP stream from
+`192.168.1.1:53796` to the app's local port `32124`. The stream is not plain
+JPEG or H.264 at the UDP payload boundary; packets have a WIFI_8K/Taixin-style
+chunk header with magic `7b 7a 79 78`, frame ids, and offsets.
+
+First-pass capture:
+
+```bash
+tools/drone_camera_session.sh wlP9s9 WIFI_8K-0c5b90 10
+```
+
+This connects to the drone AP, sends the observed stream-start and aux-video
+probes, listens on UDP port `32124`, saves raw UDP payloads, and reassembles
+per-frame chunk binaries under `camera_captures/`. The current tool captures
+and chunks the stream; image decoding still needs the remaining frame-header
+format mapped.
+
 Reconnect manually if needed:
 
 ```bash
