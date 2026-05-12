@@ -119,6 +119,18 @@ only on app startup: connect phone to the drone AP, open the app directly to
 camera view, wait for video, then stop. That should isolate the missing stream
 start/session handshake from stick-control noise.
 
+Capture `drone_monitor_20260512_140736_ch1.pcap` showed two simultaneous video
+streams already active from the first milliseconds of capture:
+
+- `192.168.1.1:52042 -> 192.168.1.101:31364`
+- `192.168.1.1:53214 -> 192.168.1.101:19402`
+
+Both ran for the full 30 seconds at about 14 MB each. Photo/record activity did
+not produce an obvious separate command flow; it appears the app may save from
+the already-running stream locally. The local video ports were dynamic, not the
+older capture's `32124`, so Python capture must reproduce the app's startup
+negotiation rather than hardcode one receive port.
+
 Reconnect manually if needed:
 
 ```bash
