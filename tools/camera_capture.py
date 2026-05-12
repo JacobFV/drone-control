@@ -7,11 +7,16 @@ import struct
 import sys
 import time
 from collections import OrderedDict
+from itertools import cycle
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from drone_control.actions import DroneAction
+from drone_control.protocols import make_protocol
 from drone_control.transport import SO_BINDTODEVICE
+
+from pcap_summary import parse_udp_from_radiotap, read_pcap
 
 
 AUX_REQUEST = bytes.fromhex(
@@ -29,8 +34,13 @@ def main() -> int:
     parser.add_argument("--video-port", type=int, default=32124, help="Local UDP port that receives video.")
     parser.add_argument("--aux-port", type=int, default=32125, help="Local UDP port used by the app for video aux traffic.")
     parser.add_argument("--drone-video-port", type=int, default=53797, help="Drone UDP aux/video-control port observed in captures.")
+    parser.add_argument("--control-port", type=int, default=56906, help="Local UDP port for neutral control packets.")
+    parser.add_argument("--drone-control-port", type=int, default=7099)
+    parser.add_argument("--no-control", action="store_true", help="Do not send neutral control while capturing.")
+    parser.add_argument("--start-local-port", type=int, default=49474, help="Local UDP port used for ef000400 stream-start probes.")
     parser.add_argument("--start-ip", action="append", default=[], help="IP to send ef000400 stream-start probe to. Can repeat.")
     parser.add_argument("--start-port", type=int, default=8800)
+    parser.add_argument("--aux-replay-pcap", type=Path, help="Replay app aux-video requests from a monitor pcap.")
     parser.add_argument("--seconds", type=float, default=10.0)
     parser.add_argument("--out-dir", type=Path, default=Path("camera_captures"))
     parser.add_argument("--no-bind-device", action="store_true")
@@ -52,20 +62,35 @@ def main() -> int:
     aux_sock.setblocking(False)
 
     start_sock = make_udp_socket(args.iface, bind_device)
-    start_sock.bind(("", 0))
+    start_sock.bind(("", args.start_local_port))
     start_sock.setblocking(False)
 
+    control_sock = make_udp_socket(args.iface, bind_device)
+    control_sock.bind(("", args.control_port))
+    control_protocol = make_protocol("wifi_8k_prefixed_short")
+    neutral_packet = control_protocol.build(DroneAction.neutral())
+    keepalive_packet = getattr(control_protocol, "keepalive", lambda: b"")()
+
     start_ips = args.start_ip or ["192.168.169.1", args.drone_ip]
+    default_pcap = Path("captures/drone_monitor_20260512_110655_ch1.pcap")
+    aux_replay_pcap = args.aux_replay_pcap or (default_pcap if default_pcap.exists() else None)
+    aux_requests = load_aux_requests(aux_replay_pcap) if aux_replay_pcap else [AUX_REQUEST]
+    aux_iter = cycle(aux_requests)
     frames: OrderedDict[bytes, dict[int, bytes]] = OrderedDict()
     frame_count = 0
     packet_count = 0
     byte_count = 0
     last_probe = 0.0
+    last_control = 0.0
+    last_keepalive = 0.0
     deadline = time.monotonic() + args.seconds
 
     print(f"Video socket: 0.0.0.0:{args.video_port}")
     print(f"Aux socket:   0.0.0.0:{args.aux_port} -> {args.drone_ip}:{args.drone_video_port}")
-    print(f"Start probe:  {start_ips} port={args.start_port}")
+    if not args.no_control:
+        print(f"Control:      0.0.0.0:{args.control_port} -> {args.drone_ip}:{args.drone_control_port}")
+    print(f"Aux requests: {len(aux_requests)}" + (f" from {aux_replay_pcap}" if aux_replay_pcap else " built-in"))
+    print(f"Start probe:  0.0.0.0:{args.start_local_port} -> {start_ips} port={args.start_port}")
     print(f"Raw output:   {raw_path}")
     print(f"Frame output: {frame_dir}")
 
@@ -75,8 +100,18 @@ def main() -> int:
                 now = time.monotonic()
                 if now - last_probe >= 0.5:
                     send_start_probes(start_sock, start_ips, args.start_port)
-                    aux_sock.sendto(AUX_REQUEST, (args.drone_ip, args.drone_video_port))
+                    for _ in range(min(4, len(aux_requests))):
+                        aux_sock.sendto(next(aux_iter), (args.drone_ip, args.drone_video_port))
                     last_probe = now
+
+                if not args.no_control and now - last_control >= 0.05:
+                    control_sock.sendto(neutral_packet, (args.drone_ip, args.drone_control_port))
+                    last_control = now
+                if not args.no_control and keepalive_packet and now - last_keepalive >= 1.0:
+                    control_sock.sendto(keepalive_packet, (args.drone_ip, args.drone_control_port))
+                    last_keepalive = now
+
+                drain_aux_replies(aux_sock)
 
                 try:
                     payload, source = video_sock.recvfrom(65535)
@@ -105,6 +140,7 @@ def main() -> int:
             video_sock.close()
             aux_sock.close()
             start_sock.close()
+            control_sock.close()
 
     print(f"Captured packets={packet_count} bytes={byte_count} frames={frame_count}")
     return 0 if packet_count else 1
@@ -124,6 +160,30 @@ def send_start_probes(sock: socket.socket, ips: list[str], port: int) -> None:
             sock.sendto(STREAM_START, (ip, port))
         except OSError as exc:
             print(f"start probe error {ip}:{port}: {exc}")
+
+
+def drain_aux_replies(sock: socket.socket) -> None:
+    while True:
+        try:
+            sock.recvfrom(4096)
+        except BlockingIOError:
+            return
+
+
+def load_aux_requests(path: Path) -> list[bytes]:
+    requests: list[bytes] = []
+    seen = set()
+    for frame in read_pcap(path):
+        parsed = parse_udp_from_radiotap(frame)
+        if parsed is None:
+            continue
+        src, sport, dst, dport, payload = parsed
+        if src == "192.168.1.101" and sport == 32125 and dst == "192.168.1.1" and dport == 53797:
+            if payload in seen:
+                continue
+            seen.add(payload)
+            requests.append(payload)
+    return requests or [AUX_REQUEST]
 
 
 def parse_video_packet(payload: bytes) -> tuple[bytes | None, int | None, bytes | None]:

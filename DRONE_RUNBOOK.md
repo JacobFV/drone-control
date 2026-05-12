@@ -112,6 +112,13 @@ per-frame chunk binaries under `camera_captures/`. The current tool captures
 and chunks the stream; image decoding still needs the remaining frame-header
 format mapped.
 
+Autonomous camera-start tests on the laptop currently capture zero packets,
+even when replaying the app's captured aux-video request sequence and sending
+neutral control packets. Next camera step is a fresh monitor capture focused
+only on app startup: connect phone to the drone AP, open the app directly to
+camera view, wait for video, then stop. That should isolate the missing stream
+start/session handshake from stick-control noise.
+
 Reconnect manually if needed:
 
 ```bash
