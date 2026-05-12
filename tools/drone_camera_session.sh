@@ -14,6 +14,11 @@ fi
 
 HOME_SSID="${HOME_SSID:-CircularEconomy}"
 DRONE_IP="${DRONE_IP:-192.168.1.1}"
+CAMERA_LOCAL_IP="${CAMERA_LOCAL_IP:-}"
+CAMERA_VIDEO_PORT="${CAMERA_VIDEO_PORT:-}"
+CAMERA_AUX_PORT="${CAMERA_AUX_PORT:-}"
+CAMERA_START_LOCAL_PORT="${CAMERA_START_LOCAL_PORT:-}"
+CAMERA_CONTROL_PORT="${CAMERA_CONTROL_PORT:-}"
 CAMERA_OUT_DIR="${CAMERA_OUT_DIR:-$ROOT_DIR/camera_captures}"
 DRONE_CAMERA_PORT_SCAN="${DRONE_CAMERA_PORT_SCAN:-}"
 BIND_DEVICE="${BIND_DEVICE:-0}"
@@ -34,6 +39,13 @@ RECONNECT_TARGET="${PREV_CONNECTION:-$HOME_SSID}"
 
 reconnect_home() {
   local status=$?
+  if [[ -n "$CAMERA_LOCAL_IP" ]]; then
+    if sudo -n ip addr del "$CAMERA_LOCAL_IP/24" dev "$IFACE" 2>/dev/null; then
+      true
+    elif [[ -n "${DRONE_SUDO_PASS:-}" ]]; then
+      printf '%s\n' "$DRONE_SUDO_PASS" | sudo -S -p '' ip addr del "$CAMERA_LOCAL_IP/24" dev "$IFACE" >/dev/null 2>&1 || true
+    fi
+  fi
   echo
   echo "Reconnecting $IFACE to ${RECONNECT_TARGET}..."
   nmcli dev wifi connect "$RECONNECT_TARGET" ifname "$IFACE" >/dev/null 2>&1 \
@@ -63,6 +75,15 @@ echo "Interface: $IFACE"
 echo "Drone SSID: $DRONE_SSID"
 echo "Reconnect target: $RECONNECT_TARGET"
 echo "Drone IP: $DRONE_IP"
+if [[ -n "$CAMERA_LOCAL_IP" ]]; then
+  echo "Camera local IP: $CAMERA_LOCAL_IP"
+fi
+if [[ -n "$CAMERA_VIDEO_PORT" ]]; then
+  echo "Camera video port: $CAMERA_VIDEO_PORT"
+fi
+if [[ -n "$CAMERA_AUX_PORT" ]]; then
+  echo "Camera aux port: $CAMERA_AUX_PORT"
+fi
 echo "Duration: ${DURATION}s"
 echo
 
@@ -75,6 +96,20 @@ echo
 echo "Interface after drone connect:"
 ip -brief addr show "$IFACE"
 
+if [[ -n "$CAMERA_LOCAL_IP" ]]; then
+  echo
+  echo "Adding camera local IP $CAMERA_LOCAL_IP/24..."
+  if sudo -n ip addr add "$CAMERA_LOCAL_IP/24" dev "$IFACE" 2>/dev/null; then
+    true
+  elif [[ -n "${DRONE_SUDO_PASS:-}" ]]; then
+    printf '%s\n' "$DRONE_SUDO_PASS" | sudo -S -p '' ip addr add "$CAMERA_LOCAL_IP/24" dev "$IFACE" >/dev/null
+  else
+    echo "error: CAMERA_LOCAL_IP requires sudo" >&2
+    exit 1
+  fi
+  ip -brief addr show "$IFACE"
+fi
+
 echo
 echo "Starting camera capture..."
 ARGS=(
@@ -86,6 +121,21 @@ ARGS=(
 )
 if [[ -n "$DRONE_CAMERA_PORT_SCAN" ]]; then
   ARGS+=(--drone-port-scan "$DRONE_CAMERA_PORT_SCAN")
+fi
+if [[ -n "$CAMERA_LOCAL_IP" ]]; then
+  ARGS+=(--local-ip "$CAMERA_LOCAL_IP")
+fi
+if [[ -n "$CAMERA_VIDEO_PORT" ]]; then
+  ARGS+=(--video-port "$CAMERA_VIDEO_PORT")
+fi
+if [[ -n "$CAMERA_AUX_PORT" ]]; then
+  ARGS+=(--aux-port "$CAMERA_AUX_PORT")
+fi
+if [[ -n "$CAMERA_START_LOCAL_PORT" ]]; then
+  ARGS+=(--start-local-port "$CAMERA_START_LOCAL_PORT")
+fi
+if [[ -n "$CAMERA_CONTROL_PORT" ]]; then
+  ARGS+=(--control-port "$CAMERA_CONTROL_PORT")
 fi
 if [[ "$BIND_DEVICE" != "1" ]]; then
   ARGS+=(--no-bind-device)

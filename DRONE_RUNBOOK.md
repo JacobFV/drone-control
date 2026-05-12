@@ -110,6 +110,20 @@ Observed stream pairs:
 The local and drone-side ports are dynamic, but the aux port is consistently
 the corresponding video port plus one on both sides.
 
+The dynamic ports are negotiated over RTSP on TCP port `7070`:
+
+```text
+OPTIONS  rtsp://192.168.1.1:7070/webcam
+DESCRIBE rtsp://192.168.1.1:7070/webcam
+SETUP    rtsp://192.168.1.1:7070/webcam/track0
+         Transport: RTP/AVP/UDP;unicast;client_port=<video>-<aux>
+PLAY     rtsp://192.168.1.1:7070/webcam/
+```
+
+The drone responds to `SETUP` with `server_port=<video>-<aux>` and a session
+id. The app then sends the small UDP primer packets and `PLAY`; the drone starts
+RTP/JPEG-like UDP video shortly after.
+
 For a camera-focused summary:
 
 ```bash
@@ -134,12 +148,9 @@ tools/drone_camera_session.sh wlP9s9 WIFI_8K-0c5b90 10
 ```
 
 This connects to the drone AP, sends the observed stream-start and aux-video
-probes, listens on UDP port `32124`, saves raw UDP payloads, and reassembles
-per-frame chunk binaries under `camera_captures/`.
-
-Autonomous camera-start tests on the laptop currently capture zero packets,
-even when replaying the app's captured aux-video request sequence, sending
-neutral control packets, and probing the observed high camera ports.
+probes, performs RTSP `OPTIONS`/`DESCRIBE`/`SETUP`/`PLAY`, listens on UDP port
+`32124`, saves raw UDP payloads, and reassembles per-frame chunk binaries under
+`camera_captures/`.
 
 The startup capture shows this ordering for `drone_monitor_20260512_141413_ch1.pcap`:
 
@@ -148,20 +159,30 @@ The startup capture shows this ordering for `drone_monitor_20260512_141413_ch1.p
 - `4.520s`: phone begins `ef 00 04 00` probes to `192.168.169.1:8800`
 - `4.565s`: drone starts video from `52612` to `12186`
 
-The unresolved piece is how the app learns or selects the drone-side dynamic
-camera port pair before sending those first two packets. Until that is mapped,
-the Python live camera capture can parse a stream once one is flowing, but it
-cannot reliably start the stream by itself.
+Capture `drone_monitor_20260512_145202_ch1.pcap` exposed the RTSP negotiation:
+the app requested `client_port=33012-33013`, the drone replied
+`server_port=53796-53797`, and video began immediately after `PLAY`.
 
-Experimental live scan:
+Autonomous live camera startup is now confirmed working:
+
+```text
+RTSP server ports: video=53796 aux=53797
+Captured packets=1936 bytes=2490879 frames=170
+```
+
+The remaining camera work is display/encoding: extracted frame chunks contain
+RTP/JPEG-like image payloads, but image display still needs a proper RTP/JPEG
+depacketizer or a handoff to ffmpeg/OpenCV's RTSP reader.
+
+Optional experimental live scan, no longer needed for normal capture:
 
 ```bash
 DRONE_CAMERA_PORT_SCAN=52000:54000:2 \
   tools/drone_camera_session.sh wlP9s9 WIFI_8K-0c5b90 10
 ```
 
-On 2026-05-12, a narrow scan over `52600:52624:2` and a broader scan over
-`52000:54000:2` still produced `Captured packets=0`.
+On 2026-05-12, before RTSP was implemented, a narrow scan over `52600:52624:2`
+and a broader scan over `52000:54000:2` still produced `Captured packets=0`.
 
 Capture `drone_monitor_20260512_140736_ch1.pcap` showed two simultaneous video
 streams already active from the first milliseconds of capture:

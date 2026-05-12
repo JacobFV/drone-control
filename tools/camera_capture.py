@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import socket
 import struct
 import sys
@@ -31,7 +32,10 @@ STREAM_START = b"\xef\x00\x04\x00"
 def main() -> int:
     parser = argparse.ArgumentParser(description="Capture the WIFI_8K UDP camera stream.")
     parser.add_argument("--iface", required=True)
+    parser.add_argument("--local-ip", default="", help="Optional local source IP to bind UDP sockets to.")
     parser.add_argument("--drone-ip", default="192.168.1.1")
+    parser.add_argument("--rtsp-port", type=int, default=7070)
+    parser.add_argument("--no-rtsp", action="store_true", help="Skip RTSP OPTIONS/DESCRIBE/SETUP/PLAY startup.")
     parser.add_argument("--video-port", type=int, default=32124, help="Local UDP port that receives video.")
     parser.add_argument("--aux-port", type=int, default=32125, help="Local UDP port used by the app for video aux traffic.")
     parser.add_argument("--drone-video-port", type=int, default=53797, help="Drone UDP aux/video-control port observed in captures.")
@@ -59,23 +63,25 @@ def main() -> int:
     frame_dir.mkdir(parents=True, exist_ok=True)
 
     bind_device = not args.no_bind_device
+    local_ip = args.local_ip or ""
     video_sock = make_udp_socket(args.iface, bind_device)
-    video_sock.bind(("", args.video_port))
+    video_sock.bind((local_ip, args.video_port))
     video_sock.setblocking(False)
 
     aux_sock = make_udp_socket(args.iface, bind_device)
-    aux_sock.bind(("", args.aux_port))
+    aux_sock.bind((local_ip, args.aux_port))
     aux_sock.setblocking(False)
 
     start_sock = make_udp_socket(args.iface, bind_device)
-    start_sock.bind(("", args.start_local_port))
+    start_sock.bind((local_ip, args.start_local_port))
     start_sock.setblocking(False)
 
     control_sock = make_udp_socket(args.iface, bind_device)
-    control_sock.bind(("", args.control_port))
+    control_sock.bind((local_ip, args.control_port))
     control_protocol = make_protocol("wifi_8k_prefixed_short")
     neutral_packet = control_protocol.build(DroneAction.neutral())
     keepalive_packet = getattr(control_protocol, "keepalive", lambda: b"")()
+    rtsp_sock: socket.socket | None = None
 
     start_ips = args.start_ip or ["192.168.169.1", args.drone_ip]
     default_pcap = Path("captures/drone_monitor_20260512_110655_ch1.pcap")
@@ -94,24 +100,41 @@ def main() -> int:
     last_keepalive = 0.0
     deadline = time.monotonic() + args.seconds
 
-    print(f"Video socket: 0.0.0.0:{args.video_port}")
-    print(f"Aux socket:   0.0.0.0:{args.aux_port} -> {args.drone_ip}:{args.drone_video_port}")
+    bind_label = args.local_ip or "0.0.0.0"
+    print(f"Video socket: {bind_label}:{args.video_port}")
+    print(f"Aux socket:   {bind_label}:{args.aux_port} -> {args.drone_ip}:{args.drone_video_port}")
     if args.drone_port_scan:
         print(f"Port scan:    {args.drone_port_scan} video ports; aux is video+1")
     if not args.no_control:
-        print(f"Control:      0.0.0.0:{args.control_port} -> {args.drone_ip}:{args.drone_control_port}")
+        print(f"Control:      {bind_label}:{args.control_port} -> {args.drone_ip}:{args.drone_control_port}")
     print(f"Aux requests: {len(aux_requests)}" + (f" from {aux_replay_pcap}" if aux_replay_pcap else " built-in"))
-    print(f"Start probe:  0.0.0.0:{args.start_local_port} -> {start_ips} port={args.start_port}")
+    print(f"Start probe:  {bind_label}:{args.start_local_port} -> {start_ips} port={args.start_port}")
     print(f"Raw output:   {raw_path}")
     print(f"Frame output: {frame_dir}")
 
     with raw_path.open("wb") as raw:
         try:
+            if not args.no_rtsp:
+                rtsp_sock, server_ports = rtsp_start_stream(
+                    args.iface,
+                    bind_device,
+                    local_ip,
+                    args.drone_ip,
+                    args.rtsp_port,
+                    args.video_port,
+                    args.aux_port,
+                    video_sock,
+                    aux_sock,
+                )
+                if server_ports:
+                    args.drone_video_port = server_ports[1]
+                    print(f"RTSP server ports: video={server_ports[0]} aux={server_ports[1]}")
+
             while time.monotonic() < deadline:
                 now = time.monotonic()
                 if now - last_probe >= 0.5:
-                    send_start_probes(start_sock, start_ips, args.start_port)
                     send_camera_init(video_sock, aux_sock, args.drone_ip, args.drone_video_port - 1)
+                    send_start_probes(start_sock, start_ips, args.start_port)
                     for _ in range(min(4, len(aux_requests))):
                         aux_sock.sendto(next(aux_iter), (args.drone_ip, args.drone_video_port))
                     last_probe = now
@@ -164,6 +187,8 @@ def main() -> int:
             aux_sock.close()
             start_sock.close()
             control_sock.close()
+            if rtsp_sock is not None:
+                rtsp_sock.close()
 
     print(f"Captured packets={packet_count} bytes={byte_count} frames={frame_count}")
     return 0 if packet_count else 1
@@ -175,6 +200,105 @@ def make_udp_socket(iface: str, bind_device: bool) -> socket.socket:
     if bind_device:
         sock.setsockopt(socket.SOL_SOCKET, SO_BINDTODEVICE, iface.encode() + b"\0")
     return sock
+
+
+def make_tcp_socket(iface: str, bind_device: bool, local_ip: str) -> socket.socket:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    if bind_device:
+        sock.setsockopt(socket.SOL_SOCKET, SO_BINDTODEVICE, iface.encode() + b"\0")
+    if local_ip:
+        sock.bind((local_ip, 0))
+    sock.settimeout(2.0)
+    return sock
+
+
+def rtsp_start_stream(
+    iface: str,
+    bind_device: bool,
+    local_ip: str,
+    drone_ip: str,
+    rtsp_port: int,
+    video_port: int,
+    aux_port: int,
+    video_sock: socket.socket,
+    aux_sock: socket.socket,
+) -> tuple[socket.socket | None, tuple[int, int] | None]:
+    try:
+        sock = make_tcp_socket(iface, bind_device, local_ip)
+        sock.connect((drone_ip, rtsp_port))
+        base = f"rtsp://{drone_ip}:{rtsp_port}/webcam"
+        send_rtsp(sock, f"OPTIONS {base} RTSP/1.0\r\nCSeq: 1\r\nUser-Agent: ijkplayer\r\n\r\n")
+        read_rtsp_response(sock)
+        send_rtsp(
+            sock,
+            f"DESCRIBE {base} RTSP/1.0\r\n"
+            "Accept: application/sdp\r\n"
+            "CSeq: 2\r\n"
+            "User-Agent: ijkplayer\r\n\r\n",
+        )
+        read_rtsp_response(sock)
+        send_rtsp(
+            sock,
+            f"SETUP {base}/track0 RTSP/1.0\r\n"
+            f"Transport: RTP/AVP/UDP;unicast;client_port={video_port}-{aux_port}\r\n"
+            "CSeq: 3\r\n"
+            "User-Agent: ijkplayer\r\n\r\n",
+        )
+        setup_response = read_rtsp_response(sock)
+        server_ports = parse_server_ports(setup_response)
+        session = parse_session(setup_response)
+        if server_ports:
+            send_camera_init(video_sock, aux_sock, drone_ip, server_ports[0])
+        session_header = f"Session: {session}\r\n" if session else ""
+        send_rtsp(
+            sock,
+            f"PLAY {base}/ RTSP/1.0\r\n"
+            "Range: npt=0.000-\r\n"
+            "CSeq: 4\r\n"
+            "User-Agent: ijkplayer\r\n"
+            f"{session_header}\r\n",
+        )
+        read_rtsp_response(sock)
+        return sock, server_ports
+    except OSError as exc:
+        print(f"RTSP startup failed: {exc}")
+        return None, None
+
+
+def send_rtsp(sock: socket.socket, request: str) -> None:
+    sock.sendall(request.encode("ascii"))
+
+
+def read_rtsp_response(sock: socket.socket) -> str:
+    data = bytearray()
+    while b"\r\n\r\n" not in data:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        data.extend(chunk)
+    header, _, rest = bytes(data).partition(b"\r\n\r\n")
+    match = re.search(rb"(?im)^Content-Length:\s*(\d+)\s*$", header)
+    if match:
+        remaining = int(match.group(1)) - len(rest)
+        while remaining > 0:
+            chunk = sock.recv(remaining)
+            if not chunk:
+                break
+            data.extend(chunk)
+            remaining -= len(chunk)
+    return bytes(data).decode("ascii", errors="replace")
+
+
+def parse_server_ports(response: str) -> tuple[int, int] | None:
+    match = re.search(r"server_port=(\d+)-(\d+)", response, re.IGNORECASE)
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
+def parse_session(response: str) -> str:
+    match = re.search(r"(?im)^Session:\s*([^;\r\n]+)", response)
+    return match.group(1).strip() if match else ""
 
 
 def send_start_probes(sock: socket.socket, ips: list[str], port: int) -> None:
