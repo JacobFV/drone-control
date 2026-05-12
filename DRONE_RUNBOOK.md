@@ -106,6 +106,7 @@ tools/drone_control_session.sh wlP9s9 WIFI_8K-0c5b90 neutral 5
 tools/drone_control_session.sh wlP9s9 WIFI_8K-0c5b90 axis-test
 tools/drone_control_session.sh wlP9s9 WIFI_8K-0c5b90 throttle-sweep
 tools/drone_control_session.sh wlP9s9 WIFI_8K-0c5b90 mix-test
+tools/drone_control_session.sh wlP9s9 WIFI_8K-0c5b90 interactive
 ```
 
 That wrapper handles the Wi-Fi cutover, runs the command locally while the
@@ -133,6 +134,20 @@ tests. Tune it with `MIX_TEST_THROTTLE`, `AXIS_TEST_AMPLITUDE`,
 
 For one explicit packet stream, use `manual` with `MANUAL_ROLL`,
 `MANUAL_PITCH`, `MANUAL_THROTTLE`, and `MANUAL_YAW`.
+
+`interactive` opens a live keyboard loop:
+
+- Up/Down adjust throttle.
+- Left/Right adjust yaw.
+- `W`/`S` adjust pitch.
+- `A`/`D` adjust roll.
+- Space sends `throttle=0`.
+- `C` centers roll/pitch/yaw.
+- `N` returns all sticks to neutral.
+- `+`/`-` adjust the step size.
+- Esc, Enter, or `Q` exits and sends final `throttle=0` packets.
+
+Tune it with `INTERACTIVE_STEP` and `INTERACTIVE_START_THROTTLE`.
 
 Direct command if already connected to the drone AP:
 

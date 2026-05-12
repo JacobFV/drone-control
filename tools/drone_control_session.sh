@@ -24,6 +24,8 @@ AXIS_TEST_NEUTRAL_SECONDS="${AXIS_TEST_NEUTRAL_SECONDS:-0.8}"
 THROTTLE_SWEEP_VALUES="${THROTTLE_SWEEP_VALUES:-160,192,224,240,255}"
 THROTTLE_SWEEP_STEP_SECONDS="${THROTTLE_SWEEP_STEP_SECONDS:-0.8}"
 MIX_TEST_THROTTLE="${MIX_TEST_THROTTLE:-224}"
+INTERACTIVE_STEP="${INTERACTIVE_STEP:-8}"
+INTERACTIVE_START_THROTTLE="${INTERACTIVE_START_THROTTLE:-0}"
 MANUAL_ROLL="${MANUAL_ROLL:-128}"
 MANUAL_PITCH="${MANUAL_PITCH:-128}"
 MANUAL_THROTTLE="${MANUAL_THROTTLE:-128}"
@@ -32,7 +34,7 @@ BIND_DEVICE="${BIND_DEVICE:-0}"
 
 if [[ -z "$DRONE_SSID" ]]; then
   echo "usage: $0 IFACE DRONE_SSID [COMMAND] [SECONDS]" >&2
-  echo "commands: probe, neutral, axis-test, throttle-sweep, mix-test, manual, calibrate, takeoff, land, stop" >&2
+  echo "commands: probe, neutral, interactive, axis-test, throttle-sweep, mix-test, manual, calibrate, takeoff, land, stop" >&2
   echo "example: $0 wlP9s9 WIFI_8K-0c5b90 neutral 5" >&2
   echo >&2
   echo "Set HOME_SSID, DRONE_IP, DRONE_PORT, DRONE_PROTOCOL, DRONE_HZ, BIND_DEVICE, or DRONE_SUDO_PASS to override defaults." >&2
@@ -87,6 +89,9 @@ if [[ "$COMMAND" == "throttle-sweep" || "$COMMAND" == "throttle_sweep" ]]; then
 fi
 if [[ "$COMMAND" == "mix-test" || "$COMMAND" == "mix_test" ]]; then
   echo "Mix test: base_throttle=$MIX_TEST_THROTTLE amplitude=$AXIS_TEST_AMPLITUDE pulse=${AXIS_TEST_PULSE_SECONDS}s neutral=${AXIS_TEST_NEUTRAL_SECONDS}s"
+fi
+if [[ "$COMMAND" == "interactive" ]]; then
+  echo "Interactive: start_throttle=$INTERACTIVE_START_THROTTLE step=$INTERACTIVE_STEP"
 fi
 if [[ "$COMMAND" == "manual" ]]; then
   echo "Manual action: roll=$MANUAL_ROLL pitch=$MANUAL_PITCH throttle=$MANUAL_THROTTLE yaw=$MANUAL_YAW"
@@ -144,6 +149,8 @@ else
     --ramp-values "$THROTTLE_SWEEP_VALUES"
     --ramp-step-seconds "$THROTTLE_SWEEP_STEP_SECONDS"
     --mix-throttle "$MIX_TEST_THROTTLE"
+    --interactive-step "$INTERACTIVE_STEP"
+    --interactive-start-throttle "$INTERACTIVE_START_THROTTLE"
     --roll "$MANUAL_ROLL"
     --pitch "$MANUAL_PITCH"
     --throttle "$MANUAL_THROTTLE"

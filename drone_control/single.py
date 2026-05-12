@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import os
+import select
 import signal
+import termios
 import time
+import tty
+from collections.abc import Callable
 from collections.abc import Iterable
 
 from .actions import DroneAction
@@ -23,6 +28,7 @@ COMMANDS = [
     "throttle_sweep",
     "mix-test",
     "mix_test",
+    "interactive",
     "manual",
 ]
 
@@ -105,6 +111,10 @@ def repeated_action_steps(action: DroneAction, seconds: float) -> Iterable[tuple
     yield "command", action, seconds
 
 
+def clamp_axis(value: int) -> int:
+    return max(0, min(255, value))
+
+
 def parse_int_list(value: str) -> list[int]:
     result = []
     for part in value.split(","):
@@ -115,6 +125,121 @@ def parse_int_list(value: str) -> list[int]:
     if not result:
         raise ValueError("expected at least one ramp value")
     return result
+
+
+def read_key(fd: int) -> str | None:
+    ready, _, _ = select.select([fd], [], [], 0)
+    if not ready:
+        return None
+    first = os.read(fd, 1)
+    if not first:
+        return None
+    if first == b"\x1b":
+        time.sleep(0.01)
+        ready, _, _ = select.select([fd], [], [], 0)
+        if ready:
+            rest = os.read(fd, 8)
+            return (first + rest).decode(errors="ignore")
+    return first.decode(errors="ignore")
+
+
+def send_action(
+    protocol: object,
+    link: UdpDroneLink | None,
+    action: DroneAction,
+    dry_run: bool,
+    count: int,
+) -> None:
+    packet = protocol.build(action.sanitized())
+    if dry_run:
+        if count % 20 == 0:
+            print(packet.hex(" "))
+    else:
+        assert link is not None
+        link.send(packet)
+
+
+def interactive_loop(
+    protocol: object,
+    link: UdpDroneLink | None,
+    args: argparse.Namespace,
+    interval: float,
+    is_running: Callable[[], bool],
+) -> int:
+    action = DroneAction(throttle=clamp_axis(args.interactive_start_throttle))
+    step = max(1, min(64, args.interactive_step))
+    keepalive = getattr(protocol, "keepalive", None)
+    next_keepalive = time.monotonic()
+    count = 0
+
+    with open("/dev/tty", "rb+", buffering=0) as terminal:
+        fd = terminal.fileno()
+        old_attrs = termios.tcgetattr(fd)
+        tty.setcbreak(fd)
+        try:
+            os.write(
+                fd,
+                (
+                    "\nInteractive controls:\n"
+                    "  Up/Down: throttle +/- step\n"
+                    "  Left/Right: yaw +/- step\n"
+                    "  W/S: pitch +/- step    A/D: roll +/- step\n"
+                    "  C: center roll/pitch/yaw    N: neutral all sticks\n"
+                    "  Space: motors off throttle=0    +/-: adjust step\n"
+                    "  Esc, Enter, or Q: stop and exit\n\n"
+                ).encode(),
+            )
+            while is_running():
+                key = read_key(fd)
+                if key in {"\x1b", "\r", "\n", "q", "Q"}:
+                    break
+                if key == "\x1b[A":
+                    action.throttle = clamp_axis(action.throttle + step)
+                elif key == "\x1b[B":
+                    action.throttle = clamp_axis(action.throttle - step)
+                elif key == "\x1b[C":
+                    action.yaw = clamp_axis(action.yaw + step)
+                elif key == "\x1b[D":
+                    action.yaw = clamp_axis(action.yaw - step)
+                elif key in {"w", "W"}:
+                    action.pitch = clamp_axis(action.pitch + step)
+                elif key in {"s", "S"}:
+                    action.pitch = clamp_axis(action.pitch - step)
+                elif key in {"d", "D"}:
+                    action.roll = clamp_axis(action.roll + step)
+                elif key in {"a", "A"}:
+                    action.roll = clamp_axis(action.roll - step)
+                elif key in {"c", "C"}:
+                    action.roll = action.pitch = action.yaw = 128
+                elif key in {"n", "N"}:
+                    action = DroneAction.neutral()
+                elif key == " ":
+                    action = DroneAction(throttle=0)
+                elif key in {"+", "="}:
+                    step = min(64, step + 1)
+                elif key in {"-", "_"}:
+                    step = max(1, step - 1)
+
+                send_action(protocol, link, action, args.dry_run, count)
+                if not args.dry_run and callable(keepalive) and time.monotonic() >= next_keepalive:
+                    assert link is not None
+                    link.send(keepalive())
+                    next_keepalive = time.monotonic() + 1.0
+                count += 1
+                os.write(
+                    fd,
+                    (
+                        "\r"
+                        f"roll={action.roll:3d} pitch={action.pitch:3d} "
+                        f"throttle={action.throttle:3d} yaw={action.yaw:3d} "
+                        f"step={step:2d}   "
+                    ).encode(),
+                )
+                time.sleep(interval)
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
+            os.write(fd, b"\n")
+    return count
 
 
 def main() -> int:
@@ -132,6 +257,8 @@ def main() -> int:
     parser.add_argument("--ramp-values", default="160,192,224,240,255", help="Comma-separated throttle bytes for throttle-sweep.")
     parser.add_argument("--ramp-step-seconds", type=float, default=0.8, help="Seconds per throttle-sweep ramp value.")
     parser.add_argument("--mix-throttle", type=int, default=224, help="Base throttle byte for mix-test.")
+    parser.add_argument("--interactive-step", type=int, default=8, help="Byte increment per interactive key press.")
+    parser.add_argument("--interactive-start-throttle", type=int, default=0, help="Starting throttle byte for interactive mode.")
     parser.add_argument("--roll", type=int, default=128, help="Manual command roll byte.")
     parser.add_argument("--pitch", type=int, default=128, help="Manual command pitch byte.")
     parser.add_argument("--throttle", type=int, default=128, help="Manual command throttle byte.")
@@ -165,6 +292,8 @@ def main() -> int:
         steps = motor_ramp_steps(parse_int_list(args.ramp_values), args.ramp_step_seconds, args.neutral_seconds)
     elif args.command in {"mix-test", "mix_test"}:
         steps = mix_test_steps(args.mix_throttle, args.test_amplitude, args.pulse_seconds, args.neutral_seconds)
+    elif args.command == "interactive":
+        steps = []
     elif args.command == "manual":
         action = DroneAction(roll=args.roll, pitch=args.pitch, throttle=args.throttle, yaw=args.yaw).sanitized()
         steps = repeated_action_steps(action, args.seconds)
@@ -176,27 +305,30 @@ def main() -> int:
     keepalive = getattr(protocol, "keepalive", None)
     next_keepalive = time.monotonic()
     try:
-        for label, action, seconds in steps:
-            if not running:
-                break
-            deadline = time.monotonic() + seconds if seconds > 0 else None
-            print(
-                f"step={label} seconds={seconds:.2f} "
-                f"roll={action.roll} pitch={action.pitch} throttle={action.throttle} yaw={action.yaw}"
-            )
-            while running and (deadline is None or time.monotonic() < deadline):
-                packet = protocol.build(action)
-                if args.dry_run:
-                    if count % max(1, int(args.hz)) == 0:
-                        print(packet.hex(" "))
-                else:
-                    assert link is not None
-                    link.send(packet)
-                    if callable(keepalive) and time.monotonic() >= next_keepalive:
-                        link.send(keepalive())
-                        next_keepalive = time.monotonic() + 1.0
-                count += 1
-                time.sleep(interval)
+        if args.command == "interactive":
+            count = interactive_loop(protocol, link, args, interval, lambda: running)
+        else:
+            for label, action, seconds in steps:
+                if not running:
+                    break
+                deadline = time.monotonic() + seconds if seconds > 0 else None
+                print(
+                    f"step={label} seconds={seconds:.2f} "
+                    f"roll={action.roll} pitch={action.pitch} throttle={action.throttle} yaw={action.yaw}"
+                )
+                while running and (deadline is None or time.monotonic() < deadline):
+                    packet = protocol.build(action)
+                    if args.dry_run:
+                        if count % max(1, int(args.hz)) == 0:
+                            print(packet.hex(" "))
+                    else:
+                        assert link is not None
+                        link.send(packet)
+                        if callable(keepalive) and time.monotonic() >= next_keepalive:
+                            link.send(keepalive())
+                            next_keepalive = time.monotonic() + 1.0
+                    count += 1
+                    time.sleep(interval)
     finally:
         if link is not None:
             for _ in range(5):
