@@ -174,6 +174,37 @@ frame_00018_0528a40f.jpg: JPEG image data, baseline, precision 8, 640x384, compo
 The remaining camera work is convenience display/encoding, such as writing a
 preview loop, MJPEG file, or encoded video from the JPEG frame sequence.
 
+For a smoothed frame sequence:
+
+```bash
+tools/smooth_camera_frames.py camera_captures/pcap_20260512_145202_jpeg_test \
+  --out-dir camera_captures/pcap_20260512_145202_smooth_test \
+  --compare-index 13
+```
+
+This adds a one-frame-latency temporal layer over the decoded JPEGs. It replaces
+pixels that are strong outliers versus both adjacent frames when the adjacent
+frames agree, then applies a small exponential moving average. The output
+directory contains smoothed `.jpg` frames, `metrics.json`, `metrics.txt`, and a
+raw/smoothed comparison sheet.
+
+On `drone_monitor_20260512_145202_ch1.pcap`, this first-pass smoother produced:
+
+```text
+frames=326
+temporal_mae: raw=10.922 smooth=7.463 delta=-31.7%
+speckle_mae:  raw=0.746 smooth=0.708 delta=-5.0%
+raw_to_smooth_mae=2.462
+replaced_pixel_pct=1.394%
+```
+
+Useful metrics:
+
+- `temporal_mae`: average frame-to-frame pixel change; lower means less jitter/flicker.
+- `speckle_mae`: average difference from a 3x3 median-filtered version of the same frame; lower means less isolated high-frequency noise.
+- `raw_to_smooth_mae`: how much the smoother changed the image; low values mean the filter is conservative.
+- `replaced_pixel_pct`: percentage of pixels replaced by the temporal outlier filter.
+
 Optional experimental live scan, no longer needed for normal capture:
 
 ```bash
