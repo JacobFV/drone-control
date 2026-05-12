@@ -159,6 +159,73 @@ def send_action(
         link.send(packet)
 
 
+def send_keepalive_if_due(
+    protocol: object,
+    link: UdpDroneLink | None,
+    dry_run: bool,
+    next_keepalive: float,
+) -> float:
+    keepalive = getattr(protocol, "keepalive", None)
+    if not dry_run and callable(keepalive) and time.monotonic() >= next_keepalive:
+        assert link is not None
+        link.send(keepalive())
+        return time.monotonic() + 1.0
+    return next_keepalive
+
+
+def ramp_throttle(
+    protocol: object,
+    link: UdpDroneLink | None,
+    action: DroneAction,
+    target: int,
+    step: int,
+    interval: float,
+    dry_run: bool,
+    count: int,
+    next_keepalive: float,
+) -> tuple[int, float]:
+    target = clamp_axis(target)
+    step = max(1, abs(step))
+    while action.throttle != target:
+        if action.throttle < target:
+            action.throttle = min(target, action.throttle + step)
+        else:
+            action.throttle = max(target, action.throttle - step)
+        send_action(protocol, link, action, dry_run, count)
+        next_keepalive = send_keepalive_if_due(protocol, link, dry_run, next_keepalive)
+        count += 1
+        time.sleep(interval)
+    return count, next_keepalive
+
+
+def ramped_motor_stop(
+    protocol: object,
+    link: UdpDroneLink | None,
+    action: DroneAction,
+    step: int,
+    interval: float,
+    dry_run: bool,
+    count: int,
+    next_keepalive: float,
+) -> tuple[int, float]:
+    action.roll = 128
+    action.pitch = 128
+    action.yaw = 128
+    count, next_keepalive = ramp_throttle(protocol, link, action, 152, step, interval, dry_run, count, next_keepalive)
+    for _ in range(4):
+        send_action(protocol, link, action, dry_run, count)
+        next_keepalive = send_keepalive_if_due(protocol, link, dry_run, next_keepalive)
+        count += 1
+        time.sleep(interval)
+    count, next_keepalive = ramp_throttle(protocol, link, action, 0, step, interval, dry_run, count, next_keepalive)
+    for _ in range(4):
+        send_action(protocol, link, action, dry_run, count)
+        next_keepalive = send_keepalive_if_due(protocol, link, dry_run, next_keepalive)
+        count += 1
+        time.sleep(interval)
+    return count, next_keepalive
+
+
 def interactive_loop(
     protocol: object,
     link: UdpDroneLink | None,
@@ -168,7 +235,6 @@ def interactive_loop(
 ) -> int:
     action = DroneAction(throttle=clamp_axis(args.interactive_start_throttle))
     step = max(1, min(64, args.interactive_step))
-    keepalive = getattr(protocol, "keepalive", None)
     next_keepalive = time.monotonic()
     count = 0
 
@@ -185,7 +251,8 @@ def interactive_loop(
                     "  Left/Right: yaw +/- step\n"
                     "  W/S: pitch +/- step    A/D: roll +/- step\n"
                     "  C: center roll/pitch/yaw    N: neutral all sticks\n"
-                    "  Space: motors off throttle=0    +/-: adjust step\n"
+                    "  Space: ramped motor stop    Z: direct throttle=0\n"
+                    "  +/-: adjust step\n"
                     "  Esc, Enter, or Q: stop and exit\n\n"
                 ).encode(),
             )
@@ -214,6 +281,17 @@ def interactive_loop(
                 elif key in {"n", "N"}:
                     action = DroneAction.neutral()
                 elif key == " ":
+                    count, next_keepalive = ramped_motor_stop(
+                        protocol,
+                        link,
+                        action,
+                        step,
+                        interval,
+                        args.dry_run,
+                        count,
+                        next_keepalive,
+                    )
+                elif key in {"z", "Z"}:
                     action = DroneAction(throttle=0)
                 elif key in {"+", "="}:
                     step = min(64, step + 1)
@@ -221,10 +299,7 @@ def interactive_loop(
                     step = max(1, step - 1)
 
                 send_action(protocol, link, action, args.dry_run, count)
-                if not args.dry_run and callable(keepalive) and time.monotonic() >= next_keepalive:
-                    assert link is not None
-                    link.send(keepalive())
-                    next_keepalive = time.monotonic() + 1.0
+                next_keepalive = send_keepalive_if_due(protocol, link, args.dry_run, next_keepalive)
                 count += 1
                 os.write(
                     fd,
@@ -239,6 +314,16 @@ def interactive_loop(
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
             os.write(fd, b"\n")
+    count, _next_keepalive = ramped_motor_stop(
+        protocol,
+        link,
+        action,
+        step,
+        interval,
+        args.dry_run,
+        count,
+        next_keepalive,
+    )
     return count
 
 
@@ -331,8 +416,8 @@ def main() -> int:
                     time.sleep(interval)
     finally:
         if link is not None:
-            for _ in range(5):
-                link.send(protocol.build(DroneAction(throttle=0)))
+            for action in [DroneAction(throttle=152)] * 4 + [DroneAction(throttle=0)] * 5:
+                link.send(protocol.build(action))
                 time.sleep(0.05)
             link.close()
     print(f"sent {count} packets")

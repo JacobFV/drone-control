@@ -62,6 +62,11 @@ packet. They started once throttle was swept high enough, with lift increasing
 at higher throttle bytes. Treat `throttle=0, flags=0` as the proven motor-stop
 packet; `throttle=128` is neutral stick center, not a guaranteed motor-off.
 
+Interactive calibration result: with the current drone state, motors began
+spinning when throttle crossed upward from about `168` to `176`, and stopped
+when crossed downward from about `160` to `152`. Jumping straight to `0` was not
+as reliable as ramping down through the stop threshold.
+
 ## Phone App Capture
 
 Start this on the laptop, then use the phone app against the drone while it
@@ -141,7 +146,8 @@ For one explicit packet stream, use `manual` with `MANUAL_ROLL`,
 - Left/Right adjust yaw.
 - `W`/`S` adjust pitch.
 - `A`/`D` adjust roll.
-- Space sends `throttle=0`.
+- Space ramps throttle down through the observed stop threshold, then to `0`.
+- `Z` sends direct `throttle=0`.
 - `C` centers roll/pitch/yaw.
 - `N` returns all sticks to neutral.
 - `+`/`-` adjust the step size.
