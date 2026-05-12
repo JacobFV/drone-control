@@ -26,6 +26,7 @@ THROTTLE_SWEEP_STEP_SECONDS="${THROTTLE_SWEEP_STEP_SECONDS:-0.8}"
 MIX_TEST_THROTTLE="${MIX_TEST_THROTTLE:-224}"
 INTERACTIVE_STEP="${INTERACTIVE_STEP:-8}"
 INTERACTIVE_START_THROTTLE="${INTERACTIVE_START_THROTTLE:-0}"
+INTERACTIVE_RESUME_THROTTLE="${INTERACTIVE_RESUME_THROTTLE:-176}"
 MANUAL_ROLL="${MANUAL_ROLL:-128}"
 MANUAL_PITCH="${MANUAL_PITCH:-128}"
 MANUAL_THROTTLE="${MANUAL_THROTTLE:-128}"
@@ -91,7 +92,7 @@ if [[ "$COMMAND" == "mix-test" || "$COMMAND" == "mix_test" ]]; then
   echo "Mix test: base_throttle=$MIX_TEST_THROTTLE amplitude=$AXIS_TEST_AMPLITUDE pulse=${AXIS_TEST_PULSE_SECONDS}s neutral=${AXIS_TEST_NEUTRAL_SECONDS}s"
 fi
 if [[ "$COMMAND" == "interactive" ]]; then
-  echo "Interactive: start_throttle=$INTERACTIVE_START_THROTTLE step=$INTERACTIVE_STEP"
+  echo "Interactive: start_throttle=$INTERACTIVE_START_THROTTLE resume_throttle=$INTERACTIVE_RESUME_THROTTLE step=$INTERACTIVE_STEP"
 fi
 if [[ "$COMMAND" == "manual" ]]; then
   echo "Manual action: roll=$MANUAL_ROLL pitch=$MANUAL_PITCH throttle=$MANUAL_THROTTLE yaw=$MANUAL_YAW"
@@ -151,6 +152,7 @@ else
     --mix-throttle "$MIX_TEST_THROTTLE"
     --interactive-step "$INTERACTIVE_STEP"
     --interactive-start-throttle "$INTERACTIVE_START_THROTTLE"
+    --interactive-resume-throttle "$INTERACTIVE_RESUME_THROTTLE"
     --roll "$MANUAL_ROLL"
     --pitch "$MANUAL_PITCH"
     --throttle "$MANUAL_THROTTLE"

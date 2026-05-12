@@ -211,12 +211,13 @@ def ramped_motor_stop(
     action.roll = 128
     action.pitch = 128
     action.yaw = 128
-    count, next_keepalive = ramp_throttle(protocol, link, action, 152, step, interval, dry_run, count, next_keepalive)
-    for _ in range(4):
-        send_action(protocol, link, action, dry_run, count)
-        next_keepalive = send_keepalive_if_due(protocol, link, dry_run, next_keepalive)
-        count += 1
-        time.sleep(interval)
+    if action.throttle > 152:
+        count, next_keepalive = ramp_throttle(protocol, link, action, 152, step, interval, dry_run, count, next_keepalive)
+        for _ in range(4):
+            send_action(protocol, link, action, dry_run, count)
+            next_keepalive = send_keepalive_if_due(protocol, link, dry_run, next_keepalive)
+            count += 1
+            time.sleep(interval)
     count, next_keepalive = ramp_throttle(protocol, link, action, 0, step, interval, dry_run, count, next_keepalive)
     for _ in range(4):
         send_action(protocol, link, action, dry_run, count)
@@ -235,6 +236,9 @@ def interactive_loop(
 ) -> int:
     action = DroneAction(throttle=clamp_axis(args.interactive_start_throttle))
     step = max(1, min(64, args.interactive_step))
+    resume_throttle = clamp_axis(args.interactive_resume_throttle)
+    if action.throttle > 0:
+        resume_throttle = action.throttle
     next_keepalive = time.monotonic()
     count = 0
 
@@ -251,7 +255,7 @@ def interactive_loop(
                     "  Left/Right: yaw +/- step\n"
                     "  W/S: pitch +/- step    A/D: roll +/- step\n"
                     "  C: center roll/pitch/yaw    N: neutral all sticks\n"
-                    "  Space: ramped motor stop    Z: direct throttle=0\n"
+                    "  Space: toggle ramp stop/resume    Z: direct throttle=0\n"
                     "  +/-: adjust step\n"
                     "  Esc, Enter, or Q: stop and exit\n\n"
                 ).encode(),
@@ -262,8 +266,12 @@ def interactive_loop(
                     break
                 if key == "\x1b[A":
                     action.throttle = clamp_axis(action.throttle + step)
+                    if action.throttle > 0:
+                        resume_throttle = action.throttle
                 elif key == "\x1b[B":
                     action.throttle = clamp_axis(action.throttle - step)
+                    if action.throttle > 0:
+                        resume_throttle = action.throttle
                 elif key == "\x1b[C":
                     action.yaw = clamp_axis(action.yaw + step)
                 elif key == "\x1b[D":
@@ -280,17 +288,32 @@ def interactive_loop(
                     action.roll = action.pitch = action.yaw = 128
                 elif key in {"n", "N"}:
                     action = DroneAction.neutral()
+                    resume_throttle = action.throttle
                 elif key == " ":
-                    count, next_keepalive = ramped_motor_stop(
-                        protocol,
-                        link,
-                        action,
-                        step,
-                        interval,
-                        args.dry_run,
-                        count,
-                        next_keepalive,
-                    )
+                    if action.throttle == 0:
+                        count, next_keepalive = ramp_throttle(
+                            protocol,
+                            link,
+                            action,
+                            resume_throttle,
+                            step,
+                            interval,
+                            args.dry_run,
+                            count,
+                            next_keepalive,
+                        )
+                    else:
+                        resume_throttle = action.throttle
+                        count, next_keepalive = ramped_motor_stop(
+                            protocol,
+                            link,
+                            action,
+                            step,
+                            interval,
+                            args.dry_run,
+                            count,
+                            next_keepalive,
+                        )
                 elif key in {"z", "Z"}:
                     action = DroneAction(throttle=0)
                 elif key in {"+", "="}:
@@ -344,6 +367,7 @@ def main() -> int:
     parser.add_argument("--mix-throttle", type=int, default=224, help="Base throttle byte for mix-test.")
     parser.add_argument("--interactive-step", type=int, default=8, help="Byte increment per interactive key press.")
     parser.add_argument("--interactive-start-throttle", type=int, default=0, help="Starting throttle byte for interactive mode.")
+    parser.add_argument("--interactive-resume-throttle", type=int, default=176, help="Fallback throttle byte when Space resumes from 0.")
     parser.add_argument("--roll", type=int, default=128, help="Manual command roll byte.")
     parser.add_argument("--pitch", type=int, default=128, help="Manual command pitch byte.")
     parser.add_argument("--throttle", type=int, default=128, help="Manual command throttle byte.")

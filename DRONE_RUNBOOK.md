@@ -146,14 +146,17 @@ For one explicit packet stream, use `manual` with `MANUAL_ROLL`,
 - Left/Right adjust yaw.
 - `W`/`S` adjust pitch.
 - `A`/`D` adjust roll.
-- Space ramps throttle down through the observed stop threshold, then to `0`.
+- Space toggles between ramp-stop and resume. If throttle is nonzero, it stores
+  the current throttle, ramps down through the observed stop threshold, then to
+  `0`. If throttle is already `0`, it ramps back to the stored throttle.
 - `Z` sends direct `throttle=0`.
 - `C` centers roll/pitch/yaw.
 - `N` returns all sticks to neutral.
 - `+`/`-` adjust the step size.
 - Esc, Enter, or `Q` exits and sends final `throttle=0` packets.
 
-Tune it with `INTERACTIVE_STEP` and `INTERACTIVE_START_THROTTLE`.
+Tune it with `INTERACTIVE_STEP`, `INTERACTIVE_START_THROTTLE`, and
+`INTERACTIVE_RESUME_THROTTLE`.
 
 Direct command if already connected to the drone AP:
 
