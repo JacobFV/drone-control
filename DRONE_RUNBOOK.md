@@ -62,6 +62,11 @@ packet. They started once throttle was swept high enough, with lift increasing
 at higher throttle bytes. Treat `throttle=0, flags=0` as the proven motor-stop
 packet; `throttle=128` is neutral stick center, not a guaranteed motor-off.
 
+Later throttle tests became inconsistent: `throttle=255` and
+`throttle-sweep` no longer lifted the drone, including after trying four fresh
+batteries. Treat lift/no-lift as a physical-state variable for now, not as proof
+that the UDP control mapping changed.
+
 Interactive calibration result: with the current drone state, motors began
 spinning when throttle crossed upward from about `168` to `176`, and stopped
 when crossed downward from about `160` to `152`. Jumping straight to `0` was not
