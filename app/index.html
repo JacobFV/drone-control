@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Drone Control Station</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div id="app" class="app-shell">
+      <header class="titlebar">
+        <div class="window-title">Drone Control Station</div>
+        <nav class="toolbar" aria-label="Application toolbar">
+          <button id="lhsToggle" class="icon-button" title="Toggle drone tree" aria-label="Toggle drone tree">
+            <span class="icon">☰</span>
+          </button>
+          <div class="toolbar-divider"></div>
+          <div class="segmented" aria-label="Main view">
+            <button class="segment is-active" data-view="forward" title="Forward camera">Forward</button>
+            <button class="segment" data-view="downward" title="Downward camera">Downward</button>
+            <button class="segment" data-view="simulation" title="Simulation">Sim</button>
+          </div>
+          <button id="newFlight" class="primary-button" title="Create a new flight">New Flight</button>
+          <div class="toolbar-spacer"></div>
+          <button id="rhsToggle" class="icon-button" title="Toggle flight inspector" aria-label="Toggle flight inspector">
+            <span class="icon">◧</span>
+          </button>
+        </nav>
+      </header>
+
+      <div class="workspace">
+        <aside id="lhs" class="sidebar lhs">
+          <section class="sidebar-header">
+            <h2>Drones</h2>
+            <span id="droneCount" class="count">0</span>
+          </section>
+          <div id="droneTree" class="tree"></div>
+        </aside>
+
+        <main class="main-area">
+          <section id="forwardView" class="view-panel is-active" aria-label="Forward camera stream">
+            <div class="camera-stage forward-stage">
+              <div class="stream-frame">
+                <div class="camera-overlay top-left">
+                  <span>Forward</span>
+                  <strong id="forwardResolution">640 x 384</strong>
+                </div>
+                <div class="camera-overlay top-right">
+                  <span>RTSP</span>
+                  <strong>192.168.1.1:7070</strong>
+                </div>
+                <div class="video-placeholder">
+                  <div class="reticle"></div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section id="downwardView" class="view-panel" aria-label="Downward camera stream">
+            <div class="camera-stage downward-stage">
+              <div class="stream-frame">
+                <div class="camera-overlay top-left">
+                  <span>Downward</span>
+                  <strong>not detected</strong>
+                </div>
+                <div class="downward-grid"></div>
+              </div>
+            </div>
+          </section>
+
+          <section id="simulationView" class="view-panel" aria-label="Simulation view">
+            <div class="simulation-stage">
+              <div class="world">
+                <div class="grid-floor"></div>
+                <svg class="trajectory" viewBox="0 0 900 500" preserveAspectRatio="none" aria-hidden="true">
+                  <path d="M90,380 C190,280 260,290 350,220 S570,150 690,250 S780,350 830,190" />
+                </svg>
+                <div class="drone-model">
+                  <div class="body"></div>
+                  <div class="arm arm-a"></div>
+                  <div class="arm arm-b"></div>
+                  <div class="rotor r1"></div>
+                  <div class="rotor r2"></div>
+                  <div class="rotor r3"></div>
+                  <div class="rotor r4"></div>
+                </div>
+              </div>
+              <div class="sim-controls">
+                <label><input id="trajectoryToggle" type="checkbox" checked /> Trajectory</label>
+                <label><input type="checkbox" checked /> World grid</label>
+              </div>
+            </div>
+          </section>
+        </main>
+
+        <aside id="rhs" class="sidebar rhs">
+          <section class="sidebar-header">
+            <h2>Flight</h2>
+            <span id="flightState" class="pill">review</span>
+          </section>
+
+          <section class="panel">
+            <h3>Mode</h3>
+            <div class="mode-selector" role="group" aria-label="Flight mode">
+              <button class="mode-option is-active" data-mode="review">Review</button>
+              <button class="mode-option" data-mode="manual">Manual</button>
+              <button class="mode-option" data-mode="policy">Policy</button>
+            </div>
+          </section>
+
+          <section id="manualPanel" class="panel manual-panel is-hidden">
+            <h3>Control Pad</h3>
+            <div class="control-pad">
+              <button data-control="pitch-up">↑</button>
+              <button data-control="yaw-left">↶</button>
+              <button data-control="stop">■</button>
+              <button data-control="yaw-right">↷</button>
+              <button data-control="roll-left">←</button>
+              <button data-control="pitch-down">↓</button>
+              <button data-control="roll-right">→</button>
+            </div>
+            <div class="throttle-row">
+              <label for="throttle">Throttle</label>
+              <input id="throttle" type="range" min="0" max="255" value="0" />
+              <output id="throttleValue">0</output>
+            </div>
+          </section>
+
+          <section class="panel">
+            <h3>Metadata</h3>
+            <dl id="metadataList" class="kv-list"></dl>
+          </section>
+
+          <section class="panel metrics-panel">
+            <h3>Metrics</h3>
+            <div id="metricsGrid" class="metrics-grid"></div>
+          </section>
+
+          <section class="panel">
+            <h3>Records</h3>
+            <div id="recordsList" class="records-list"></div>
+          </section>
+        </aside>
+      </div>
+    </div>
+
+    <script src="./renderer.js"></script>
+  </body>
+</html>

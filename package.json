@@ -1,0 +1,14 @@
+{
+  "name": "drone-control-station",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local Electron control station for WIFI_8K drone experiments.",
+  "main": "electron/main.js",
+  "scripts": {
+    "start": "electron --no-sandbox .",
+    "check": "node --check electron/main.js && node --check electron/preload.js && node --check app/renderer.js"
+  },
+  "devDependencies": {
+    "electron": "^39.2.4"
+  }
+}
