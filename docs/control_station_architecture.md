@@ -47,6 +47,10 @@ Current endpoints:
 - `POST /api/flights/<flight-id>/session/stop`
 - `GET /api/records/<record-id>/mjpeg`
 - `GET /api/wifi/capabilities`
+- `GET /api/wifi/interfaces`
+- `GET /api/wifi/access-points`
+- `POST /api/wifi/connect`
+- `POST /api/wifi/reconnect`
 - `GET /api/manual/status`
 - `POST /api/manual/arm`
 - `POST /api/manual/disarm`
@@ -127,3 +131,8 @@ confirmed because the drone SSID was not visible on retry.
 For multiple simultaneous drones, the cleanest reliable path is still multiple
 Wi-Fi adapters, one managed interface per drone AP. Single-radio multi-interface
 support can be used opportunistically after a full connect/ping test passes.
+
+The service exposes Wi-Fi discovery and explicit connect/reconnect endpoints.
+`POST /api/wifi/connect` requires `confirmDisconnect: true` because a successful
+drone AP association can drop the app's internet path until the reconnect
+endpoint is called or NetworkManager restores the previous connection.

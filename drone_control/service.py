@@ -9,11 +9,13 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import asdict
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from drone_control.discovery import scan_access_points, wifi_interfaces
 from drone_control.flight_session import FlightSession, FlightSessionManager
 from drone_control.live_video import DirectoryFrameSource, LiveDroneFrameSource, LiveDroneFrameSourceConfig, mjpeg_chunks
 from drone_control.manual_control import ManualControlConfig, ManualControlSession
@@ -37,6 +39,25 @@ class ControlStationHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/wifi/capabilities":
             self.send_json(wifi_capabilities())
+            return
+        if parsed.path == "/api/wifi/interfaces":
+            try:
+                interfaces = [asdict(item) for item in wifi_interfaces()]
+            except (OSError, subprocess.CalledProcessError) as exc:
+                self.send_json({"interfaces": [], "error": str(exc)}, status=HTTPStatus.SERVICE_UNAVAILABLE)
+                return
+            self.send_json({"interfaces": interfaces})
+            return
+        if parsed.path == "/api/wifi/access-points":
+            query = parse_qs(parsed.query)
+            iface = query.get("iface", [""])[0] or None
+            rescan = query.get("rescan", ["1"])[0] != "0"
+            try:
+                access_points = [asdict(item) for item in scan_access_points(iface, rescan=rescan)]
+            except (OSError, subprocess.CalledProcessError) as exc:
+                self.send_json({"accessPoints": [], "error": str(exc)}, status=HTTPStatus.SERVICE_UNAVAILABLE)
+                return
+            self.send_json({"accessPoints": access_points})
             return
         if parsed.path == "/api/manual/status":
             with self.server.manual_lock:
@@ -157,6 +178,14 @@ class ControlStationHandler(BaseHTTPRequestHandler):
         match = re.fullmatch(r"/api/flights/([^/]+)/session/stop", parsed.path)
         if match:
             self.stop_flight_session(match.group(1))
+            return
+
+        if parsed.path == "/api/wifi/connect":
+            self.connect_wifi()
+            return
+
+        if parsed.path == "/api/wifi/reconnect":
+            self.reconnect_wifi()
             return
 
         self.send_error(HTTPStatus.NOT_FOUND)
@@ -310,6 +339,39 @@ class ControlStationHandler(BaseHTTPRequestHandler):
         refreshed = self.server.sessions.status(flight_id)
         self.send_json((refreshed or status).as_dict() | {"recordId": record_id})
 
+    def connect_wifi(self) -> None:
+        payload = self.read_json()
+        iface = str(payload.get("iface") or "")
+        ssid = str(payload.get("ssid") or "")
+        if not iface or not ssid:
+            self.send_json({"error": "iface and ssid are required"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        if payload.get("confirmDisconnect") is not True:
+            self.send_json({"error": "confirmDisconnect must be true"}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        previous = current_wifi_connection(iface)
+        result = run_nmcli(["dev", "wifi", "connect", ssid, "ifname", iface])
+        if result["ok"]:
+            self.server.wifi_previous[iface] = previous or ""
+        self.send_json({"iface": iface, "ssid": ssid, "previousConnection": previous, **result})
+
+    def reconnect_wifi(self) -> None:
+        payload = self.read_json()
+        iface = str(payload.get("iface") or "")
+        if not iface:
+            self.send_json({"error": "iface is required"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        target = str(payload.get("ssid") or self.server.wifi_previous.get(iface) or os.environ.get("HOME_SSID", ""))
+        if not target:
+            self.send_json({"error": "ssid is required; no previous connection is known"}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        result = run_nmcli(["dev", "wifi", "connect", target, "ifname", iface])
+        if not result["ok"]:
+            result = run_nmcli(["con", "up", target, "ifname", iface])
+        self.send_json({"iface": iface, "ssid": target, **result})
+
 
 class ControlStationServer(ThreadingHTTPServer):
     def __init__(self, server_address: tuple[str, int], store: ControlStationStore) -> None:
@@ -320,6 +382,7 @@ class ControlStationServer(ThreadingHTTPServer):
         self.manual_transport = ManualDroneTransport.from_env()
         self.session_work_root = store.db_path.parent / "session_work"
         self.sessions = FlightSessionManager(self.session_work_root)
+        self.wifi_previous: dict[str, str] = {}
         self.manual_loop_running = True
         self.manual_thread = threading.Thread(target=self._manual_loop, name="manual-control-loop", daemon=True)
         self.manual_thread.start()
@@ -399,6 +462,41 @@ def wifi_capabilities() -> dict[str, object]:
             if supports_two_managed
             else "Use a second Wi-Fi adapter or wired internet while the main radio is connected to the drone AP."
         ),
+    }
+
+
+def current_wifi_connection(iface: str) -> str:
+    try:
+        output = subprocess.check_output(
+            ["nmcli", "-t", "-f", "DEVICE,CONNECTION", "dev", "status"],
+            text=True,
+            stderr=subprocess.STDOUT,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return ""
+    for line in output.splitlines():
+        device, _, connection = line.partition(":")
+        if device == iface:
+            return connection
+    return ""
+
+
+def run_nmcli(args: list[str]) -> dict[str, object]:
+    try:
+        completed = subprocess.run(
+            ["nmcli", *args],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"ok": False, "returnCode": -1, "output": str(exc)}
+    return {
+        "ok": completed.returncode == 0,
+        "returnCode": completed.returncode,
+        "output": completed.stdout.strip(),
     }
 
 
