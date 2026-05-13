@@ -349,6 +349,7 @@ input, select {
 }
 
 .sim-canvas:active { cursor: grabbing; }
+.sim-canvas.is-panning { cursor: move; }
 
 .sim-strip.is-danger { color: var(--danger); }
 .sim-strip.is-danger span { color: var(--danger); }

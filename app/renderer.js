@@ -106,6 +106,7 @@ const simView = {
   lastDraw: 0,
   pendingDraw: false,
   dragging: false,
+  dragMode: "orbit",
   dragX: 0,
   dragY: 0,
 };
@@ -241,8 +242,10 @@ function wireSimulation() {
   });
   simCanvas.addEventListener("pointerdown", (event) => {
     simView.dragging = true;
+    simView.dragMode = (event.shiftKey || event.button === 1 || event.button === 2) ? "pan" : "orbit";
     simView.dragX = event.clientX;
     simView.dragY = event.clientY;
+    simCanvas.classList.toggle("is-panning", simView.dragMode === "pan");
     simCanvas.setPointerCapture(event.pointerId);
   });
   simCanvas.addEventListener("pointermove", (event) => {
@@ -251,13 +254,19 @@ function wireSimulation() {
     const dy = event.clientY - simView.dragY;
     simView.dragX = event.clientX;
     simView.dragY = event.clientY;
-    simView.yaw -= dx * 0.008;
-    simView.pitch = Math.max(-Math.PI / 2 + 0.05, Math.min(Math.PI / 2 - 0.05, simView.pitch + dy * 0.008));
+    if (simView.dragMode === "pan") {
+      panSimView(dx, dy);
+    } else {
+      simView.yaw -= dx * 0.008;
+      simView.pitch = Math.max(-Math.PI / 2 + 0.05, Math.min(Math.PI / 2 - 0.05, simView.pitch + dy * 0.008));
+    }
     requestSimDraw();
   });
+  simCanvas.addEventListener("contextmenu", (event) => event.preventDefault());
   const releaseDrag = (event) => {
     if (!simView.dragging) return;
     simView.dragging = false;
+    simCanvas.classList.remove("is-panning");
     try { simCanvas.releasePointerCapture(event.pointerId); } catch (_) {}
   };
   simCanvas.addEventListener("pointerup", releaseDrag);
@@ -974,6 +983,18 @@ function drawSim() {
   drawAxes(ctx, project);
   drawTrajectory(ctx, project);
   drawDrone(ctx, project, view);
+}
+
+function panSimView(dx, dy) {
+  const view = computeViewMatrix();
+  const fwd = normalize(sub(view.target, view.eye));
+  const right = normalize(cross(fwd, view.up));
+  const up = cross(right, fwd);
+  const rect = simCanvas.getBoundingClientRect();
+  const k = simView.distance / Math.max(1, Math.min(rect.width, rect.height));
+  for (let i = 0; i < 3; i += 1) {
+    simView.target[i] -= dx * k * right[i] - dy * k * up[i];
+  }
 }
 
 function computeViewMatrix() {
