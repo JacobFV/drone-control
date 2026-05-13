@@ -136,10 +136,19 @@ class ControlStationStore:
             drones.append(drone_dict)
         return {"drones": drones}
 
-    def create_flight(self, drone_id: str, name: str, mode: str = "manual") -> dict[str, Any]:
+    def create_flight(
+        self,
+        drone_id: str,
+        name: str,
+        mode: str = "manual",
+        policy: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         with self.lock:
             flight_id = f"flight-{uuid.uuid4().hex[:12]}"
             now = current_timestamp()
+            policy_data = policy or {"name": "Manual bench test", "version": 1}
+            metadata_data = metadata or {"status": "draft", "notes": "No drone IO is armed yet."}
             self.conn.execute(
                 """
                 INSERT INTO flights
@@ -153,10 +162,55 @@ class ControlStationStore:
                     "not started",
                     "00:00:00",
                     mode,
-                    json.dumps({"name": "Manual bench test", "version": 1}),
-                    json.dumps({"status": "draft", "notes": "No drone IO is armed yet."}),
+                    json.dumps(policy_data),
+                    json.dumps(metadata_data),
                     json.dumps({"frames": 0, "packets": 0, "bytes": 0, "resolution": "pending"}),
                     now,
+                ),
+            )
+            self.conn.commit()
+            return {"id": flight_id}
+
+    def update_flight(
+        self,
+        flight_id: str,
+        *,
+        name: str | None = None,
+        mode: str | None = None,
+        duration: str | None = None,
+        policy: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+        metrics: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        with self.lock:
+            row = self.conn.execute("SELECT * FROM flights WHERE id = ?", (flight_id,)).fetchone()
+            if row is None:
+                return None
+
+            current_policy = json_loads(row["policy_json"], {})
+            current_metadata = json_loads(row["metadata_json"], {})
+            current_metrics = json_loads(row["metrics_json"], {})
+            if policy:
+                current_policy.update(policy)
+            if metadata:
+                current_metadata.update(metadata)
+            if metrics:
+                current_metrics.update(metrics)
+
+            self.conn.execute(
+                """
+                UPDATE flights
+                SET name = ?, mode = ?, duration = ?, policy_json = ?, metadata_json = ?, metrics_json = ?
+                WHERE id = ?
+                """,
+                (
+                    name if name is not None else row["name"],
+                    mode if mode is not None else row["mode"],
+                    duration if duration is not None else row["duration"],
+                    json.dumps(current_policy),
+                    json.dumps(current_metadata),
+                    json.dumps(current_metrics),
+                    flight_id,
                 ),
             )
             self.conn.commit()
@@ -316,6 +370,7 @@ class ControlStationStore:
                     current_timestamp(),
                 ),
             )
+            self.conn.commit()
             return record_id
 
     def record_path(self, record_id: str) -> Path | None:

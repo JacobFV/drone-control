@@ -12,6 +12,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from drone_control.live_video import DirectoryFrameSource, mjpeg_chunks
+from drone_control.manual_control import ManualControlConfig, ManualControlSession
 from drone_control.store import ControlStationStore
 
 
@@ -31,6 +33,9 @@ class ControlStationHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/wifi/capabilities":
             self.send_json(wifi_capabilities())
+            return
+        if parsed.path == "/api/manual/status":
+            self.send_json(self.server.manual_status())
             return
 
         match = re.fullmatch(r"/api/records/([^/]+)/mjpeg", parsed.path)
@@ -56,10 +61,96 @@ class ControlStationHandler(BaseHTTPRequestHandler):
             if not drone_id:
                 self.send_json({"error": "droneId is required"}, status=HTTPStatus.BAD_REQUEST)
                 return
-            self.send_json(self.server.store.create_flight(drone_id, name))
+            self.send_json(
+                self.server.store.create_flight(
+                    drone_id,
+                    name,
+                    mode=str(payload.get("mode") or "manual"),
+                    policy=dict(payload.get("policy") or {}),
+                    metadata=dict(payload.get("metadata") or {}),
+                )
+            )
+            return
+
+        match = re.fullmatch(r"/api/flights/([^/]+)/records", parsed.path)
+        if match:
+            payload = self.read_json()
+            source = resolve_repo_path(str(payload.get("source") or ""))
+            if source is None:
+                self.send_json({"error": "source must be inside the repository"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            record_id = self.server.store.import_record(
+                match.group(1),
+                str(payload.get("type") or "artifact"),
+                str(payload.get("label") or source.name),
+                str(payload.get("mime") or "application/octet-stream"),
+                source,
+            )
+            self.send_json({"id": record_id})
+            return
+
+        if parsed.path == "/api/manual/arm":
+            self.server.manual.arm()
+            self.send_json(self.server.manual_status())
+            return
+        if parsed.path == "/api/manual/disarm":
+            action = self.server.manual.disarm()
+            self.send_json(self.server.manual_status(action))
+            return
+        if parsed.path == "/api/manual/heartbeat":
+            self.server.manual.heartbeat()
+            self.send_json(self.server.manual_status())
+            return
+        if parsed.path == "/api/manual/axes":
+            payload = self.read_json()
+            accepted = self.server.manual.set_target_axes(
+                roll=payload.get("roll"),
+                pitch=payload.get("pitch"),
+                throttle=payload.get("throttle"),
+                yaw=payload.get("yaw"),
+            )
+            action = self.server.manual.tick()
+            self.send_json(self.server.manual_status(action) | {"accepted": accepted})
+            return
+        if parsed.path == "/api/manual/stop":
+            action = self.server.manual.emergency_stop()
+            self.send_json(self.server.manual_status(action))
+            return
+        if parsed.path == "/api/manual/tick":
+            action = self.server.manual.tick()
+            self.send_json(self.server.manual_status(action))
             return
 
         self.send_error(HTTPStatus.NOT_FOUND)
+
+    def do_PATCH(self) -> None:
+        parsed = urlparse(self.path)
+        match = re.fullmatch(r"/api/flights/([^/]+)", parsed.path)
+        if match:
+            payload = self.read_json()
+            result = self.server.store.update_flight(
+                match.group(1),
+                name=optional_str(payload, "name"),
+                mode=optional_str(payload, "mode"),
+                duration=optional_str(payload, "duration"),
+                policy=optional_dict(payload, "policy"),
+                metadata=optional_dict(payload, "metadata"),
+                metrics=optional_dict(payload, "metrics"),
+            )
+            if result is None:
+                self.send_json({"error": "flight not found"}, status=HTTPStatus.NOT_FOUND)
+                return
+            self.send_json(result)
+            return
+
+        self.send_error(HTTPStatus.NOT_FOUND)
+
+    def do_OPTIONS(self) -> None:
+        self.send_response(HTTPStatus.NO_CONTENT)
+        self.send_header("Access-Control-Allow-Origin", "file://")
+        self.send_header("Access-Control-Allow-Methods", "GET,POST,PATCH,OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
 
     def send_json(self, payload: object, status: HTTPStatus = HTTPStatus.OK) -> None:
         body = json.dumps(payload).encode()
@@ -81,30 +172,20 @@ class ControlStationHandler(BaseHTTPRequestHandler):
         if path is None or not path.is_dir():
             self.send_error(HTTPStatus.NOT_FOUND, "frame record not found")
             return
-        frames = sorted(path.glob("*.jpg"))
-        if not frames:
-            self.send_error(HTTPStatus.NOT_FOUND, "frame record has no JPEG frames")
-            return
-
-        delay = 1.0 / fps
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
         self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
         self.send_header("Pragma", "no-cache")
         self.end_headers()
 
+        source = DirectoryFrameSource(path, fps=fps)
         try:
-            while True:
-                for frame in frames:
-                    data = frame.read_bytes()
-                    self.wfile.write(b"--frame\r\n")
-                    self.wfile.write(b"Content-Type: image/jpeg\r\n")
-                    self.wfile.write(f"Content-Length: {len(data)}\r\n\r\n".encode())
-                    self.wfile.write(data)
-                    self.wfile.write(b"\r\n")
-                    self.wfile.flush()
-                    time.sleep(delay)
+            for chunk in mjpeg_chunks(source):
+                self.wfile.write(chunk)
+                self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
+            return
+        except FileNotFoundError:
             return
 
     def send_blob_file(self, key: str, relative: str) -> None:
@@ -129,6 +210,19 @@ class ControlStationServer(ThreadingHTTPServer):
     def __init__(self, server_address: tuple[str, int], store: ControlStationStore) -> None:
         super().__init__(server_address, ControlStationHandler)
         self.store = store
+        self.manual = ManualControlSession(ManualControlConfig())
+
+    def manual_status(self, action: object | None = None) -> dict[str, object]:
+        payload = {
+            "state": self.manual.state.value,
+            "armed": self.manual.armed,
+            "faultReason": self.manual.fault_reason,
+            "stopReason": self.manual.stop_reason,
+            "current": self.manual.current_action_dict(),
+        }
+        if action is not None:
+            payload["action"] = action_to_dict(action)
+        return payload
 
 
 def main() -> int:
@@ -204,6 +298,49 @@ def extract_interface_combinations(iw_list: str) -> list[str]:
     if current:
         combos.append(" ".join(current))
     return combos
+
+
+def optional_str(payload: dict[str, object], key: str) -> str | None:
+    if key not in payload:
+        return None
+    return str(payload[key])
+
+
+def optional_dict(payload: dict[str, object], key: str) -> dict[str, object] | None:
+    value = payload.get(key)
+    return dict(value) if isinstance(value, dict) else None
+
+
+def resolve_repo_path(value: str) -> Path | None:
+    if not value:
+        return None
+    path = Path(value)
+    if not path.is_absolute():
+        path = REPO_ROOT / path
+    resolved = path.resolve()
+    try:
+        resolved.relative_to(REPO_ROOT)
+    except ValueError:
+        return None
+    return resolved
+
+
+def action_to_dict(action: object) -> dict[str, object]:
+    if hasattr(action, "sanitized"):
+        sanitized = action.sanitized()
+        return {
+            "roll": sanitized.roll,
+            "pitch": sanitized.pitch,
+            "throttle": sanitized.throttle,
+            "yaw": sanitized.yaw,
+            "takeoff": sanitized.takeoff,
+            "land": sanitized.land,
+            "emergency_stop": sanitized.emergency_stop,
+            "calibrate": sanitized.calibrate,
+            "headless": sanitized.headless,
+            "flip": sanitized.flip,
+        }
+    return {}
 
 
 if __name__ == "__main__":
