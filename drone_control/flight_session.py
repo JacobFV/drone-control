@@ -6,7 +6,9 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from drone_control.intrinsics import CameraIntrinsics
 from drone_control.live_video import FrameSource
+from drone_control.pose_estimator import AsyncPoseEstimator
 
 
 @dataclass(slots=True)
@@ -22,6 +24,8 @@ class FlightSessionStatus:
     stopped_at: float | None = None
     error: str | None = None
     record_id: str | None = None
+    pose_record_id: str | None = None
+    pose_path: str | None = None
 
     @property
     def duration_seconds(self) -> float:
@@ -40,6 +44,8 @@ class FlightSessionStatus:
             "durationSeconds": self.duration_seconds,
             "error": self.error,
             "recordId": self.record_id,
+            "poseRecordId": self.pose_record_id,
+            "posePath": self.pose_path,
         }
 
 
@@ -53,6 +59,8 @@ class FlightSession:
         work_root: Path,
         read_timeout: float = 0.5,
         max_frames: int | None = None,
+        intrinsics: CameraIntrinsics | None = None,
+        enable_pose_estimation: bool = True,
     ) -> None:
         self.flight_id = flight_id
         self.source_name = source_name
@@ -60,8 +68,13 @@ class FlightSession:
         self.read_timeout = read_timeout
         self.max_frames = max_frames
         self.session_id = f"session-{uuid.uuid4().hex[:12]}"
-        self.frame_dir = work_root / self.session_id / "frames"
+        self.session_root = work_root / self.session_id
+        self.frame_dir = self.session_root / "frames"
         self.frame_dir.mkdir(parents=True, exist_ok=True)
+        self.pose_path = self.session_root / "pose.jsonl"
+        self.estimator: AsyncPoseEstimator | None = None
+        if enable_pose_estimation:
+            self.estimator = AsyncPoseEstimator(out_path=self.pose_path, intrinsics=intrinsics)
         self.status = FlightSessionStatus(
             flight_id=flight_id,
             session_id=self.session_id,
@@ -71,10 +84,12 @@ class FlightSession:
             frames=0,
             bytes=0,
             started_at=time.time(),
+            pose_path=str(self.pose_path) if enable_pose_estimation else None,
         )
         self._stop = threading.Event()
         self._lock = threading.RLock()
         self._thread: threading.Thread | None = None
+        self._monotonic_start = time.monotonic()
 
     def start(self) -> None:
         with self._lock:
@@ -109,15 +124,33 @@ class FlightSession:
                 stopped_at=self.status.stopped_at,
                 error=self.status.error,
                 record_id=self.status.record_id,
+                pose_record_id=self.status.pose_record_id,
+                pose_path=self.status.pose_path,
             )
 
     def set_record_id(self, record_id: str) -> None:
         with self._lock:
             self.status.record_id = record_id
 
+    def set_pose_record_id(self, record_id: str) -> None:
+        with self._lock:
+            self.status.pose_record_id = record_id
+
+    def estimator_status(self) -> dict[str, object] | None:
+        if self.estimator is None:
+            return None
+        return self.estimator.status().as_dict()
+
+    def estimator_poses(self, since_index: int = -1) -> list[dict[str, object]]:
+        if self.estimator is None:
+            return []
+        return [p.as_dict() for p in self.estimator.poses(since_index)]
+
     def _run(self) -> None:
         try:
             self.frame_source.start()
+            if self.estimator is not None:
+                self.estimator.start()
             while not self._stop.is_set():
                 if self.max_frames is not None and self.status.frames >= self.max_frames:
                     break
@@ -131,10 +164,14 @@ class FlightSession:
                 with self._lock:
                     self.status.frames += 1
                     self.status.bytes += len(frame.data)
+                if self.estimator is not None:
+                    self.estimator.push(index, time.monotonic() - self._monotonic_start, frame.data)
         except BaseException as exc:
             with self._lock:
                 self.status.error = str(exc)
         finally:
+            if self.estimator is not None:
+                self.estimator.stop()
             self.frame_source.stop()
             with self._lock:
                 self.status.running = False

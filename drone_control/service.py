@@ -23,9 +23,11 @@ from drone_control.discovery import default_wifi_interface, platform_network_sum
 from drone_control.discovery import reconnect_wifi as platform_reconnect_wifi
 from drone_control.discovery import scan_access_points, wifi_interfaces
 from drone_control.flight_session import FlightSession, FlightSessionManager
+from drone_control.intrinsics import load_intrinsics
 from drone_control.live_video import DirectoryFrameSource, LiveDroneFrameSource, LiveDroneFrameSourceConfig, mjpeg_chunks
 from drone_control.manual_control import ManualControlConfig, ManualControlSession
 from drone_control.manual_transport import ManualDroneTransport
+from drone_control.pose_estimator import load_pose_track, replay_directory
 from drone_control.store import ControlStationStore
 
 
@@ -80,6 +82,18 @@ class ControlStationHandler(BaseHTTPRequestHandler):
         if match:
             status = self.server.sessions.status(match.group(1))
             self.send_json(status.as_dict() if status else {"running": False, "flightId": match.group(1)})
+            return
+
+        match = re.fullmatch(r"/api/flights/([^/]+)/pose/status", parsed.path)
+        if match:
+            self.send_json(self.server.pose_status(match.group(1)))
+            return
+
+        match = re.fullmatch(r"/api/flights/([^/]+)/pose/track", parsed.path)
+        if match:
+            query = parse_qs(parsed.query)
+            since = int(query.get("since", ["-1"])[0])
+            self.send_json(self.server.pose_track(match.group(1), since=since))
             return
 
         match = re.fullmatch(r"/api/records/([^/]+)/mjpeg", parsed.path)
@@ -193,6 +207,11 @@ class ControlStationHandler(BaseHTTPRequestHandler):
         match = re.fullmatch(r"/api/flights/([^/]+)/session/stop", parsed.path)
         if match:
             self.stop_flight_session(match.group(1))
+            return
+
+        match = re.fullmatch(r"/api/flights/([^/]+)/pose/compute", parsed.path)
+        if match:
+            self.compute_pose_track(match.group(1))
             return
 
         if parsed.path == "/api/wifi/connect":
@@ -340,6 +359,8 @@ class ControlStationHandler(BaseHTTPRequestHandler):
                 frame_source=frame_source,
                 work_root=self.server.session_work_root,
                 max_frames=max_frames,
+                intrinsics=load_intrinsics("forward"),
+                enable_pose_estimation=optional_bool(payload, "estimatePose") is not False,
             )
             status = self.server.sessions.start(session)
         except (OSError, RuntimeError, ValueError) as exc:
@@ -360,6 +381,7 @@ class ControlStationHandler(BaseHTTPRequestHandler):
             return
 
         record_id = status.record_id
+        session_obj = self.server.sessions.get(flight_id)
         if status.frames > 0 and record_id is None:
             record_id = self.server.store.import_record(
                 flight_id,
@@ -368,9 +390,25 @@ class ControlStationHandler(BaseHTTPRequestHandler):
                 "image/jpeg-sequence",
                 Path(status.frame_dir),
             )
-            session = self.server.sessions.get(flight_id)
-            if session is not None:
-                session.set_record_id(record_id)
+            if session_obj is not None:
+                session_obj.set_record_id(record_id)
+
+        pose_record_id = status.pose_record_id
+        if (
+            pose_record_id is None
+            and status.pose_path
+            and Path(status.pose_path).is_file()
+            and Path(status.pose_path).stat().st_size > 0
+        ):
+            pose_record_id = self.server.store.import_record(
+                flight_id,
+                "pose-track",
+                f"Session pose track {status.session_id}",
+                "application/jsonl",
+                Path(status.pose_path),
+            )
+            if session_obj is not None:
+                session_obj.set_pose_record_id(pose_record_id)
 
         metrics = {
             "frames": status.frames,
@@ -452,6 +490,51 @@ class ControlStationHandler(BaseHTTPRequestHandler):
         result = reveal_path(path)
         self.send_json({"path": str(path), **result})
 
+    def compute_pose_track(self, flight_id: str) -> None:
+        if not self.server.store.flight_exists(flight_id):
+            self.send_json({"error": "flight not found"}, status=HTTPStatus.NOT_FOUND)
+            return
+        payload = self.read_json()
+        record_id = optional_str(payload, "recordId")
+        # Pick the requested frames record, or fall back to the latest one.
+        state = self.server.store.state()
+        frames_record = None
+        for drone in state.get("drones", []):
+            for flight in drone.get("flights", []):
+                if flight.get("id") != flight_id:
+                    continue
+                frame_records = [r for r in flight.get("records", []) if r.get("type") == "frames"]
+                if record_id:
+                    frames_record = next((r for r in frame_records if r.get("id") == record_id), None)
+                elif frame_records:
+                    frames_record = frame_records[-1]
+        if frames_record is None:
+            self.send_json({"error": "no frames record available"}, status=HTTPStatus.NOT_FOUND)
+            return
+        frame_dir = self.server.store.record_path(frames_record["id"])
+        if frame_dir is None or not frame_dir.is_dir():
+            self.send_json({"error": "frames record blob missing"}, status=HTTPStatus.NOT_FOUND)
+            return
+        out_path = self.server.session_work_root / f"replay-{frames_record['id']}" / "pose.jsonl"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            status = replay_directory(frame_dir, out_path, fps=float(payload.get("fps") or 12))
+        except RuntimeError as exc:
+            self.send_json({"error": str(exc)}, status=HTTPStatus.SERVICE_UNAVAILABLE)
+            return
+        pose_record_id = self.server.store.import_record(
+            flight_id,
+            "pose-track",
+            f"Replay pose track {frames_record['id']}",
+            "application/jsonl",
+            out_path,
+        )
+        self.send_json({
+            "id": pose_record_id,
+            "status": status.as_dict(),
+            "sourceRecordId": frames_record["id"],
+        })
+
     def export_record(self, record_id: str) -> None:
         payload = self.read_json()
         fmt = str(payload.get("format") or "mjpeg").lower()
@@ -530,6 +613,59 @@ class ControlStationServer(ThreadingHTTPServer):
 
     def send_manual_action(self, action: object | None) -> bool:
         return self.manual_transport.send(action)
+
+    def pose_status(self, flight_id: str) -> dict[str, object]:
+        session = self.sessions.get(flight_id)
+        if session is not None and session.estimator is not None:
+            return {
+                "flightId": flight_id,
+                "live": True,
+                "status": session.estimator.status().as_dict(),
+            }
+        record = self._latest_pose_record(flight_id)
+        if record is None:
+            return {"flightId": flight_id, "live": False, "status": {"state": "no_estimator"}}
+        return {
+            "flightId": flight_id,
+            "live": False,
+            "status": {"state": "stored", "recordId": record["id"]},
+        }
+
+    def pose_track(self, flight_id: str, *, since: int = -1) -> dict[str, object]:
+        session = self.sessions.get(flight_id)
+        if session is not None and session.estimator is not None:
+            poses = session.estimator_poses(since)
+            return {
+                "flightId": flight_id,
+                "live": True,
+                "poses": poses,
+                "status": session.estimator.status().as_dict(),
+            }
+        record = self._latest_pose_record(flight_id)
+        if record is None:
+            return {"flightId": flight_id, "live": False, "poses": [], "status": {"state": "no_estimator"}}
+        path = self.store.record_path(record["id"])
+        poses = load_pose_track(path) if path else []
+        if since >= 0:
+            poses = [p for p in poses if int(p.get("frameIndex", -1)) > since]
+        return {
+            "flightId": flight_id,
+            "live": False,
+            "poses": poses,
+            "status": {"state": "stored", "framesProcessed": len(poses)},
+        }
+
+    def _latest_pose_record(self, flight_id: str) -> dict[str, object] | None:
+        state = self.store.state()
+        for drone in state.get("drones", []):
+            for flight in drone.get("flights", []):
+                if flight.get("id") != flight_id:
+                    continue
+                pose_records = [r for r in flight.get("records", []) if r.get("type") == "pose-track"]
+                if not pose_records:
+                    return None
+                return pose_records[-1]
+        return None
 
     def server_close(self) -> None:
         self.manual_loop_running = False

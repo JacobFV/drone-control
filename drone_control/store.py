@@ -131,6 +131,8 @@ class ControlStationStore:
                         item["path"] = str(self.blobs.resolve(record["blob_key"]))
                     if record["type"] == "frames":
                         item["streamUrl"] = f"/api/records/{record['id']}/mjpeg"
+                    if record["type"] == "pose-track":
+                        item["poseUrl"] = f"/api/flights/{flight['id']}/pose/track"
                     flight_dict["records"].append(item)
                 drone_dict["flights"].append(flight_dict)
             drones.append(drone_dict)
