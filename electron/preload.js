@@ -1,5 +1,6 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("droneStation", {
-  getInitialState: () => ipcRenderer.invoke("app:getInitialState"),
+  request: (request) => ipcRenderer.invoke("app:request", request),
+  serviceUrl: () => ipcRenderer.invoke("app:serviceUrl"),
 });

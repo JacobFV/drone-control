@@ -6,6 +6,7 @@ const state = {
   lhsCollapsed: false,
   rhsCollapsed: false,
   mode: "review",
+  serviceUrl: "",
 };
 
 const workspace = document.querySelector(".workspace");
@@ -18,11 +19,14 @@ const flightState = document.getElementById("flightState");
 const manualPanel = document.getElementById("manualPanel");
 const throttle = document.getElementById("throttle");
 const throttleValue = document.getElementById("throttleValue");
+const forwardStream = document.getElementById("forwardStream");
+const forwardEmpty = document.getElementById("forwardEmpty");
 
 init();
 
 async function init() {
-  const initialState = await window.droneStation.getInitialState();
+  state.serviceUrl = await window.droneStation.serviceUrl();
+  const initialState = await apiGet("/api/state");
   state.drones = initialState.drones;
   state.selectedDroneId = state.drones[0]?.id ?? "";
   state.selectedFlightId = state.drones[0]?.flights[0]?.id ?? "";
@@ -82,6 +86,7 @@ function render() {
   renderTree();
   renderMainView();
   renderInspector();
+  renderStream();
 }
 
 function applyLayout() {
@@ -130,6 +135,7 @@ function renderTree() {
         state.mode = flight.mode ?? "review";
         renderTree();
         renderInspector();
+        renderStream();
       });
       children.append(flightButton);
     });
@@ -148,6 +154,7 @@ function renderMainView() {
     panel.classList.remove("is-active");
   });
   document.getElementById(`${state.mainView}View`).classList.add("is-active");
+  renderStream();
 }
 
 function renderInspector() {
@@ -171,7 +178,7 @@ function renderInspector() {
     IP: drone.connection.ip,
     Control: drone.connection.control,
     Camera: drone.connection.camera,
-    Policy: flight?.policy ?? "No flight selected",
+    Policy: formatPolicy(flight?.policy),
     Started: flight?.startedAt ?? "not started",
     ...(flight?.metadata ?? {}),
   };
@@ -179,6 +186,7 @@ function renderInspector() {
 
   renderMetrics(flight?.metrics ?? {});
   renderRecords(flight?.records ?? []);
+  renderStream();
 }
 
 function renderMode() {
@@ -211,7 +219,7 @@ function renderRecords(records) {
   recordsList.replaceChildren();
   records.forEach((record) => {
     const item = element("div", "record");
-    item.innerHTML = `<strong>${escapeHtml(record.label)}</strong><code>${escapeHtml(record.path)}</code>`;
+    item.innerHTML = `<strong>${escapeHtml(record.label)}</strong><code>${escapeHtml(record.path ?? record.blobKey ?? "not imported")}</code>`;
     recordsList.append(item);
   });
 }
@@ -227,37 +235,35 @@ function renderKeyValue(parent, values) {
   });
 }
 
-function createDraftFlight() {
+async function createDraftFlight() {
   const drone = selectedDrone();
   if (!drone) return;
 
   const now = new Date();
-  const id = `flight-draft-${now.getTime()}`;
-  const draft = {
-    id,
+  const created = await apiPost("/api/flights", {
+    droneId: drone.id,
     name: `Draft flight ${now.toLocaleTimeString()}`,
-    startedAt: "not started",
-    duration: "00:00:00",
-    mode: "manual",
-    policy: "Manual bench test",
-    metadata: {
-      status: "draft",
-      notes: "Ready to bind camera/control scripts.",
-    },
-    metrics: {
-      frames: 0,
-      packets: 0,
-      bytes: 0,
-      resolution: "pending",
-    },
-    records: [],
-  };
-
-  drone.flights.unshift(draft);
-  state.selectedFlightId = id;
+  });
+  const refreshed = await apiGet("/api/state");
+  state.drones = refreshed.drones;
+  state.selectedFlightId = created.id;
   state.mode = "manual";
   renderTree();
   renderInspector();
+}
+
+function renderStream() {
+  const flight = selectedFlight();
+  const framesRecord = flight?.records.find((record) => record.type === "frames" && record.streamUrl);
+  if (framesRecord && state.mainView === "forward") {
+    forwardStream.src = absoluteServiceUrl(`${framesRecord.streamUrl}?fps=12`);
+    forwardStream.classList.remove("is-hidden");
+    forwardEmpty.classList.add("is-hidden");
+    return;
+  }
+  forwardStream.removeAttribute("src");
+  forwardStream.classList.add("is-hidden");
+  forwardEmpty.classList.remove("is-hidden");
 }
 
 function selectedDrone() {
@@ -282,6 +288,24 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+}
+
+async function apiGet(path) {
+  return window.droneStation.request({ method: "GET", path });
+}
+
+async function apiPost(path, body) {
+  return window.droneStation.request({ method: "POST", path, body });
+}
+
+function absoluteServiceUrl(path) {
+  return new URL(path, state.serviceUrl).toString();
+}
+
+function formatPolicy(policy) {
+  if (!policy) return "No flight selected";
+  if (typeof policy === "string") return policy;
+  return policy.name || JSON.stringify(policy);
 }
 
 function formatValue(value) {
