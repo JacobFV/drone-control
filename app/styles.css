@@ -13,7 +13,7 @@
   --accent-2: #7aa7ff;
   --danger: #ef6a63;
   --warning: #e6b95c;
-  --shadow: 0 18px 50px rgba(0, 0, 0, 0.28);
+  --shadow: none;
 }
 
 * {
@@ -101,7 +101,7 @@ button {
 .mode-option,
 .control-pad button {
   height: 34px;
-  border-radius: 7px;
+  border-radius: 3px;
   background: var(--surface-2);
   border: 1px solid var(--line);
   cursor: pointer;
@@ -141,7 +141,7 @@ button {
 .danger-button {
   height: 32px;
   padding: 0 12px;
-  border-radius: 7px;
+  border-radius: 3px;
   border: 1px solid var(--line);
   background: var(--surface-2);
   color: var(--text);
@@ -172,7 +172,7 @@ input:disabled {
 .mode-selector {
   display: inline-flex;
   padding: 3px;
-  border-radius: 8px;
+  border-radius: 3px;
   background: #101315;
   border: 1px solid var(--line);
 }
@@ -198,7 +198,6 @@ input:disabled {
   min-height: 0;
   display: grid;
   grid-template-columns: 294px minmax(520px, 1fr) 340px;
-  transition: grid-template-columns 160ms ease;
 }
 
 .workspace.lhs-collapsed {
@@ -251,7 +250,7 @@ input:disabled {
   display: inline-grid;
   place-items: center;
   padding: 0 8px;
-  border-radius: 999px;
+  border-radius: 3px;
   background: var(--surface-2);
   border: 1px solid var(--line);
   color: var(--muted);
@@ -279,7 +278,7 @@ input:disabled {
 
 .tree-group,
 .flight-row {
-  border-radius: 7px;
+  border-radius: 3px;
 }
 
 .drone-row,
@@ -338,7 +337,6 @@ input:disabled {
 
 .status-dot.available {
   background: var(--accent);
-  box-shadow: 0 0 0 4px rgba(97, 195, 168, 0.12);
 }
 
 .status-dot.offline {
@@ -387,7 +385,7 @@ input:disabled {
   width: 100%;
   height: 100%;
   overflow: hidden;
-  border-radius: 8px;
+  border-radius: 3px;
   border: 1px solid #303941;
   background: #050607;
   box-shadow: var(--shadow);
@@ -419,10 +417,9 @@ input:disabled {
   display: grid;
   gap: 3px;
   padding: 10px 12px;
-  border-radius: 7px;
-  background: rgba(17, 20, 22, 0.76);
+  border-radius: 3px;
+  background: rgba(17, 20, 22, 0.92);
   border: 1px solid rgba(255, 255, 255, 0.12);
-  backdrop-filter: blur(10px);
 }
 
 .camera-overlay span {
@@ -448,9 +445,7 @@ input:disabled {
 }
 
 .world {
-  background:
-    radial-gradient(circle at 50% 32%, rgba(122, 167, 255, 0.18), transparent 30%),
-    linear-gradient(#111820, #111416 55%, #0b0e10);
+  background: #101418;
 }
 
 .grid-floor {
@@ -461,8 +456,8 @@ input:disabled {
   height: 56%;
   transform: perspective(420px) rotateX(58deg);
   background:
-    linear-gradient(90deg, rgba(97, 195, 168, 0.2) 1px, transparent 1px),
-    linear-gradient(rgba(97, 195, 168, 0.2) 1px, transparent 1px);
+    linear-gradient(90deg, rgba(97, 195, 168, 0.16) 1px, transparent 1px),
+    linear-gradient(rgba(97, 195, 168, 0.16) 1px, transparent 1px);
   background-size: 44px 44px;
 }
 
@@ -505,7 +500,7 @@ input:disabled {
   top: 66px;
   width: 48px;
   height: 48px;
-  border-radius: 8px;
+  border-radius: 3px;
   border: 5px solid #64727b;
 }
 
@@ -514,7 +509,7 @@ input:disabled {
   top: 84px;
   width: 144px;
   height: 12px;
-  border-radius: 6px;
+  border-radius: 3px;
 }
 
 .arm-b {
@@ -541,8 +536,8 @@ input:disabled {
   display: flex;
   gap: 14px;
   padding: 10px 12px;
-  border-radius: 7px;
-  background: rgba(17, 20, 22, 0.8);
+  border-radius: 3px;
+  background: rgba(17, 20, 22, 0.92);
   border: 1px solid rgba(255,255,255,0.1);
   color: var(--muted);
   font-size: 13px;
@@ -662,7 +657,7 @@ input[type="range"] {
   min-height: 70px;
   padding: 12px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: 3px;
   background: #14181b;
 }
 
@@ -687,7 +682,7 @@ input[type="range"] {
 .record {
   padding: 10px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: 3px;
   background: #14181b;
 }
 

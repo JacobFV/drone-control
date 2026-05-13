@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain } = require("electron");
+const { app, BrowserWindow, Menu, ipcMain } = require("electron");
 const { spawn } = require("child_process");
 const path = require("path");
 const readline = require("readline");
@@ -31,6 +31,7 @@ function createWindow() {
 }
 
 app.whenReady().then(async () => {
+  Menu.setApplicationMenu(null);
   serviceUrl = await startPythonService();
   ipcMain.handle("app:request", async (_event, request) => serviceRequest(request));
   ipcMain.handle("app:serviceUrl", () => serviceUrl);
