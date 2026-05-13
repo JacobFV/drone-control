@@ -171,6 +171,11 @@ class ControlStationStore:
             self.conn.commit()
             return {"id": flight_id}
 
+    def flight_exists(self, flight_id: str) -> bool:
+        with self.lock:
+            row = self.conn.execute("SELECT 1 FROM flights WHERE id = ?", (flight_id,)).fetchone()
+            return row is not None
+
     def update_flight(
         self,
         flight_id: str,
@@ -359,7 +364,12 @@ class ControlStationStore:
         with self.lock:
             record_id = f"record-{uuid.uuid4().hex[:12]}"
             blob = self.blobs.import_path(source)
-            metadata = {"originalPath": str(source.relative_to(self.repo_root))} if source.exists() else {"missingPath": str(source)}
+            metadata = {"missingPath": str(source)}
+            if source.exists():
+                try:
+                    metadata = {"originalPath": str(source.relative_to(self.repo_root))}
+                except ValueError:
+                    metadata = {"originalPath": str(source)}
             self.conn.execute(
                 """
                 INSERT INTO records

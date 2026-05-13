@@ -28,8 +28,8 @@ The `data/` directory is intentionally gitignored.
 ## Electron/Python Boundary
 
 Electron owns the native window and renderer UI. Python owns drone IO, the
-database, blob storage, camera record serving, Wi-Fi capability checks, and later
-manual control.
+database, blob storage, camera record serving, flight recording, Wi-Fi capability
+checks, and manual control.
 
 Electron starts `python3 -m drone_control.service` and communicates with it over
 localhost HTTP through main-process IPC. The renderer does not spawn shell
@@ -40,8 +40,20 @@ Current endpoints:
 - `GET /api/health`
 - `GET /api/state`
 - `POST /api/flights`
+- `PATCH /api/flights/<flight-id>`
+- `POST /api/flights/<flight-id>/records`
+- `GET /api/flights/<flight-id>/session`
+- `POST /api/flights/<flight-id>/session/start`
+- `POST /api/flights/<flight-id>/session/stop`
 - `GET /api/records/<record-id>/mjpeg`
 - `GET /api/wifi/capabilities`
+- `GET /api/manual/status`
+- `POST /api/manual/arm`
+- `POST /api/manual/disarm`
+- `POST /api/manual/heartbeat`
+- `POST /api/manual/axes`
+- `POST /api/manual/stop`
+- `POST /api/manual/clear-fault`
 
 ## Live Video Path
 
@@ -49,9 +61,12 @@ The current live/review path is MJPEG over localhost. The Python service streams
 JPEG frame records as `multipart/x-mixed-replace`, and the Electron renderer
 uses a normal `<img>` element as the sink.
 
-This is intentionally simple and inspectable. The next live-drone step should
-feed decoded camera frames into the same service-side frame source instead of
-adding a separate renderer-side video stack.
+The service also owns the flight session recorder. A session starts a concrete
+frame source, writes only real decoded JPEG frames to `data/session_work/`, and
+imports that directory into the blob store as a `frames` record when stopped.
+There is no synthetic frame fallback. A `directory` source exists for repeatable
+tests and review-file import. The app-facing Start Capture action uses the
+`live` source, which opens the drone RTSP/RTP camera path.
 
 ## Drone Identity
 
@@ -82,8 +97,11 @@ control path should enforce these rules in Python, not just in the UI:
 - Switching away from manual mode sends a ramped stop.
 - Closing the app sends a ramped stop when a manual session is active.
 
-The Electron control pad is currently UI only. The Python service should expose
-manual control only after these server-side checks exist.
+The Electron control pad sends desired axes to the local service. The service
+holds the safety state machine and a 20 Hz command loop. UDP output is disabled
+by default; setting `DRONE_SERVICE_ENABLE_IO=1` enables packet emission through
+the configured `DRONE_IFACE`, `DRONE_IP`, `DRONE_PORT`, and `DRONE_PROTOCOL`.
+Opening the app without that flag cannot send motor packets.
 
 ## Wi-Fi Concurrency
 

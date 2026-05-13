@@ -8,6 +8,7 @@ const state = {
   mode: "review",
   serviceUrl: "",
   manualStatus: null,
+  sessionStatus: null,
   heartbeatTimer: null,
   refreshTimer: null,
 };
@@ -30,6 +31,8 @@ const manualMessage = document.getElementById("manualMessage");
 const armButton = document.getElementById("armButton");
 const disarmButton = document.getElementById("disarmButton");
 const stopButton = document.getElementById("stopButton");
+const startSessionButton = document.getElementById("startSession");
+const stopSessionButton = document.getElementById("stopSession");
 
 init();
 
@@ -40,6 +43,7 @@ async function init() {
   state.selectedDroneId = state.drones[0]?.id ?? "";
   state.selectedFlightId = state.drones[0]?.flights[0]?.id ?? "";
   await refreshManualStatus();
+  await refreshSessionStatus();
   render();
   wireToolbar();
   wireModeSelector();
@@ -69,6 +73,8 @@ function wireToolbar() {
   document.getElementById("newFlight").addEventListener("click", () => {
     createDraftFlight();
   });
+  startSessionButton.addEventListener("click", startSelectedSession);
+  stopSessionButton.addEventListener("click", stopSelectedSession);
 }
 
 function wireModeSelector() {
@@ -242,6 +248,7 @@ function renderTree() {
       if (!state.selectedFlightId && drone.flights[0]) {
         state.selectedFlightId = drone.flights[0].id;
       }
+      refreshSessionStatus();
       renderInspector();
     });
 
@@ -263,6 +270,7 @@ function renderTree() {
         state.selectedDroneId = drone.id;
         state.selectedFlightId = flight.id;
         state.mode = flight.mode ?? "review";
+        refreshSessionStatus();
         renderTree();
         renderInspector();
         renderStream();
@@ -302,6 +310,7 @@ function renderInspector() {
   }
   flightState.textContent = state.mode;
   renderMode();
+  renderSessionControls();
 
   const metadata = {
     Drone: drone.name,
@@ -386,6 +395,7 @@ async function createDraftFlight() {
   state.drones = refreshed.drones;
   state.selectedFlightId = created.id;
   state.mode = "manual";
+  await refreshSessionStatus();
   renderTree();
   renderInspector();
 }
@@ -430,6 +440,52 @@ async function refreshAppState() {
     selectedFlightId;
   renderTree();
   renderInspector();
+  await refreshSessionStatus();
+}
+
+async function refreshSessionStatus() {
+  const flight = selectedFlight();
+  if (!flight) {
+    state.sessionStatus = null;
+    renderSessionControls();
+    return;
+  }
+  const status = await safeApiGet(`/api/flights/${flight.id}/session`);
+  if (status) {
+    state.sessionStatus = status;
+  }
+  renderSessionControls();
+}
+
+function renderSessionControls() {
+  const running = Boolean(state.sessionStatus?.running);
+  const hasFlight = Boolean(selectedFlight());
+  startSessionButton.disabled = !hasFlight || running;
+  stopSessionButton.disabled = !hasFlight || !running;
+  if (running) {
+    serviceStatus.textContent = `Recording ${state.sessionStatus.frames} frames`;
+    serviceStatus.classList.remove("is-danger");
+  }
+}
+
+async function startSelectedSession() {
+  const flight = selectedFlight();
+  if (!flight) return;
+  const status = await safeApiPost(`/api/flights/${flight.id}/session/start`, { source: "live" });
+  if (!status) return;
+  state.sessionStatus = status;
+  renderSessionControls();
+  await refreshAppState();
+}
+
+async function stopSelectedSession() {
+  const flight = selectedFlight();
+  if (!flight) return;
+  const status = await safeApiPost(`/api/flights/${flight.id}/session/stop`, {});
+  if (!status) return;
+  state.sessionStatus = status;
+  renderSessionControls();
+  await refreshAppState();
 }
 
 function startHeartbeat() {

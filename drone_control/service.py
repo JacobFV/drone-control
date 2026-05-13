@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import mimetypes
+import os
 import re
 import subprocess
 import sys
@@ -13,7 +14,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from drone_control.live_video import DirectoryFrameSource, mjpeg_chunks
+from drone_control.flight_session import FlightSession, FlightSessionManager
+from drone_control.live_video import DirectoryFrameSource, LiveDroneFrameSource, LiveDroneFrameSourceConfig, mjpeg_chunks
 from drone_control.manual_control import ManualControlConfig, ManualControlSession
 from drone_control.manual_transport import ManualDroneTransport
 from drone_control.store import ControlStationStore
@@ -39,6 +41,12 @@ class ControlStationHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/manual/status":
             with self.server.manual_lock:
                 self.send_json(self.server.manual_status())
+            return
+
+        match = re.fullmatch(r"/api/flights/([^/]+)/session", parsed.path)
+        if match:
+            status = self.server.sessions.status(match.group(1))
+            self.send_json(status.as_dict() if status else {"running": False, "flightId": match.group(1)})
             return
 
         match = re.fullmatch(r"/api/records/([^/]+)/mjpeg", parsed.path)
@@ -141,6 +149,16 @@ class ControlStationHandler(BaseHTTPRequestHandler):
                 self.send_json(self.server.manual_status(action))
             return
 
+        match = re.fullmatch(r"/api/flights/([^/]+)/session/start", parsed.path)
+        if match:
+            self.start_flight_session(match.group(1))
+            return
+
+        match = re.fullmatch(r"/api/flights/([^/]+)/session/stop", parsed.path)
+        if match:
+            self.stop_flight_session(match.group(1))
+            return
+
         self.send_error(HTTPStatus.NOT_FOUND)
 
     def do_PATCH(self) -> None:
@@ -225,6 +243,73 @@ class ControlStationHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: object) -> None:
         sys.stderr.write(f"service: {self.address_string()} {fmt % args}\n")
 
+    def start_flight_session(self, flight_id: str) -> None:
+        if not self.server.store.flight_exists(flight_id):
+            self.send_json({"error": "flight not found"}, status=HTTPStatus.NOT_FOUND)
+            return
+
+        payload = self.read_json()
+        source_name = str(payload.get("source") or "live")
+        max_frames = optional_int(payload, "maxFrames")
+        try:
+            frame_source = make_frame_source(source_name, payload)
+            session = FlightSession(
+                flight_id=flight_id,
+                source_name=source_name,
+                frame_source=frame_source,
+                work_root=self.server.session_work_root,
+                max_frames=max_frames,
+            )
+            status = self.server.sessions.start(session)
+        except (OSError, RuntimeError, ValueError) as exc:
+            self.send_json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
+            return
+
+        self.server.store.update_flight(
+            flight_id,
+            mode="manual",
+            metadata={"sessionStatus": "recording", "sessionId": status.session_id, "sessionSource": source_name},
+        )
+        self.send_json(status.as_dict())
+
+    def stop_flight_session(self, flight_id: str) -> None:
+        status = self.server.sessions.stop(flight_id)
+        if status is None:
+            self.send_json({"error": "no active session"}, status=HTTPStatus.NOT_FOUND)
+            return
+
+        record_id = status.record_id
+        if status.frames > 0 and record_id is None:
+            record_id = self.server.store.import_record(
+                flight_id,
+                "frames",
+                f"Session frames {status.session_id}",
+                "image/jpeg-sequence",
+                Path(status.frame_dir),
+            )
+            session = self.server.sessions.get(flight_id)
+            if session is not None:
+                session.set_record_id(record_id)
+
+        metrics = {
+            "frames": status.frames,
+            "bytes": status.bytes,
+            "duration": format_duration(status.duration_seconds),
+        }
+        self.server.store.update_flight(
+            flight_id,
+            duration=format_duration(status.duration_seconds),
+            metadata={
+                "sessionStatus": "stopped" if not status.error else "error",
+                "sessionId": status.session_id,
+                "sessionSource": status.source,
+                "sessionError": status.error or "",
+            },
+            metrics=metrics,
+        )
+        refreshed = self.server.sessions.status(flight_id)
+        self.send_json((refreshed or status).as_dict() | {"recordId": record_id})
+
 
 class ControlStationServer(ThreadingHTTPServer):
     def __init__(self, server_address: tuple[str, int], store: ControlStationStore) -> None:
@@ -233,6 +318,8 @@ class ControlStationServer(ThreadingHTTPServer):
         self.manual = ManualControlSession(ManualControlConfig())
         self.manual_lock = threading.RLock()
         self.manual_transport = ManualDroneTransport.from_env()
+        self.session_work_root = store.db_path.parent / "session_work"
+        self.sessions = FlightSessionManager(self.session_work_root)
         self.manual_loop_running = True
         self.manual_thread = threading.Thread(target=self._manual_loop, name="manual-control-loop", daemon=True)
         self.manual_thread.start()
@@ -256,6 +343,7 @@ class ControlStationServer(ThreadingHTTPServer):
     def server_close(self) -> None:
         self.manual_loop_running = False
         self.manual_thread.join(timeout=1.0)
+        self.sessions.stop_all()
         self.manual_transport.close()
         super().server_close()
 
@@ -343,10 +431,48 @@ def extract_interface_combinations(iw_list: str) -> list[str]:
     return combos
 
 
+def make_frame_source(source_name: str, payload: dict[str, object]) -> object:
+    if source_name == "directory":
+        frame_dir = resolve_repo_path(str(payload.get("frameDir") or ""))
+        if frame_dir is None or not frame_dir.is_dir():
+            raise ValueError("directory source requires frameDir inside the repository")
+        fps = float(payload.get("fps") or 12)
+        return DirectoryFrameSource(frame_dir, fps=max(1.0, min(60.0, fps)))
+    if source_name != "live":
+        raise ValueError("source must be live or directory")
+
+    return LiveDroneFrameSource(
+        LiveDroneFrameSourceConfig(
+            iface=str(payload.get("iface") or os.environ.get("DRONE_IFACE", "wlP9s9")),
+            local_ip=str(payload.get("localIp") or os.environ.get("DRONE_CAMERA_LOCAL_IP", "")),
+            drone_ip=str(payload.get("droneIp") or os.environ.get("DRONE_IP", "192.168.1.1")),
+            rtsp_port=int(payload.get("rtspPort") or os.environ.get("DRONE_RTSP_PORT", "7070")),
+            video_port=int(payload.get("videoPort") or os.environ.get("DRONE_CAMERA_VIDEO_PORT", "32124")),
+            aux_port=int(payload.get("auxPort") or os.environ.get("DRONE_CAMERA_AUX_PORT", "32125")),
+            drone_video_port=int(payload.get("droneVideoPort") or os.environ.get("DRONE_CAMERA_DRONE_VIDEO_PORT", "53797")),
+            bind_device=env_bool("DRONE_CAMERA_BIND_DEVICE", False),
+            use_rtsp=env_bool("DRONE_CAMERA_USE_RTSP", True),
+        )
+    )
+
+
+def env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def optional_str(payload: dict[str, object], key: str) -> str | None:
     if key not in payload:
         return None
     return str(payload[key])
+
+
+def optional_int(payload: dict[str, object], key: str) -> int | None:
+    if key not in payload or payload[key] in {None, ""}:
+        return None
+    return int(payload[key])
 
 
 def optional_dict(payload: dict[str, object], key: str) -> dict[str, object] | None:
@@ -384,6 +510,13 @@ def action_to_dict(action: object) -> dict[str, object]:
             "flip": sanitized.flip,
         }
     return {}
+
+
+def format_duration(seconds: float) -> str:
+    total = max(0, int(round(seconds)))
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
 if __name__ == "__main__":
