@@ -78,6 +78,17 @@ button {
   flex: 1;
 }
 
+.toolbar-status {
+  min-width: 96px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.toolbar-status.is-danger {
+  color: var(--danger);
+}
+
 .toolbar-divider {
   width: 1px;
   height: 28px;
@@ -124,6 +135,37 @@ button {
 
 .primary-button:hover {
   background: #bfe8da;
+}
+
+.secondary-button,
+.danger-button {
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 7px;
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.secondary-button:hover,
+.danger-button:hover {
+  border-color: #53616c;
+  background: var(--surface-3);
+}
+
+.danger-button {
+  border-color: rgba(239, 106, 99, 0.42);
+  color: #ffc4bf;
+  background: rgba(239, 106, 99, 0.12);
+}
+
+button:disabled,
+input:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
 }
 
 .segmented,
@@ -215,6 +257,18 @@ button {
   color: var(--muted);
   font-size: 12px;
   font-weight: 800;
+}
+
+.pill.is-armed {
+  border-color: rgba(97, 195, 168, 0.5);
+  background: rgba(97, 195, 168, 0.12);
+  color: #bfe8da;
+}
+
+.pill.is-danger {
+  border-color: rgba(239, 106, 99, 0.5);
+  background: rgba(239, 106, 99, 0.12);
+  color: #ffc4bf;
 }
 
 .tree {
@@ -566,6 +620,25 @@ button {
   display: none;
 }
 
+.panel-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.panel-title-row h3 {
+  margin-bottom: 0;
+}
+
+.manual-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
 .control-pad {
   display: grid;
   grid-template-columns: repeat(3, 46px);
@@ -605,6 +678,14 @@ button {
 
 input[type="range"] {
   accent-color: var(--accent);
+}
+
+.manual-message {
+  min-height: 34px;
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .kv-list {

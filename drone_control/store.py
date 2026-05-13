@@ -214,7 +214,15 @@ class ControlStationStore:
                 ),
             )
             self.conn.commit()
-            return {"id": flight_id}
+            return {
+                "id": flight_id,
+                "name": name if name is not None else row["name"],
+                "mode": mode if mode is not None else row["mode"],
+                "duration": duration if duration is not None else row["duration"],
+                "policy": current_policy,
+                "metadata": current_metadata,
+                "metrics": current_metrics,
+            }
 
     def seed_if_empty(self) -> None:
         with self.lock:

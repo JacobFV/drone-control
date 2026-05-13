@@ -90,7 +90,15 @@ class ControlStationHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/manual/arm":
-            self.server.manual.arm()
+            try:
+                self.server.manual.arm()
+            except RuntimeError as exc:
+                self.send_json({"error": str(exc), **self.server.manual_status()}, status=HTTPStatus.CONFLICT)
+                return
+            self.send_json(self.server.manual_status())
+            return
+        if parsed.path == "/api/manual/clear-fault":
+            self.server.manual.clear_fault()
             self.send_json(self.server.manual_status())
             return
         if parsed.path == "/api/manual/disarm":

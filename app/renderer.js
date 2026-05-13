@@ -7,6 +7,9 @@ const state = {
   rhsCollapsed: false,
   mode: "review",
   serviceUrl: "",
+  manualStatus: null,
+  heartbeatTimer: null,
+  refreshTimer: null,
 };
 
 const workspace = document.querySelector(".workspace");
@@ -21,20 +24,28 @@ const throttle = document.getElementById("throttle");
 const throttleValue = document.getElementById("throttleValue");
 const forwardStream = document.getElementById("forwardStream");
 const forwardEmpty = document.getElementById("forwardEmpty");
+const serviceStatus = document.getElementById("serviceStatus");
+const manualState = document.getElementById("manualState");
+const manualMessage = document.getElementById("manualMessage");
+const armButton = document.getElementById("armButton");
+const disarmButton = document.getElementById("disarmButton");
+const stopButton = document.getElementById("stopButton");
 
 init();
 
 async function init() {
   state.serviceUrl = await window.droneStation.serviceUrl();
-  const initialState = await apiGet("/api/state");
+  const initialState = await loadState();
   state.drones = initialState.drones;
   state.selectedDroneId = state.drones[0]?.id ?? "";
   state.selectedFlightId = state.drones[0]?.flights[0]?.id ?? "";
+  await refreshManualStatus();
   render();
   wireToolbar();
   wireModeSelector();
   wireSimulation();
   wireControls();
+  state.refreshTimer = window.setInterval(refreshAppState, 5000);
 }
 
 function wireToolbar() {
@@ -62,8 +73,13 @@ function wireToolbar() {
 
 function wireModeSelector() {
   document.querySelectorAll(".mode-option").forEach((button) => {
-    button.addEventListener("click", () => {
+    button.addEventListener("click", async () => {
+      if (state.mode === "manual" && button.dataset.mode !== "manual") {
+        await safeApiPost("/api/manual/disarm", {});
+        await refreshManualStatus();
+      }
       state.mode = button.dataset.mode;
+      await persistSelectedFlightMode(state.mode);
       renderMode();
     });
   });
@@ -78,6 +94,110 @@ function wireSimulation() {
 function wireControls() {
   throttle.addEventListener("input", () => {
     throttleValue.textContent = throttle.value;
+    sendManualAxes({ throttle: Number(throttle.value) });
+  });
+
+  document.querySelectorAll("[data-control]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const control = button.dataset.control;
+      if (control === "stop") {
+        emergencyStop();
+      } else {
+        sendManualAxes(controlAxes(control));
+      }
+    });
+  });
+
+  armButton.addEventListener("click", async () => {
+    if (state.manualStatus?.state === "faulted") {
+      await safeApiPost("/api/manual/clear-fault", {});
+    }
+    const status = await safeApiPost("/api/manual/arm", {});
+    if (status) updateManualStatus(status);
+  });
+  disarmButton.addEventListener("click", async () => {
+    const status = await safeApiPost("/api/manual/disarm", {});
+    if (status) updateManualStatus(status);
+  });
+  stopButton.addEventListener("click", emergencyStop);
+}
+
+window.addEventListener("beforeunload", () => {
+  if (state.heartbeatTimer !== null) {
+    window.clearInterval(state.heartbeatTimer);
+  }
+  if (state.refreshTimer !== null) {
+    window.clearInterval(state.refreshTimer);
+  }
+});
+
+async function emergencyStop() {
+  const status = await safeApiPost("/api/manual/stop", {});
+  if (status) {
+    throttle.value = "0";
+    throttleValue.textContent = "0";
+    updateManualStatus(status);
+  }
+}
+
+async function sendManualAxes(axes) {
+  if (state.mode !== "manual") return;
+  const status = await safeApiPost("/api/manual/axes", axes);
+  if (status) updateManualStatus(status);
+}
+
+function controlAxes(control) {
+  const center = 128;
+  const step = 28;
+  switch (control) {
+    case "pitch-up":
+      return { pitch: center + step };
+    case "pitch-down":
+      return { pitch: center - step };
+    case "roll-left":
+      return { roll: center - step };
+    case "roll-right":
+      return { roll: center + step };
+    case "yaw-left":
+      return { yaw: center - step };
+    case "yaw-right":
+      return { yaw: center + step };
+    default:
+      return {};
+  }
+}
+
+async function refreshManualStatus() {
+  const status = await safeApiGet("/api/manual/status");
+  if (status) updateManualStatus(status);
+}
+
+function updateManualStatus(status) {
+  state.manualStatus = status;
+  renderManualStatus();
+}
+
+function renderManualStatus() {
+  const status = state.manualStatus;
+  if (!status) return;
+  manualState.textContent = status.state;
+  manualState.classList.toggle("is-danger", status.state === "faulted");
+  manualState.classList.toggle("is-armed", status.armed);
+  manualMessage.textContent = status.faultReason
+    ? `Fault: ${status.faultReason}`
+    : status.stopReason
+      ? `Stopping: ${status.stopReason}`
+      : status.armed
+        ? "Manual control is armed. Heartbeat active."
+        : "Manual control is disarmed.";
+  armButton.textContent = status.state === "faulted" ? "Clear + Arm" : "Arm";
+  armButton.disabled = status.armed;
+  disarmButton.disabled = !status.armed;
+  throttle.disabled = !status.armed;
+  document.querySelectorAll("[data-control]").forEach((button) => {
+    if (button.dataset.control !== "stop") {
+      button.disabled = !status.armed;
+    }
   });
 }
 
@@ -167,7 +287,9 @@ function renderInspector() {
     return;
   }
 
-  state.mode = flight?.mode ?? state.mode;
+  if (flight) {
+    state.mode = flight.mode ?? state.mode;
+  }
   flightState.textContent = state.mode;
   renderMode();
 
@@ -195,6 +317,12 @@ function renderMode() {
   });
   flightState.textContent = state.mode;
   manualPanel.classList.toggle("is-hidden", state.mode !== "manual");
+  if (state.mode === "manual") {
+    startHeartbeat();
+  } else {
+    stopHeartbeat();
+  }
+  renderManualStatus();
 }
 
 function renderMetrics(metrics) {
@@ -244,7 +372,7 @@ async function createDraftFlight() {
     droneId: drone.id,
     name: `Draft flight ${now.toLocaleTimeString()}`,
   });
-  const refreshed = await apiGet("/api/state");
+  const refreshed = await loadState();
   state.drones = refreshed.drones;
   state.selectedFlightId = created.id;
   state.mode = "manual";
@@ -256,14 +384,56 @@ function renderStream() {
   const flight = selectedFlight();
   const framesRecord = flight?.records.find((record) => record.type === "frames" && record.streamUrl);
   if (framesRecord && state.mainView === "forward") {
-    forwardStream.src = absoluteServiceUrl(`${framesRecord.streamUrl}?fps=12`);
+    const nextUrl = absoluteServiceUrl(`${framesRecord.streamUrl}?fps=12`);
+    if (forwardStream.src !== nextUrl) {
+      forwardStream.src = nextUrl;
+    }
     forwardStream.classList.remove("is-hidden");
     forwardEmpty.classList.add("is-hidden");
     return;
   }
-  forwardStream.removeAttribute("src");
+  if (forwardStream.hasAttribute("src")) {
+    forwardStream.removeAttribute("src");
+  }
   forwardStream.classList.add("is-hidden");
   forwardEmpty.classList.remove("is-hidden");
+}
+
+async function persistSelectedFlightMode(mode) {
+  const flight = selectedFlight();
+  if (!flight) return;
+  const updated = await safeApiPatch(`/api/flights/${flight.id}`, { mode });
+  if (!updated) return;
+  flight.mode = updated.mode;
+}
+
+async function refreshAppState() {
+  const refreshed = await safeApiGet("/api/state");
+  if (!refreshed) return;
+  const selectedDroneId = state.selectedDroneId;
+  const selectedFlightId = state.selectedFlightId;
+  state.drones = refreshed.drones;
+  state.selectedDroneId = state.drones.find((drone) => drone.id === selectedDroneId)?.id ?? state.drones[0]?.id ?? "";
+  state.selectedFlightId =
+    selectedFlight()?.id ??
+    state.drones.find((drone) => drone.id === state.selectedDroneId)?.flights[0]?.id ??
+    selectedFlightId;
+  renderTree();
+  renderInspector();
+}
+
+function startHeartbeat() {
+  if (state.heartbeatTimer !== null) return;
+  state.heartbeatTimer = window.setInterval(async () => {
+    const status = await safeApiPost("/api/manual/heartbeat", {});
+    if (status) updateManualStatus(status);
+  }, 250);
+}
+
+function stopHeartbeat() {
+  if (state.heartbeatTimer === null) return;
+  window.clearInterval(state.heartbeatTimer);
+  state.heartbeatTimer = null;
 }
 
 function selectedDrone() {
@@ -296,6 +466,59 @@ async function apiGet(path) {
 
 async function apiPost(path, body) {
   return window.droneStation.request({ method: "POST", path, body });
+}
+
+async function apiPatch(path, body) {
+  return window.droneStation.request({ method: "PATCH", path, body });
+}
+
+async function loadState() {
+  const loaded = await apiGet("/api/state");
+  serviceStatus.textContent = "Service online";
+  serviceStatus.classList.remove("is-danger");
+  return loaded;
+}
+
+async function safeApiGet(path) {
+  try {
+    const result = await apiGet(path);
+    serviceStatus.textContent = "Service online";
+    serviceStatus.classList.remove("is-danger");
+    return result;
+  } catch (error) {
+    serviceStatus.textContent = "Service error";
+    serviceStatus.classList.add("is-danger");
+    console.error(error);
+    return null;
+  }
+}
+
+async function safeApiPost(path, body) {
+  try {
+    const result = await apiPost(path, body);
+    serviceStatus.textContent = "Service online";
+    serviceStatus.classList.remove("is-danger");
+    return result;
+  } catch (error) {
+    serviceStatus.textContent = "Service error";
+    serviceStatus.classList.add("is-danger");
+    console.error(error);
+    return null;
+  }
+}
+
+async function safeApiPatch(path, body) {
+  try {
+    const result = await apiPatch(path, body);
+    serviceStatus.textContent = "Service online";
+    serviceStatus.classList.remove("is-danger");
+    return result;
+  } catch (error) {
+    serviceStatus.textContent = "Service error";
+    serviceStatus.classList.add("is-danger");
+    console.error(error);
+    return null;
+  }
 }
 
 function absoluteServiceUrl(path) {

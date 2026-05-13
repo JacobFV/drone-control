@@ -21,6 +21,7 @@
             <button class="segment" data-view="simulation" title="Simulation">Sim</button>
           </div>
           <button id="newFlight" class="primary-button" title="Create a new flight">New Flight</button>
+          <span id="serviceStatus" class="toolbar-status">Service starting</span>
           <div class="toolbar-spacer"></div>
           <button id="rhsToggle" class="icon-button" title="Toggle flight inspector" aria-label="Toggle flight inspector">
             <span class="icon">◧</span>
@@ -108,7 +109,15 @@
           </section>
 
           <section id="manualPanel" class="panel manual-panel is-hidden">
-            <h3>Control Pad</h3>
+            <div class="panel-title-row">
+              <h3>Control Pad</h3>
+              <span id="manualState" class="pill">disarmed</span>
+            </div>
+            <div class="manual-actions">
+              <button id="armButton" class="secondary-button">Arm</button>
+              <button id="disarmButton" class="secondary-button">Disarm</button>
+              <button id="stopButton" class="danger-button">Stop</button>
+            </div>
             <div class="control-pad">
               <button data-control="pitch-up">↑</button>
               <button data-control="yaw-left">↶</button>
@@ -120,9 +129,10 @@
             </div>
             <div class="throttle-row">
               <label for="throttle">Throttle</label>
-              <input id="throttle" type="range" min="0" max="255" value="0" />
+              <input id="throttle" type="range" min="0" max="192" value="0" />
               <output id="throttleValue">0</output>
             </div>
+            <p id="manualMessage" class="manual-message">Manual control is disarmed.</p>
           </section>
 
           <section class="panel">
