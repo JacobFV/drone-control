@@ -22,6 +22,12 @@ with default gateway `192.168.1.1`, so this unit's likely drone IP is
 python3 tools/scan_drones.py --iface wlP9s9
 ```
 
+The Electron app also supports platform-aware Wi-Fi scanning from the
+Connection panel. On this macOS machine the built-in Wi-Fi interface is expected
+to be `en0`; on Windows the app uses the first `netsh wlan` interface, usually
+named `Wi-Fi`. Linux still uses NetworkManager interface names such as
+`wlP9s9`.
+
 ## One-Drone Network Session
 
 This connects to the drone, checks likely gateway IPs, sends neutral UDP probe
@@ -317,3 +323,7 @@ that provide one.
 Simultaneous two-drone control needs two Wi-Fi interfaces. Eight drones need
 eight interfaces or a namespace/router setup that still gives each drone its own
 radio link.
+
+On a single-radio macOS or Windows laptop, treat the app as one active drone
+connection at a time. Use Ethernet, USB tethering, or a second Wi-Fi adapter if
+you need internet while connected to the drone AP.

@@ -15,6 +15,9 @@ const state = {
   heartbeatTimer: null,
   refreshTimer: null,
   treeSignature: "",
+  config: null,
+  network: null,
+  selectedRecordId: "",
 };
 
 const workspace = document.querySelector(".workspace");
@@ -40,12 +43,41 @@ const recordToggle = document.getElementById("recordToggle");
 const recordingCounter = document.getElementById("recordingCounter");
 const lhsToggle = document.getElementById("lhsToggle");
 const rhsToggle = document.getElementById("rhsToggle");
+const platformState = document.getElementById("platformState");
+const networkList = document.getElementById("networkList");
+const ifaceSelect = document.getElementById("ifaceSelect");
+const ssidInput = document.getElementById("ssidInput");
+const wifiPassword = document.getElementById("wifiPassword");
+const scanButton = document.getElementById("scanButton");
+const connectButton = document.getElementById("connectButton");
+const reconnectButton = document.getElementById("reconnectButton");
+const networkMessage = document.getElementById("networkMessage");
+const policyPanel = document.getElementById("policyPanel");
+const policyMaxThrottle = document.getElementById("policyMaxThrottle");
+const policyCommandHz = document.getElementById("policyCommandHz");
+const policySlew = document.getElementById("policySlew");
+const policyHeartbeat = document.getElementById("policyHeartbeat");
+const savePolicyButton = document.getElementById("savePolicyButton");
+const ioState = document.getElementById("ioState");
+const ioEnabled = document.getElementById("ioEnabled");
+const manualIface = document.getElementById("manualIface");
+const manualIp = document.getElementById("manualIp");
+const manualPort = document.getElementById("manualPort");
+const manualProtocol = document.getElementById("manualProtocol");
+const manualBindDevice = document.getElementById("manualBindDevice");
+const saveManualConfig = document.getElementById("saveManualConfig");
+const importPath = document.getElementById("importPath");
+const importFramesButton = document.getElementById("importFramesButton");
+const exportMjpegButton = document.getElementById("exportMjpegButton");
+const exportMp4Button = document.getElementById("exportMp4Button");
 
 init();
 
 async function init() {
   state.serviceUrl = await window.droneStation.serviceUrl();
   const initial = await loadState();
+  state.config = await safeRequest("GET", "/api/config");
+  state.network = await safeRequest("GET", "/api/system/network");
   if (initial) {
     state.drones = initial.drones;
     state.selectedDroneId = state.drones[0]?.id ?? "";
@@ -57,6 +89,10 @@ async function init() {
   wireToolbar();
   wireModeSelector();
   wireControls();
+  wireNetwork();
+  wirePolicy();
+  wireManualConfig();
+  wireRecordActions();
   state.refreshTimer = window.setInterval(refreshAppState, 5000);
 }
 
@@ -131,6 +167,29 @@ function wireControls() {
   stopButton.addEventListener("click", emergencyStop);
 }
 
+function wireNetwork() {
+  scanButton.addEventListener("click", discoverDrones);
+  connectButton.addEventListener("click", connectSelectedWifi);
+  reconnectButton.addEventListener("click", reconnectWifi);
+  ifaceSelect.addEventListener("change", () => {
+    manualIface.value = ifaceSelect.value;
+  });
+}
+
+function wirePolicy() {
+  savePolicyButton.addEventListener("click", savePolicy);
+}
+
+function wireManualConfig() {
+  saveManualConfig.addEventListener("click", saveManualIoConfig);
+}
+
+function wireRecordActions() {
+  importFramesButton.addEventListener("click", importFrames);
+  exportMjpegButton.addEventListener("click", () => exportSelectedRecord("mjpeg"));
+  exportMp4Button.addEventListener("click", () => exportSelectedRecord("mp4"));
+}
+
 window.addEventListener("beforeunload", () => {
   if (state.heartbeatTimer !== null) window.clearInterval(state.heartbeatTimer);
   if (state.refreshTimer !== null) window.clearInterval(state.refreshTimer);
@@ -203,6 +262,8 @@ function manualMessageText(status) {
 
 function render() {
   applyLayout();
+  renderNetwork();
+  renderManualConfig();
   renderTree();
   renderMainView();
   renderInspector();
@@ -305,6 +366,7 @@ function renderInspector() {
   }
 
   if (flight) state.mode = flight.mode ?? state.mode;
+  hydratePolicyForm(flight?.policy ?? {});
   renderMode();
   renderRecordToggle();
   renderRecordCounter();
@@ -335,11 +397,61 @@ function renderInspector() {
   renderStream();
 }
 
+function renderNetwork() {
+  const network = state.network || state.config?.network;
+  const interfaces = network?.interfaces ?? [];
+  platformState.textContent = String(network?.platform ?? state.config?.platform ?? "—").toUpperCase();
+  renderKv(networkList, [
+    ["Default", network?.defaultInterface],
+    ["Wi-Fi", interfaces.length],
+    ["Mode", network?.singleWifiLikely ? "single radio" : "multi radio"],
+  ]);
+  const current = ifaceSelect.value;
+  ifaceSelect.replaceChildren();
+  interfaces.forEach((item) => {
+    const option = element("option");
+    option.value = item.name;
+    option.textContent = `${item.name}${item.connection ? ` · ${item.connection}` : ""}`;
+    ifaceSelect.append(option);
+  });
+  const fallback = network?.defaultInterface || state.config?.manual?.iface || "en0";
+  if (!interfaces.some((item) => item.name === fallback)) {
+    const option = element("option");
+    option.value = fallback;
+    option.textContent = fallback;
+    ifaceSelect.append(option);
+  }
+  ifaceSelect.value = interfaces.some((item) => item.name === current) ? current : fallback;
+  if (!ssidInput.value) ssidInput.value = selectedDrone()?.connection?.ssid ?? "";
+  networkMessage.textContent = String(network?.notes ?? "ONE ACTIVE DRONE CONNECTION PER WI-FI RADIO").toUpperCase();
+}
+
+function renderManualConfig() {
+  const manual = state.config?.manual || state.manualStatus?.transport || {};
+  ioEnabled.checked = Boolean(manual.enabled);
+  manualIface.value = manual.iface ?? ifaceSelect.value ?? "";
+  manualIp.value = manual.ip ?? "192.168.1.1";
+  manualPort.value = manual.port ?? 7099;
+  manualProtocol.value = manual.protocol ?? "wifi_8k_prefixed_short";
+  manualBindDevice.checked = Boolean(manual.bindDevice);
+  ioState.textContent = manual.enabled ? "ON" : "OFF";
+  ioState.classList.toggle("is-armed", Boolean(manual.enabled));
+}
+
+function hydratePolicyForm(policy) {
+  if (!policy || typeof policy !== "object") return;
+  policyMaxThrottle.value = policy.maxThrottle ?? policy.max_throttle ?? policyMaxThrottle.value;
+  policyCommandHz.value = policy.commandHz ?? policy.command_hz ?? policyCommandHz.value;
+  policySlew.value = policy.throttleSlewPerSecond ?? policy.throttle_slew_per_second ?? policySlew.value;
+  policyHeartbeat.checked = policy.requireHeartbeat !== false;
+}
+
 function renderMode() {
   document.querySelectorAll("[data-mode]").forEach((button) => {
     button.classList.toggle("is-active", button.dataset.mode === state.mode);
   });
   manualPanel.classList.toggle("is-hidden", state.mode !== "manual");
+  policyPanel.classList.toggle("is-hidden", state.mode !== "policy");
   if (state.mode === "manual") startHeartbeat();
   else stopHeartbeat();
   renderManualStatus();
@@ -367,7 +479,20 @@ function renderRecords(records) {
     const dt = element("dt");
     dt.textContent = record.label;
     const dd = element("dd", "mono");
-    dd.textContent = record.path ?? record.blobKey ?? "—";
+    const path = element("div");
+    path.textContent = record.path ?? record.blobKey ?? "—";
+    const actions = element("div", "record-actions");
+    const select = element("button", "btn");
+    select.textContent = state.selectedRecordId === record.id ? "SELECTED" : "SELECT";
+    select.addEventListener("click", () => {
+      state.selectedRecordId = record.id;
+      renderRecords(records);
+    });
+    const reveal = element("button", "btn");
+    reveal.textContent = "SHOW";
+    reveal.addEventListener("click", () => revealRecord(record.id));
+    actions.append(select, reveal);
+    dd.append(path, actions);
     recordsList.append(dt, dd);
   });
 }
@@ -395,7 +520,7 @@ function renderStream() {
   const flight = selectedFlight();
   forwardEndpoint.textContent = drone?.connection?.camera ?? "—";
 
-  const framesRecord = flight?.records.find((r) => r.type === "frames" && r.streamUrl);
+  const framesRecord = selectedFrameRecord();
   if (framesRecord && state.mainView === "forward") {
     const nextUrl = absoluteServiceUrl(`${framesRecord.streamUrl}?fps=12`);
     if (forwardStream.src !== nextUrl) forwardStream.src = nextUrl;
@@ -481,6 +606,140 @@ async function toggleRecording() {
   await refreshAppState();
 }
 
+async function discoverDrones() {
+  scanButton.disabled = true;
+  networkMessage.textContent = "SCANNING";
+  const result = await safeRequest("POST", "/api/drones/discover", {
+    iface: ifaceSelect.value,
+    rescan: true,
+  });
+  scanButton.disabled = false;
+  if (!result) {
+    networkMessage.textContent = "SCAN FAILED";
+    return;
+  }
+  if (result.state) {
+    state.drones = result.state.drones;
+    state.selectedDroneId = state.drones.find((d) => d.connection?.iface === ifaceSelect.value)?.id ?? state.selectedDroneId;
+  }
+  const first = result.discovered?.[0];
+  if (first) ssidInput.value = first.ssid;
+  networkMessage.textContent = `FOUND ${result.discovered?.length ?? 0} DRONE AP`;
+  state.treeSignature = "";
+  renderTree();
+  renderInspector();
+}
+
+async function connectSelectedWifi() {
+  const ssid = ssidInput.value.trim();
+  if (!ifaceSelect.value || !ssid) {
+    networkMessage.textContent = "IFACE AND SSID REQUIRED";
+    return;
+  }
+  connectButton.disabled = true;
+  networkMessage.textContent = "CONNECTING";
+  const result = await safeRequest("POST", "/api/wifi/connect", {
+    iface: ifaceSelect.value,
+    ssid,
+    password: wifiPassword.value,
+    confirmDisconnect: true,
+  });
+  connectButton.disabled = false;
+  networkMessage.textContent = result?.ok ? "CONNECTED" : "CONNECT FAILED";
+  await refreshNetwork();
+}
+
+async function reconnectWifi() {
+  if (!ifaceSelect.value) return;
+  reconnectButton.disabled = true;
+  networkMessage.textContent = "RECONNECTING";
+  const result = await safeRequest("POST", "/api/wifi/reconnect", {
+    iface: ifaceSelect.value,
+    password: wifiPassword.value,
+  });
+  reconnectButton.disabled = false;
+  networkMessage.textContent = result?.ok ? "RECONNECTED" : "RECONNECT FAILED";
+  await refreshNetwork();
+}
+
+async function refreshNetwork() {
+  state.network = await safeRequest("GET", "/api/system/network");
+  renderNetwork();
+}
+
+async function saveManualIoConfig() {
+  const result = await safeRequest("POST", "/api/manual/config", {
+    enabled: ioEnabled.checked,
+    iface: manualIface.value.trim(),
+    ip: manualIp.value.trim(),
+    port: Number(manualPort.value),
+    protocol: manualProtocol.value.trim(),
+    bindDevice: manualBindDevice.checked,
+  });
+  if (!result) return;
+  state.config = result;
+  renderManualConfig();
+  await refreshManualStatus();
+}
+
+async function savePolicy() {
+  const flight = selectedFlight();
+  if (!flight) return;
+  const policy = {
+    ...(flight.policy ?? {}),
+    name: "Manual safety policy",
+    version: 1,
+    maxThrottle: Number(policyMaxThrottle.value),
+    commandHz: Number(policyCommandHz.value),
+    throttleSlewPerSecond: Number(policySlew.value),
+    requireHeartbeat: policyHeartbeat.checked,
+    singleActiveDrone: true,
+  };
+  const updated = await safeRequest("PATCH", `/api/flights/${flight.id}`, { policy });
+  if (!updated) return;
+  flight.policy = updated.policy;
+  await saveManualPolicyConfig(policy);
+  renderInspector();
+}
+
+async function saveManualPolicyConfig(policy) {
+  const result = await safeRequest("POST", "/api/manual/config", {
+    iface: manualIface.value.trim() || ifaceSelect.value,
+    maxThrottle: policy.maxThrottle,
+    commandHz: policy.commandHz,
+    throttleSlewPerSecond: policy.throttleSlewPerSecond,
+  });
+  if (result) state.config = result;
+}
+
+async function importFrames() {
+  const flight = selectedFlight();
+  const source = importPath.value.trim();
+  if (!flight || !source) return;
+  const result = await safeRequest("POST", `/api/flights/${flight.id}/records`, {
+    source,
+    type: "frames",
+    label: "Imported frame sequence",
+    mime: "image/jpeg-sequence",
+  });
+  if (!result) return;
+  importPath.value = "";
+  await refreshAppState();
+}
+
+async function exportSelectedRecord(format) {
+  const record = selectedFrameRecord();
+  if (!record) return;
+  const result = await safeRequest("POST", `/api/records/${record.id}/export`, { format, fps: 12 });
+  if (!result) return;
+  state.selectedRecordId = result.id;
+  await refreshAppState();
+}
+
+async function revealRecord(recordId) {
+  await safeRequest("POST", `/api/records/${recordId}/reveal`, {});
+}
+
 function startHeartbeat() {
   if (state.heartbeatTimer !== null) return;
   state.heartbeatTimer = window.setInterval(async () => {
@@ -511,6 +770,12 @@ function selectedDrone() {
 
 function selectedFlight() {
   return selectedDrone()?.flights.find((f) => f.id === state.selectedFlightId);
+}
+
+function selectedFrameRecord() {
+  const records = selectedFlight()?.records ?? [];
+  return records.find((r) => r.id === state.selectedRecordId && r.type === "frames" && r.streamUrl)
+    ?? records.find((r) => r.type === "frames" && r.streamUrl);
 }
 
 function element(tag, className = "") {

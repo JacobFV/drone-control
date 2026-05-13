@@ -66,6 +66,44 @@ class ManualDroneTransport:
             bind_device=env_bool("DRONE_BIND_DEVICE", False),
         )
 
+    def configure(
+        self,
+        *,
+        enabled: bool | None = None,
+        iface: str | None = None,
+        ip: str | None = None,
+        port: int | None = None,
+        protocol: str | None = None,
+        bind_device: bool | None = None,
+    ) -> None:
+        target_changed = False
+        if enabled is not None:
+            self.enabled = enabled
+        next_iface = self.target.iface if iface is None else iface or None
+        next_ip = self.target.ip if ip is None else ip
+        next_port = self.target.port if port is None else port
+        if next_iface != self.target.iface or next_ip != self.target.ip or next_port != self.target.port:
+            self.target = UdpTarget(ip=next_ip, port=next_port, iface=next_iface)
+            target_changed = True
+        if protocol is not None and protocol != self.protocol.name:
+            self.protocol = make_protocol(protocol)
+            target_changed = True
+        if bind_device is not None and bind_device != self.bind_device:
+            self.bind_device = bind_device
+            target_changed = True
+        if target_changed:
+            self.close()
+
+    def config_dict(self) -> dict[str, object]:
+        return {
+            "enabled": self.enabled,
+            "iface": self.target.iface or "",
+            "ip": self.target.ip,
+            "port": self.target.port,
+            "protocol": self.protocol.name,
+            "bindDevice": self.bind_device,
+        }
+
     def send(self, action: DroneAction | None) -> bool:
         if action is None or not self.enabled:
             return False

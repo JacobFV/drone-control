@@ -109,6 +109,20 @@ Opening the app without that flag cannot send motor packets.
 
 ## Wi-Fi Concurrency
 
+The control station now treats network operations as platform-specific service
+work. The Python service exposes one app contract for Linux, macOS, and Windows:
+
+- Linux uses `nmcli` for interfaces, scans, connect, and reconnect.
+- macOS uses `networksetup` for interface/current-network/connect operations
+  and the private `airport` utility for scans when it is available.
+- Windows uses `netsh wlan`; open drone APs can be connected through a generated
+  temporary WLAN profile, while secured networks require an existing profile or
+  password-supported profile setup.
+
+The app defaults to the detected Wi-Fi interface (`en0` on macOS, the first
+`netsh` WLAN interface on Windows, or the first `nmcli` Wi-Fi device on Linux)
+instead of assuming the original Linux `wlP9s9` interface.
+
 The laptop radio currently advertises:
 
 ```text
@@ -136,3 +150,22 @@ The service exposes Wi-Fi discovery and explicit connect/reconnect endpoints.
 `POST /api/wifi/connect` requires `confirmDisconnect: true` because a successful
 drone AP association can drop the app's internet path until the reconnect
 endpoint is called or NetworkManager restores the previous connection.
+
+On single-radio machines, the UI intentionally presents the system as one active
+drone connection at a time. Ethernet, USB tethering, or an additional Wi-Fi
+adapter can provide internet while the built-in Wi-Fi interface is associated
+with a drone AP.
+
+## Implemented Control-Station Surfaces
+
+The Electron UI now exposes:
+
+- platform/network status, scan, connect, and reconnect controls
+- provisional drone creation from likely drone SSIDs such as `WIFI_8K-*`
+- manual IO configuration for interface, IP, port, protocol, bind-device, and
+  packet-emission enablement
+- per-flight policy editing for max throttle, command rate, slew rate, and
+  heartbeat requirement
+- frame-sequence import from repository-local paths
+- frame-record reveal and export actions for MJPEG and MP4, with MP4 requiring
+  `ffmpeg`

@@ -391,12 +391,84 @@ class ControlStationStore:
             self.conn.commit()
             return record_id
 
+    def record_info(self, record_id: str) -> dict[str, Any] | None:
+        with self.lock:
+            record = self.conn.execute("SELECT * FROM records WHERE id = ?", (record_id,)).fetchone()
+            if record is None:
+                return None
+            path = self.blobs.resolve(record["blob_key"]) if record["blob_key"] else None
+            return {
+                "id": record["id"],
+                "flightId": record["flight_id"],
+                "type": record["type"],
+                "label": record["label"],
+                "mime": record["mime"],
+                "blobKey": record["blob_key"],
+                "path": str(path) if path else "",
+                "byteCount": record["byte_count"],
+                "metadata": json_loads(record["metadata_json"], {}),
+            }
+
     def record_path(self, record_id: str) -> Path | None:
         with self.lock:
             record = self.conn.execute("SELECT blob_key FROM records WHERE id = ?", (record_id,)).fetchone()
             if not record or not record["blob_key"]:
                 return None
             return self.blobs.resolve(record["blob_key"])
+
+    def upsert_discovered_drone(
+        self,
+        *,
+        ssid: str,
+        bssid: str | None,
+        iface: str,
+        signal: int | None = None,
+    ) -> str:
+        with self.lock:
+            drone_id = drone_identity_id(ssid, bssid, "ssid-scan")
+            now = current_timestamp()
+            identity = {
+                "ssid": ssid,
+                "bssid": bssid,
+                "fingerprint": "provisional",
+                "source": "wifi-scan",
+                "confidence": "provisional-ssid" if not bssid else "bssid",
+            }
+            connection = {
+                "ssid": ssid,
+                "iface": iface,
+                "ip": "192.168.1.1",
+                "control": "UDP 7099",
+                "camera": "RTSP 7070",
+                "signal": signal,
+            }
+            self.conn.execute(
+                """
+                INSERT INTO drones
+                  (id, name, model, status, last_seen, identity_json, connection_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                  name = excluded.name,
+                  status = excluded.status,
+                  last_seen = excluded.last_seen,
+                  identity_json = excluded.identity_json,
+                  connection_json = excluded.connection_json,
+                  updated_at = excluded.updated_at
+                """,
+                (
+                    drone_id,
+                    ssid,
+                    "WIFI_8K" if "8K" in ssid.upper() else "Wi-Fi drone",
+                    "available",
+                    now,
+                    json.dumps(identity),
+                    json.dumps(connection),
+                    now,
+                    now,
+                ),
+            )
+            self.conn.commit()
+            return drone_id
 
     def _init_schema(self) -> None:
         self.conn.executescript(

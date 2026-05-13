@@ -90,6 +90,26 @@ class ManualControlSession:
         self._target = DroneAction(roll=128, pitch=128, throttle=0, yaw=128)
         self._current = DroneAction(roll=128, pitch=128, throttle=0, yaw=128)
 
+    def configure(
+        self,
+        *,
+        max_throttle: int | None = None,
+        command_hz: float | None = None,
+        throttle_slew_per_second: float | None = None,
+        heartbeat_timeout_seconds: float | None = None,
+    ) -> None:
+        if self.armed:
+            raise RuntimeError("manual policy can only be changed while disarmed")
+        self.config = ManualControlConfig(
+            max_throttle=self.config.max_throttle if max_throttle is None else max(0, min(255, int(max_throttle))),
+            heartbeat_timeout_seconds=self.config.heartbeat_timeout_seconds if heartbeat_timeout_seconds is None else float(heartbeat_timeout_seconds),
+            ack_timeout_seconds=self.config.ack_timeout_seconds,
+            command_hz=self.config.command_hz if command_hz is None else max(1.0, float(command_hz)),
+            throttle_slew_per_second=self.config.throttle_slew_per_second if throttle_slew_per_second is None else max(1.0, float(throttle_slew_per_second)),
+            ramp_down_per_second=self.config.ramp_down_per_second,
+            stop_confirm_commands=self.config.stop_confirm_commands,
+        )
+
     def disarm(self, now: float | None = None) -> DroneAction | None:
         return self._begin_stopping(self._now(now), "disarm", force_emit=True)
 

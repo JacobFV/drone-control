@@ -65,6 +65,25 @@
           </section>
 
           <section class="panel">
+            <div class="panel-title-row">
+              <h3 class="section-label">Connection</h3>
+              <span id="platformState" class="pill">—</span>
+            </div>
+            <dl id="networkList" class="kv"></dl>
+            <div class="form-grid">
+              <label>IFACE <select id="ifaceSelect"></select></label>
+              <label>SSID <input id="ssidInput" type="text" placeholder="WIFI_8K-..." /></label>
+              <label>PASS <input id="wifiPassword" type="password" placeholder="optional" /></label>
+            </div>
+            <div class="action-row">
+              <button id="scanButton" class="btn">SCAN</button>
+              <button id="connectButton" class="btn">CONNECT</button>
+              <button id="reconnectButton" class="btn">RECONNECT</button>
+            </div>
+            <p id="networkMessage" class="manual-message">ONE ACTIVE DRONE CONNECTION PER WI-FI RADIO</p>
+          </section>
+
+          <section class="panel">
             <h3 class="section-label" style="margin-bottom: 10px;">Mode</h3>
             <div class="segmented" role="group" aria-label="Flight mode">
               <button class="segment is-active" data-mode="review">REVIEW</button>
@@ -114,6 +133,40 @@
             <p id="manualMessage" class="manual-message">DISARMED</p>
           </section>
 
+          <section id="policyPanel" class="panel is-hidden">
+            <div class="panel-title-row">
+              <h3 class="section-label">Policy</h3>
+              <span id="policyState" class="pill">LOCAL</span>
+            </div>
+            <div class="form-grid">
+              <label>MAX THR <input id="policyMaxThrottle" type="number" min="0" max="255" value="192" /></label>
+              <label>CMD HZ <input id="policyCommandHz" type="number" min="1" max="60" value="20" /></label>
+              <label>SLEW/S <input id="policySlew" type="number" min="1" max="255" value="160" /></label>
+              <label><input id="policyHeartbeat" type="checkbox" checked /> HEARTBEAT REQUIRED</label>
+            </div>
+            <div class="action-row">
+              <button id="savePolicyButton" class="btn">SAVE POLICY</button>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-title-row">
+              <h3 class="section-label">Manual IO</h3>
+              <span id="ioState" class="pill">OFF</span>
+            </div>
+            <div class="form-grid">
+              <label><input id="ioEnabled" type="checkbox" /> ENABLE PACKETS</label>
+              <label>IFACE <input id="manualIface" type="text" /></label>
+              <label>IP <input id="manualIp" type="text" /></label>
+              <label>PORT <input id="manualPort" type="number" min="1" max="65535" /></label>
+              <label>PROTO <input id="manualProtocol" type="text" /></label>
+              <label><input id="manualBindDevice" type="checkbox" /> BIND DEVICE</label>
+            </div>
+            <div class="action-row">
+              <button id="saveManualConfig" class="btn">SAVE IO</button>
+            </div>
+          </section>
+
           <section class="panel">
             <h3 class="section-label" style="margin-bottom: 10px;">Metadata</h3>
             <dl id="metadataList" class="kv"></dl>
@@ -128,6 +181,14 @@
             <div class="panel-title-row">
               <h3 class="section-label">Records</h3>
               <span id="recordingCounter" class="pill is-recording is-hidden">REC 0</span>
+            </div>
+            <div class="form-grid">
+              <label>IMPORT <input id="importPath" type="text" placeholder="relative/path/to/frames" /></label>
+            </div>
+            <div class="action-row">
+              <button id="importFramesButton" class="btn">IMPORT FRAMES</button>
+              <button id="exportMjpegButton" class="btn">MJPEG</button>
+              <button id="exportMp4Button" class="btn">MP4</button>
             </div>
             <dl id="recordsList" class="kv stacked"></dl>
           </section>

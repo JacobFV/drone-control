@@ -4,7 +4,9 @@ import argparse
 import json
 import mimetypes
 import os
+import platform
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -15,6 +17,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from drone_control.discovery import connect_wifi as platform_connect_wifi
+from drone_control.discovery import current_wifi_connection as platform_current_wifi_connection
+from drone_control.discovery import default_wifi_interface, platform_network_summary
+from drone_control.discovery import reconnect_wifi as platform_reconnect_wifi
 from drone_control.discovery import scan_access_points, wifi_interfaces
 from drone_control.flight_session import FlightSession, FlightSessionManager
 from drone_control.live_video import DirectoryFrameSource, LiveDroneFrameSource, LiveDroneFrameSourceConfig, mjpeg_chunks
@@ -36,6 +42,12 @@ class ControlStationHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/state":
             self.send_json(self.server.store.state())
+            return
+        if parsed.path == "/api/system/network":
+            self.send_json(platform_network_summary() | {"previousConnections": self.server.wifi_previous})
+            return
+        if parsed.path == "/api/config":
+            self.send_json(self.server.config_status())
             return
         if parsed.path == "/api/wifi/capabilities":
             self.send_json(wifi_capabilities())
@@ -135,6 +147,9 @@ class ControlStationHandler(BaseHTTPRequestHandler):
                 self.server.manual.clear_fault()
                 self.send_json(self.server.manual_status())
             return
+        if parsed.path == "/api/manual/config":
+            self.update_manual_config()
+            return
         if parsed.path == "/api/manual/disarm":
             with self.server.manual_lock:
                 action = self.server.manual.disarm()
@@ -188,6 +203,20 @@ class ControlStationHandler(BaseHTTPRequestHandler):
             self.reconnect_wifi()
             return
 
+        if parsed.path == "/api/drones/discover":
+            self.discover_drones()
+            return
+
+        match = re.fullmatch(r"/api/records/([^/]+)/reveal", parsed.path)
+        if match:
+            self.reveal_record(match.group(1))
+            return
+
+        match = re.fullmatch(r"/api/records/([^/]+)/export", parsed.path)
+        if match:
+            self.export_record(match.group(1))
+            return
+
         self.send_error(HTTPStatus.NOT_FOUND)
 
     def do_PATCH(self) -> None:
@@ -211,6 +240,29 @@ class ControlStationHandler(BaseHTTPRequestHandler):
             return
 
         self.send_error(HTTPStatus.NOT_FOUND)
+
+    def update_manual_config(self) -> None:
+        payload = self.read_json()
+        with self.server.manual_lock:
+            try:
+                self.server.manual.configure(
+                    max_throttle=optional_int(payload, "maxThrottle"),
+                    command_hz=optional_float(payload, "commandHz"),
+                    throttle_slew_per_second=optional_float(payload, "throttleSlewPerSecond"),
+                    heartbeat_timeout_seconds=optional_float(payload, "heartbeatTimeoutSeconds"),
+                )
+                self.server.manual_transport.configure(
+                    enabled=optional_bool(payload, "enabled"),
+                    iface=optional_str(payload, "iface"),
+                    ip=optional_str(payload, "ip"),
+                    port=optional_int(payload, "port"),
+                    protocol=optional_str(payload, "protocol"),
+                    bind_device=optional_bool(payload, "bindDevice"),
+                )
+            except (RuntimeError, ValueError) as exc:
+                self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            self.send_json(self.server.config_status())
 
     def do_OPTIONS(self) -> None:
         self.send_response(HTTPStatus.NO_CONTENT)
@@ -350,8 +402,8 @@ class ControlStationHandler(BaseHTTPRequestHandler):
             self.send_json({"error": "confirmDisconnect must be true"}, status=HTTPStatus.BAD_REQUEST)
             return
 
-        previous = current_wifi_connection(iface)
-        result = run_nmcli(["dev", "wifi", "connect", ssid, "ifname", iface])
+        previous = platform_current_wifi_connection(iface)
+        result = platform_connect_wifi(iface, ssid, optional_str(payload, "password"))
         if result["ok"]:
             self.server.wifi_previous[iface] = previous or ""
         self.send_json({"iface": iface, "ssid": ssid, "previousConnection": previous, **result})
@@ -367,10 +419,60 @@ class ControlStationHandler(BaseHTTPRequestHandler):
             self.send_json({"error": "ssid is required; no previous connection is known"}, status=HTTPStatus.BAD_REQUEST)
             return
 
-        result = run_nmcli(["dev", "wifi", "connect", target, "ifname", iface])
-        if not result["ok"]:
-            result = run_nmcli(["con", "up", target, "ifname", iface])
+        result = platform_reconnect_wifi(iface, target, optional_str(payload, "password"))
         self.send_json({"iface": iface, "ssid": target, **result})
+
+    def discover_drones(self) -> None:
+        payload = self.read_json()
+        iface = str(payload.get("iface") or default_wifi_interface())
+        rescan = payload.get("rescan") is not False
+        try:
+            access_points = scan_access_points(iface, rescan=rescan)
+        except (OSError, subprocess.CalledProcessError) as exc:
+            self.send_json({"error": str(exc), "discovered": []}, status=HTTPStatus.SERVICE_UNAVAILABLE)
+            return
+        discovered = []
+        for ap in access_points:
+            if not ap.likely_drone:
+                continue
+            drone_id = self.server.store.upsert_discovered_drone(
+                ssid=ap.ssid,
+                bssid=ap.bssid or None,
+                iface=iface,
+                signal=ap.signal,
+            )
+            discovered.append({"id": drone_id, **asdict(ap)})
+        self.send_json({"iface": iface, "discovered": discovered, "state": self.server.store.state()})
+
+    def reveal_record(self, record_id: str) -> None:
+        path = self.server.store.record_path(record_id)
+        if path is None:
+            self.send_json({"error": "record not found or missing blob"}, status=HTTPStatus.NOT_FOUND)
+            return
+        result = reveal_path(path)
+        self.send_json({"path": str(path), **result})
+
+    def export_record(self, record_id: str) -> None:
+        payload = self.read_json()
+        fmt = str(payload.get("format") or "mjpeg").lower()
+        info = self.server.store.record_info(record_id)
+        path = self.server.store.record_path(record_id)
+        if info is None or path is None or not path.is_dir():
+            self.send_json({"error": "frame record not found"}, status=HTTPStatus.NOT_FOUND)
+            return
+        if fmt not in {"mjpeg", "mp4"}:
+            self.send_json({"error": "format must be mjpeg or mp4"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        fps = max(1.0, min(60.0, float(payload.get("fps") or 12)))
+        try:
+            exported = export_frame_dir(path, self.server.export_root, fmt=fmt, fps=fps)
+            label = f"{info['label']} {fmt.upper()} export"
+            mime = "video/mp4" if fmt == "mp4" else "multipart/x-mixed-replace"
+            new_id = self.server.store.import_record(str(info["flightId"]), fmt, label, mime, exported)
+        except RuntimeError as exc:
+            self.send_json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
+            return
+        self.send_json({"id": new_id, "path": str(exported), "format": fmt})
 
 
 class ControlStationServer(ThreadingHTTPServer):
@@ -381,6 +483,8 @@ class ControlStationServer(ThreadingHTTPServer):
         self.manual_lock = threading.RLock()
         self.manual_transport = ManualDroneTransport.from_env()
         self.session_work_root = store.db_path.parent / "session_work"
+        self.export_root = store.db_path.parent / "exports"
+        self.export_root.mkdir(parents=True, exist_ok=True)
         self.sessions = FlightSessionManager(self.session_work_root)
         self.wifi_previous: dict[str, str] = {}
         self.manual_loop_running = True
@@ -399,6 +503,30 @@ class ControlStationServer(ThreadingHTTPServer):
         if action is not None:
             payload["action"] = action_to_dict(action)
         return payload
+
+    def config_status(self) -> dict[str, object]:
+        return {
+            "platform": platform.system() or "Unknown",
+            "network": platform_network_summary(),
+            "manual": self.manual_transport.config_dict(),
+            "policy": {
+                "maxThrottle": self.manual.config.max_throttle,
+                "commandHz": self.manual.config.command_hz,
+                "throttleSlewPerSecond": self.manual.config.throttle_slew_per_second,
+                "heartbeatTimeoutSeconds": self.manual.config.heartbeat_timeout_seconds,
+            },
+            "camera": {
+                "iface": os.environ.get("DRONE_IFACE", default_wifi_interface()),
+                "localIp": os.environ.get("DRONE_CAMERA_LOCAL_IP", ""),
+                "droneIp": os.environ.get("DRONE_IP", "192.168.1.1"),
+                "rtspPort": int(os.environ.get("DRONE_RTSP_PORT", "7070")),
+                "videoPort": int(os.environ.get("DRONE_CAMERA_VIDEO_PORT", "32124")),
+                "auxPort": int(os.environ.get("DRONE_CAMERA_AUX_PORT", "32125")),
+                "bindDevice": env_bool("DRONE_CAMERA_BIND_DEVICE", False),
+                "useRtsp": env_bool("DRONE_CAMERA_USE_RTSP", True),
+            },
+            "singleDroneActive": True,
+        }
 
     def send_manual_action(self, action: object | None) -> bool:
         return self.manual_transport.send(action)
@@ -443,6 +571,15 @@ def main() -> int:
 
 
 def wifi_capabilities() -> dict[str, object]:
+    if platform.system().lower() != "linux":
+        summary = platform_network_summary()
+        return {
+            "available": bool(summary["interfaces"]),
+            "platform": summary["platform"],
+            "interfaces": summary["interfaces"],
+            "simultaneousManagedLikely": False,
+            "recommendation": summary["notes"],
+        }
     try:
         iw_dev = subprocess.check_output(["iw", "dev"], text=True, stderr=subprocess.STDOUT)
         iw_list = subprocess.check_output(["iw", "list"], text=True, stderr=subprocess.STDOUT)
@@ -541,7 +678,7 @@ def make_frame_source(source_name: str, payload: dict[str, object]) -> object:
 
     return LiveDroneFrameSource(
         LiveDroneFrameSourceConfig(
-            iface=str(payload.get("iface") or os.environ.get("DRONE_IFACE", "wlP9s9")),
+            iface=str(payload.get("iface") or os.environ.get("DRONE_IFACE", default_wifi_interface())),
             local_ip=str(payload.get("localIp") or os.environ.get("DRONE_CAMERA_LOCAL_IP", "")),
             drone_ip=str(payload.get("droneIp") or os.environ.get("DRONE_IP", "192.168.1.1")),
             rtsp_port=int(payload.get("rtspPort") or os.environ.get("DRONE_RTSP_PORT", "7070")),
@@ -571,6 +708,21 @@ def optional_int(payload: dict[str, object], key: str) -> int | None:
     if key not in payload or payload[key] in {None, ""}:
         return None
     return int(payload[key])
+
+
+def optional_float(payload: dict[str, object], key: str) -> float | None:
+    if key not in payload or payload[key] in {None, ""}:
+        return None
+    return float(payload[key])
+
+
+def optional_bool(payload: dict[str, object], key: str) -> bool | None:
+    if key not in payload or payload[key] in {None, ""}:
+        return None
+    value = payload[key]
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def optional_dict(payload: dict[str, object], key: str) -> dict[str, object] | None:
@@ -608,6 +760,75 @@ def action_to_dict(action: object) -> dict[str, object]:
             "flip": sanitized.flip,
         }
     return {}
+
+
+def reveal_path(path: Path) -> dict[str, object]:
+    target = path if path.is_file() else path
+    system = platform.system().lower()
+    if system == "darwin":
+        args = ["open", "-R", str(target)] if target.is_file() else ["open", str(target)]
+    elif system == "windows":
+        args = ["explorer", f"/select,{target}"] if target.is_file() else ["explorer", str(target)]
+    else:
+        args = ["xdg-open", str(target.parent if target.is_file() else target)]
+    try:
+        completed = subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=5, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"ok": False, "returnCode": -1, "output": str(exc)}
+    return {"ok": completed.returncode == 0, "returnCode": completed.returncode, "output": completed.stdout.strip()}
+
+
+def export_frame_dir(frame_dir: Path, export_root: Path, *, fmt: str, fps: float) -> Path:
+    frames = sorted(frame_dir.glob("*.jpg"))
+    if not frames:
+        raise RuntimeError("frame record has no .jpg frames")
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    export_root.mkdir(parents=True, exist_ok=True)
+    if fmt == "mjpeg":
+        out = export_root / f"{frame_dir.name}_{stamp}.mjpeg"
+        boundary = b"--frame\r\n"
+        with out.open("wb") as handle:
+            for frame in frames:
+                data = frame.read_bytes()
+                handle.write(boundary)
+                handle.write(b"Content-Type: image/jpeg\r\n")
+                handle.write(f"Content-Length: {len(data)}\r\n\r\n".encode())
+                handle.write(data)
+                handle.write(b"\r\n")
+            handle.write(b"--frame--\r\n")
+        return out
+    if fmt == "mp4":
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            raise RuntimeError("ffmpeg is required for MP4 export; use MJPEG export or install ffmpeg")
+        out = export_root / f"{frame_dir.name}_{stamp}.mp4"
+        pattern = str(frame_dir / "frame_%06d.jpg")
+        alt_pattern = str(frame_dir / "frame_%05d_*.jpg")
+        input_pattern = pattern if (frame_dir / "frame_000000.jpg").exists() else alt_pattern
+        completed = subprocess.run(
+            [
+                ffmpeg,
+                "-y",
+                "-framerate",
+                str(fps),
+                "-pattern_type",
+                "glob" if "*" in input_pattern else "sequence",
+                "-i",
+                input_pattern,
+                "-pix_fmt",
+                "yuv420p",
+                str(out),
+            ],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=120,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(completed.stdout.strip() or "ffmpeg export failed")
+        return out
+    raise RuntimeError(f"unsupported export format: {fmt}")
 
 
 def format_duration(seconds: float) -> str:

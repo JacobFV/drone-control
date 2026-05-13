@@ -24,8 +24,18 @@ body {
   font-weight: 400;
 }
 
-button, input { font: inherit; color: inherit; }
+button, input, select { font: inherit; color: inherit; }
 button { border: 0; background: transparent; cursor: pointer; }
+input, select {
+  min-width: 0;
+  height: 28px;
+  border: 1px solid var(--line);
+  background: #0a0c0e;
+  color: var(--text);
+  padding: 0 8px;
+  font-family: var(--mono);
+  font-size: 11px;
+}
 
 .app-shell {
   width: 100vw;
@@ -343,6 +353,48 @@ button { border: 0; background: transparent; cursor: pointer; }
 
 .panel-title-row .section-label { margin: 0; }
 
+.form-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.form-grid label {
+  display: grid;
+  grid-template-columns: 74px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.form-grid label:has(input[type="checkbox"]) {
+  grid-template-columns: 18px 1fr;
+}
+
+.form-grid input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--ok);
+}
+
+.action-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.action-row .btn {
+  min-width: 0;
+  padding: 0 6px;
+}
+
 .pill {
   display: inline-block;
   padding: 2px 8px;
@@ -424,6 +476,18 @@ button { border: 0; background: transparent; cursor: pointer; }
 .kv.stacked dd {
   text-align: left;
   padding-bottom: 8px;
+}
+
+.record-actions {
+  display: flex;
+  gap: 6px;
+  padding-bottom: 8px;
+}
+
+.record-actions .btn {
+  height: 24px;
+  padding: 0 8px;
+  font-size: 10px;
 }
 
 .kv.empty::after {
