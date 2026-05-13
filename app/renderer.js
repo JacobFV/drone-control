@@ -1,3 +1,5 @@
+const KNOWN_STATUS = new Set(["available", "offline"]);
+
 const state = {
   drones: [],
   selectedDroneId: "",
@@ -7,10 +9,12 @@ const state = {
   rhsCollapsed: false,
   mode: "review",
   serviceUrl: "",
+  service: "STARTING",
   manualStatus: null,
   sessionStatus: null,
   heartbeatTimer: null,
   refreshTimer: null,
+  treeSignature: "",
 };
 
 const workspace = document.querySelector(".workspace");
@@ -19,81 +23,80 @@ const droneCount = document.getElementById("droneCount");
 const metadataList = document.getElementById("metadataList");
 const metricsGrid = document.getElementById("metricsGrid");
 const recordsList = document.getElementById("recordsList");
-const flightState = document.getElementById("flightState");
 const manualPanel = document.getElementById("manualPanel");
 const throttle = document.getElementById("throttle");
 const throttleValue = document.getElementById("throttleValue");
 const forwardStream = document.getElementById("forwardStream");
 const forwardEmpty = document.getElementById("forwardEmpty");
+const forwardResolution = document.getElementById("forwardResolution");
+const forwardEndpoint = document.getElementById("forwardEndpoint");
 const serviceStatus = document.getElementById("serviceStatus");
 const manualState = document.getElementById("manualState");
 const manualMessage = document.getElementById("manualMessage");
 const armButton = document.getElementById("armButton");
 const disarmButton = document.getElementById("disarmButton");
 const stopButton = document.getElementById("stopButton");
-const startSessionButton = document.getElementById("startSession");
-const stopSessionButton = document.getElementById("stopSession");
+const recordToggle = document.getElementById("recordToggle");
+const recordingCounter = document.getElementById("recordingCounter");
+const lhsToggle = document.getElementById("lhsToggle");
+const rhsToggle = document.getElementById("rhsToggle");
 
 init();
 
 async function init() {
   state.serviceUrl = await window.droneStation.serviceUrl();
-  const initialState = await loadState();
-  state.drones = initialState.drones;
-  state.selectedDroneId = state.drones[0]?.id ?? "";
-  state.selectedFlightId = state.drones[0]?.flights[0]?.id ?? "";
+  const initial = await loadState();
+  if (initial) {
+    state.drones = initial.drones;
+    state.selectedDroneId = state.drones[0]?.id ?? "";
+    state.selectedFlightId = state.drones[0]?.flights[0]?.id ?? "";
+  }
   await refreshManualStatus();
   await refreshSessionStatus();
   render();
   wireToolbar();
   wireModeSelector();
-  wireSimulation();
   wireControls();
   state.refreshTimer = window.setInterval(refreshAppState, 5000);
 }
 
 function wireToolbar() {
-  document.getElementById("lhsToggle").addEventListener("click", () => {
+  lhsToggle.addEventListener("click", () => {
     state.lhsCollapsed = !state.lhsCollapsed;
+    lhsToggle.classList.toggle("is-active", !state.lhsCollapsed);
     applyLayout();
   });
 
-  document.getElementById("rhsToggle").addEventListener("click", () => {
+  rhsToggle.addEventListener("click", () => {
     state.rhsCollapsed = !state.rhsCollapsed;
+    rhsToggle.classList.toggle("is-active", !state.rhsCollapsed);
     applyLayout();
   });
 
-  document.querySelectorAll(".segment").forEach((button) => {
+  document.querySelectorAll(".segmented [data-view]").forEach((button) => {
     button.addEventListener("click", () => {
       state.mainView = button.dataset.view;
       renderMainView();
     });
   });
 
-  document.getElementById("newFlight").addEventListener("click", () => {
-    createDraftFlight();
-  });
-  startSessionButton.addEventListener("click", startSelectedSession);
-  stopSessionButton.addEventListener("click", stopSelectedSession);
+  document.getElementById("newFlight").addEventListener("click", createDraftFlight);
+  recordToggle.addEventListener("click", toggleRecording);
 }
 
 function wireModeSelector() {
-  document.querySelectorAll(".mode-option").forEach((button) => {
-    button.addEventListener("click", async () => {
-      if (state.mode === "manual" && button.dataset.mode !== "manual") {
-        await safeApiPost("/api/manual/disarm", {});
-        await refreshManualStatus();
-      }
-      state.mode = button.dataset.mode;
-      await persistSelectedFlightMode(state.mode);
+  document.querySelectorAll("[data-mode]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const next = button.dataset.mode;
+      const prev = state.mode;
+      if (next === prev) return;
+      state.mode = next;
       renderMode();
+      persistSelectedFlightMode(next);
+      if (prev === "manual" && next !== "manual") {
+        safeRequest("POST", "/api/manual/disarm", {}).then((s) => s && updateManualStatus(s));
+      }
     });
-  });
-}
-
-function wireSimulation() {
-  document.getElementById("trajectoryToggle").addEventListener("change", (event) => {
-    document.querySelector(".simulation-stage").classList.toggle("hide-trajectory", !event.target.checked);
   });
 }
 
@@ -116,39 +119,34 @@ function wireControls() {
 
   armButton.addEventListener("click", async () => {
     if (state.manualStatus?.state === "faulted") {
-      await safeApiPost("/api/manual/clear-fault", {});
+      await safeRequest("POST", "/api/manual/clear-fault", {});
     }
-    const status = await safeApiPost("/api/manual/arm", {});
+    const status = await safeRequest("POST", "/api/manual/arm", {});
     if (status) updateManualStatus(status);
   });
   disarmButton.addEventListener("click", async () => {
-    const status = await safeApiPost("/api/manual/disarm", {});
+    const status = await safeRequest("POST", "/api/manual/disarm", {});
     if (status) updateManualStatus(status);
   });
   stopButton.addEventListener("click", emergencyStop);
 }
 
 window.addEventListener("beforeunload", () => {
-  if (state.heartbeatTimer !== null) {
-    window.clearInterval(state.heartbeatTimer);
-  }
-  if (state.refreshTimer !== null) {
-    window.clearInterval(state.refreshTimer);
-  }
+  if (state.heartbeatTimer !== null) window.clearInterval(state.heartbeatTimer);
+  if (state.refreshTimer !== null) window.clearInterval(state.refreshTimer);
 });
 
 async function emergencyStop() {
-  const status = await safeApiPost("/api/manual/stop", {});
-  if (status) {
-    throttle.value = "0";
-    throttleValue.textContent = "0";
-    updateManualStatus(status);
-  }
+  const status = await safeRequest("POST", "/api/manual/stop", {});
+  if (!status) return;
+  throttle.value = "0";
+  throttleValue.textContent = "0";
+  updateManualStatus(status);
 }
 
 async function sendManualAxes(axes) {
   if (state.mode !== "manual") return;
-  const status = await safeApiPost("/api/manual/axes", axes);
+  const status = await safeRequest("POST", "/api/manual/axes", axes);
   if (status) updateManualStatus(status);
 }
 
@@ -156,25 +154,18 @@ function controlAxes(control) {
   const center = 128;
   const step = 28;
   switch (control) {
-    case "pitch-up":
-      return { pitch: center + step };
-    case "pitch-down":
-      return { pitch: center - step };
-    case "roll-left":
-      return { roll: center - step };
-    case "roll-right":
-      return { roll: center + step };
-    case "yaw-left":
-      return { yaw: center - step };
-    case "yaw-right":
-      return { yaw: center + step };
-    default:
-      return {};
+    case "pitch-up":    return { pitch: center + step };
+    case "pitch-down":  return { pitch: center - step };
+    case "roll-left":   return { roll: center - step };
+    case "roll-right":  return { roll: center + step };
+    case "yaw-left":    return { yaw: center - step };
+    case "yaw-right":   return { yaw: center + step };
+    default:            return {};
   }
 }
 
 async function refreshManualStatus() {
-  const status = await safeApiGet("/api/manual/status");
+  const status = await safeRequest("GET", "/api/manual/status");
   if (status) updateManualStatus(status);
 }
 
@@ -186,35 +177,28 @@ function updateManualStatus(status) {
 function renderManualStatus() {
   const status = state.manualStatus;
   if (!status) return;
-  manualState.textContent = status.state;
+  manualState.textContent = String(status.state).toUpperCase();
   manualState.classList.toggle("is-danger", status.state === "faulted");
-  manualState.classList.toggle("is-armed", status.armed);
-  manualMessage.textContent = status.faultReason
-    ? `Fault: ${status.faultReason}`
-    : status.stopReason
-      ? `Stopping: ${status.stopReason}`
-      : manualStatusText(status);
-  armButton.textContent = status.state === "faulted" ? "Clear + Arm" : "Arm";
-  armButton.disabled = status.armed;
+  manualState.classList.toggle("is-armed", Boolean(status.armed));
+  manualMessage.classList.toggle("is-danger", status.state === "faulted");
+  manualMessage.textContent = manualMessageText(status);
+  armButton.textContent = status.state === "faulted" ? "CLEAR + ARM" : "ARM";
+  armButton.disabled = Boolean(status.armed);
   disarmButton.disabled = !status.armed;
   throttle.disabled = !status.armed;
   document.querySelectorAll("[data-control]").forEach((button) => {
-    if (button.dataset.control !== "stop") {
-      button.disabled = !status.armed;
-    }
+    if (button.dataset.control !== "stop") button.disabled = !status.armed;
   });
 }
 
-function manualStatusText(status) {
+function manualMessageText(status) {
+  if (status.faultReason) return `FAULT: ${String(status.faultReason).toUpperCase()}`;
+  if (status.stopReason) return `STOPPING: ${String(status.stopReason).toUpperCase()}`;
   const transport = status.transport;
-  const stateText = status.armed ? "Manual control is armed. Heartbeat active." : "Manual control is disarmed.";
-  if (!transport?.enabled) {
-    return `${stateText} Drone IO disabled.`;
-  }
-  if (transport.lastError) {
-    return `${stateText} Transport error: ${transport.lastError}`;
-  }
-  return `${stateText} Transport ${transport.connected ? "connected" : "ready"}: ${transport.target}.`;
+  const armed = status.armed ? "ARMED · HEARTBEAT" : "DISARMED";
+  if (!transport?.enabled) return `${armed} · IO DISABLED`;
+  if (transport.lastError) return `${armed} · ${String(transport.lastError).toUpperCase()}`;
+  return `${armed} · ${transport.connected ? "CONNECTED" : "READY"} · ${transport.target}`;
 }
 
 function render() {
@@ -223,6 +207,7 @@ function render() {
   renderMainView();
   renderInspector();
   renderStream();
+  renderServiceStatus();
 }
 
 function applyLayout() {
@@ -230,17 +215,32 @@ function applyLayout() {
   workspace.classList.toggle("rhs-collapsed", state.rhsCollapsed);
 }
 
+function treeSignature() {
+  return state.drones
+    .map((d) => `${d.id}:${d.status}:${d.name}:${d.model}:${d.lastSeen}:${d.flights.map((f) => `${f.id}/${f.mode}/${f.name}/${f.duration}`).join(",")}`)
+    .join("|");
+}
+
 function renderTree() {
   droneCount.textContent = state.drones.length;
+  const sig = treeSignature();
+  if (sig === state.treeSignature) {
+    document.querySelectorAll(".flight-row").forEach((row) => {
+      row.classList.toggle("is-active", row.dataset.flightId === state.selectedFlightId);
+    });
+    return;
+  }
+  state.treeSignature = sig;
   droneTree.replaceChildren();
 
   state.drones.forEach((drone) => {
     const group = element("div", "tree-group is-expanded");
     const droneButton = element("button", "drone-row");
+    const statusClass = KNOWN_STATUS.has(drone.status) ? drone.status : "unknown";
     droneButton.innerHTML = `
       <span class="chevron">▾</span>
-      <span class="tree-name">${escapeHtml(drone.name)}<span class="tree-subtitle">${escapeHtml(drone.model)} · ${escapeHtml(drone.lastSeen)}</span></span>
-      <span class="status-dot ${escapeHtml(drone.status)}"></span>
+      <span class="tree-name">${escapeHtml(drone.name)}<span class="tree-sub">${escapeHtml(drone.model)} · ${escapeHtml(drone.lastSeen)}</span></span>
+      <span class="status-dot ${statusClass}"></span>
     `;
     droneButton.addEventListener("click", () => {
       group.classList.toggle("is-expanded");
@@ -255,15 +255,16 @@ function renderTree() {
     const children = element("div", "children");
     if (drone.flights.length === 0) {
       const empty = element("div", "flight-row");
-      empty.innerHTML = `<span></span><span class="tree-name">No flights<span class="tree-subtitle">ready for first record</span></span><span></span>`;
+      empty.innerHTML = `<span class="tree-name">—<span class="tree-sub">no flights</span></span><span></span>`;
       children.append(empty);
     }
 
     drone.flights.forEach((flight) => {
-      const flightButton = element("button", `flight-row ${flight.id === state.selectedFlightId ? "is-active" : ""}`);
+      const isActive = flight.id === state.selectedFlightId;
+      const flightButton = element("button", `flight-row${isActive ? " is-active" : ""}`);
+      flightButton.dataset.flightId = flight.id;
       flightButton.innerHTML = `
-        <span></span>
-        <span class="tree-name">${escapeHtml(flight.name)}<span class="tree-subtitle">${escapeHtml(flight.duration)} · ${escapeHtml(flight.mode)}</span></span>
+        <span class="tree-name">${escapeHtml(flight.name)}<span class="tree-sub">${escapeHtml(flight.duration)} · ${escapeHtml(flight.mode)}</span></span>
         <span></span>
       `;
       flightButton.addEventListener("click", () => {
@@ -284,13 +285,10 @@ function renderTree() {
 }
 
 function renderMainView() {
-  document.querySelectorAll(".segment").forEach((button) => {
+  document.querySelectorAll("[data-view]").forEach((button) => {
     button.classList.toggle("is-active", button.dataset.view === state.mainView);
   });
-
-  document.querySelectorAll(".view-panel").forEach((panel) => {
-    panel.classList.remove("is-active");
-  });
+  document.querySelectorAll(".view-panel").forEach((panel) => panel.classList.remove("is-active"));
   document.getElementById(`${state.mainView}View`).classList.add("is-active");
   renderStream();
 }
@@ -302,97 +300,89 @@ function renderInspector() {
     metadataList.replaceChildren();
     metricsGrid.replaceChildren();
     recordsList.replaceChildren();
+    renderRecordCounter();
     return;
   }
 
-  if (flight) {
-    state.mode = flight.mode ?? state.mode;
-  }
-  flightState.textContent = state.mode;
+  if (flight) state.mode = flight.mode ?? state.mode;
   renderMode();
-  renderSessionControls();
+  renderRecordToggle();
+  renderRecordCounter();
 
-  const metadata = {
-    Drone: drone.name,
-    SSID: drone.connection.ssid,
-    Interface: drone.connection.iface,
-    IP: drone.connection.ip,
-    Control: drone.connection.control,
-    Camera: drone.connection.camera,
-    Policy: formatPolicy(flight?.policy),
-    Started: flight?.startedAt ?? "not started",
-    ...(flight?.metadata ?? {}),
-  };
-  renderKeyValue(metadataList, metadata);
+  renderKv(metadataList, [
+    ["Drone", drone.name],
+    ["SSID", drone.connection.ssid],
+    ["Iface", drone.connection.iface],
+    ["IP", drone.connection.ip],
+    ["Control", drone.connection.control, "mono"],
+    ["Camera", drone.connection.camera, "mono"],
+    ["Policy", formatPolicy(flight?.policy)],
+    ["Started", flight?.startedAt ?? "—"],
+    ...Object.entries(flight?.metadata ?? {}).map(([k, v]) => [k, v]),
+  ]);
 
-  renderMetrics(flight?.metrics ?? {});
+  const m = flight?.metrics ?? {};
+  renderKv(metricsGrid, [
+    ["Frames", m.frames],
+    ["Packets", m.packets],
+    ["Bytes", m.bytes],
+    ["Resolution", m.resolution],
+    ["MAE T", m.temporalMae],
+    ["MAE T̄", m.smoothedTemporalMae],
+  ].filter(([, v]) => v !== undefined && v !== null));
+
   renderRecords(flight?.records ?? []);
   renderStream();
 }
 
 function renderMode() {
-  document.querySelectorAll(".mode-option").forEach((button) => {
+  document.querySelectorAll("[data-mode]").forEach((button) => {
     button.classList.toggle("is-active", button.dataset.mode === state.mode);
   });
-  flightState.textContent = state.mode;
   manualPanel.classList.toggle("is-hidden", state.mode !== "manual");
-  if (state.mode === "manual") {
-    startHeartbeat();
-  } else {
-    stopHeartbeat();
-  }
+  if (state.mode === "manual") startHeartbeat();
+  else stopHeartbeat();
   renderManualStatus();
 }
 
-function renderMetrics(metrics) {
-  metricsGrid.replaceChildren();
-  const entries = [
-    ["Frames", metrics.frames],
-    ["Packets", metrics.packets],
-    ["Bytes", metrics.bytes],
-    ["Resolution", metrics.resolution],
-    ["Temporal MAE", metrics.temporalMae],
-    ["Smoothed", metrics.smoothedTemporalMae],
-  ].filter(([, value]) => value !== undefined && value !== null);
-
-  entries.forEach(([label, value]) => {
-    const item = element("div", "metric");
-    item.innerHTML = `<span>${escapeHtml(label)}</span><strong>${escapeHtml(formatValue(value))}</strong>`;
-    metricsGrid.append(item);
+function renderKv(parent, entries) {
+  parent.replaceChildren();
+  entries.forEach(([key, value, mod]) => {
+    const dt = element("dt");
+    dt.textContent = key;
+    const dd = element("dd", mod === "mono" ? "mono" : "");
+    dd.textContent = value === undefined || value === null || value === "" ? "—" : formatValue(value);
+    parent.append(dt, dd);
   });
 }
 
 function renderRecords(records) {
   recordsList.replaceChildren();
+  if (records.length === 0) {
+    recordsList.classList.add("empty");
+    return;
+  }
+  recordsList.classList.remove("empty");
   records.forEach((record) => {
-    const item = element("div", "record");
-    item.innerHTML = `<strong>${escapeHtml(record.label)}</strong><code>${escapeHtml(record.path ?? record.blobKey ?? "not imported")}</code>`;
-    recordsList.append(item);
-  });
-}
-
-function renderKeyValue(parent, values) {
-  parent.replaceChildren();
-  Object.entries(values).forEach(([key, value]) => {
     const dt = element("dt");
-    dt.textContent = key;
-    const dd = element("dd");
-    dd.textContent = String(value);
-    parent.append(dt, dd);
+    dt.textContent = record.label;
+    const dd = element("dd", "mono");
+    dd.textContent = record.path ?? record.blobKey ?? "—";
+    recordsList.append(dt, dd);
   });
 }
 
 async function createDraftFlight() {
   const drone = selectedDrone();
   if (!drone) return;
-
   const now = new Date();
-  const created = await apiPost("/api/flights", {
+  const created = await safeRequest("POST", "/api/flights", {
     droneId: drone.id,
-    name: `Draft flight ${now.toLocaleTimeString()}`,
+    name: `Draft ${now.toLocaleTimeString()}`,
   });
+  if (!created) return;
   const refreshed = await loadState();
-  state.drones = refreshed.drones;
+  if (refreshed) state.drones = refreshed.drones;
   state.selectedFlightId = created.id;
   state.mode = "manual";
   await refreshSessionStatus();
@@ -401,43 +391,43 @@ async function createDraftFlight() {
 }
 
 function renderStream() {
+  const drone = selectedDrone();
   const flight = selectedFlight();
-  const framesRecord = flight?.records.find((record) => record.type === "frames" && record.streamUrl);
+  forwardEndpoint.textContent = drone?.connection?.camera ?? "—";
+
+  const framesRecord = flight?.records.find((r) => r.type === "frames" && r.streamUrl);
   if (framesRecord && state.mainView === "forward") {
     const nextUrl = absoluteServiceUrl(`${framesRecord.streamUrl}?fps=12`);
-    if (forwardStream.src !== nextUrl) {
-      forwardStream.src = nextUrl;
-    }
+    if (forwardStream.src !== nextUrl) forwardStream.src = nextUrl;
     forwardStream.classList.remove("is-hidden");
     forwardEmpty.classList.add("is-hidden");
+    forwardResolution.textContent = flight?.metrics?.resolution ?? "—";
     return;
   }
-  if (forwardStream.hasAttribute("src")) {
-    forwardStream.removeAttribute("src");
-  }
+  if (forwardStream.hasAttribute("src")) forwardStream.removeAttribute("src");
   forwardStream.classList.add("is-hidden");
   forwardEmpty.classList.remove("is-hidden");
+  forwardResolution.textContent = flight?.metrics?.resolution ?? "—";
 }
 
 async function persistSelectedFlightMode(mode) {
   const flight = selectedFlight();
   if (!flight) return;
-  const updated = await safeApiPatch(`/api/flights/${flight.id}`, { mode });
-  if (!updated) return;
-  flight.mode = updated.mode;
+  const updated = await safeRequest("PATCH", `/api/flights/${flight.id}`, { mode });
+  if (updated) flight.mode = updated.mode;
 }
 
 async function refreshAppState() {
-  const refreshed = await safeApiGet("/api/state");
+  const refreshed = await safeRequest("GET", "/api/state");
   if (!refreshed) return;
-  const selectedDroneId = state.selectedDroneId;
-  const selectedFlightId = state.selectedFlightId;
+  const prevDroneId = state.selectedDroneId;
+  const prevFlightId = state.selectedFlightId;
   state.drones = refreshed.drones;
-  state.selectedDroneId = state.drones.find((drone) => drone.id === selectedDroneId)?.id ?? state.drones[0]?.id ?? "";
+  state.selectedDroneId = state.drones.find((d) => d.id === prevDroneId)?.id ?? state.drones[0]?.id ?? "";
   state.selectedFlightId =
     selectedFlight()?.id ??
-    state.drones.find((drone) => drone.id === state.selectedDroneId)?.flights[0]?.id ??
-    selectedFlightId;
+    state.drones.find((d) => d.id === state.selectedDroneId)?.flights[0]?.id ??
+    prevFlightId;
   renderTree();
   renderInspector();
   await refreshSessionStatus();
@@ -447,52 +437,65 @@ async function refreshSessionStatus() {
   const flight = selectedFlight();
   if (!flight) {
     state.sessionStatus = null;
-    renderSessionControls();
+    renderRecordToggle();
+    renderRecordCounter();
     return;
   }
-  const status = await safeApiGet(`/api/flights/${flight.id}/session`);
-  if (status) {
-    state.sessionStatus = status;
-  }
-  renderSessionControls();
+  const status = await safeRequest("GET", `/api/flights/${flight.id}/session`);
+  if (status) state.sessionStatus = status;
+  renderRecordToggle();
+  renderRecordCounter();
 }
 
-function renderSessionControls() {
+function renderRecordToggle() {
   const running = Boolean(state.sessionStatus?.running);
   const hasFlight = Boolean(selectedFlight());
-  startSessionButton.disabled = !hasFlight || running;
-  stopSessionButton.disabled = !hasFlight || !running;
-  if (running) {
-    serviceStatus.textContent = `Recording ${state.sessionStatus.frames} frames`;
-    serviceStatus.classList.remove("is-danger");
+  recordToggle.disabled = !hasFlight;
+  recordToggle.textContent = running ? "STOP" : "RECORD";
+  recordToggle.classList.toggle("is-danger", running);
+}
+
+function renderRecordCounter() {
+  const running = Boolean(state.sessionStatus?.running);
+  if (!running) {
+    recordingCounter.classList.add("is-hidden");
+    return;
   }
+  recordingCounter.classList.remove("is-hidden");
+  recordingCounter.textContent = `REC ${formatValue(state.sessionStatus.frames ?? 0)}`;
 }
 
-async function startSelectedSession() {
+async function toggleRecording() {
   const flight = selectedFlight();
   if (!flight) return;
-  const status = await safeApiPost(`/api/flights/${flight.id}/session/start`, { source: "live" });
+  const running = Boolean(state.sessionStatus?.running);
+  const path = running
+    ? `/api/flights/${flight.id}/session/stop`
+    : `/api/flights/${flight.id}/session/start`;
+  const body = running ? {} : { source: "live" };
+  const status = await safeRequest("POST", path, body);
   if (!status) return;
   state.sessionStatus = status;
-  renderSessionControls();
-  await refreshAppState();
-}
-
-async function stopSelectedSession() {
-  const flight = selectedFlight();
-  if (!flight) return;
-  const status = await safeApiPost(`/api/flights/${flight.id}/session/stop`, {});
-  if (!status) return;
-  state.sessionStatus = status;
-  renderSessionControls();
+  renderRecordToggle();
+  renderRecordCounter();
   await refreshAppState();
 }
 
 function startHeartbeat() {
   if (state.heartbeatTimer !== null) return;
   state.heartbeatTimer = window.setInterval(async () => {
-    const status = await safeApiPost("/api/manual/heartbeat", {});
-    if (status) updateManualStatus(status);
+    const status = await safeRequest("POST", "/api/manual/heartbeat", {});
+    if (!status) return;
+    const prev = state.manualStatus;
+    state.manualStatus = status;
+    if (
+      !prev ||
+      prev.state !== status.state ||
+      prev.armed !== status.armed ||
+      prev.faultReason !== status.faultReason
+    ) {
+      renderManualStatus();
+    }
   }, 250);
 }
 
@@ -503,12 +506,11 @@ function stopHeartbeat() {
 }
 
 function selectedDrone() {
-  return state.drones.find((drone) => drone.id === state.selectedDroneId);
+  return state.drones.find((d) => d.id === state.selectedDroneId);
 }
 
 function selectedFlight() {
-  const drone = selectedDrone();
-  return drone?.flights.find((flight) => flight.id === state.selectedFlightId);
+  return selectedDrone()?.flights.find((f) => f.id === state.selectedFlightId);
 }
 
 function element(tag, className = "") {
@@ -526,65 +528,32 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
-async function apiGet(path) {
-  return window.droneStation.request({ method: "GET", path });
-}
-
-async function apiPost(path, body) {
-  return window.droneStation.request({ method: "POST", path, body });
-}
-
-async function apiPatch(path, body) {
-  return window.droneStation.request({ method: "PATCH", path, body });
-}
-
 async function loadState() {
-  const loaded = await apiGet("/api/state");
-  serviceStatus.textContent = "Service online";
-  serviceStatus.classList.remove("is-danger");
-  return loaded;
+  const result = await safeRequest("GET", "/api/state");
+  return result;
 }
 
-async function safeApiGet(path) {
+async function safeRequest(method, path, body) {
   try {
-    const result = await apiGet(path);
-    serviceStatus.textContent = "Service online";
-    serviceStatus.classList.remove("is-danger");
+    const result = await window.droneStation.request({ method, path, body });
+    setService("READY");
     return result;
   } catch (error) {
-    serviceStatus.textContent = "Service error";
-    serviceStatus.classList.add("is-danger");
     console.error(error);
+    setService("ERR", true);
     return null;
   }
 }
 
-async function safeApiPost(path, body) {
-  try {
-    const result = await apiPost(path, body);
-    serviceStatus.textContent = "Service online";
-    serviceStatus.classList.remove("is-danger");
-    return result;
-  } catch (error) {
-    serviceStatus.textContent = "Service error";
-    serviceStatus.classList.add("is-danger");
-    console.error(error);
-    return null;
-  }
+function setService(label, danger = false) {
+  if (state.service === label) return;
+  state.service = label;
+  renderServiceStatus(danger);
 }
 
-async function safeApiPatch(path, body) {
-  try {
-    const result = await apiPatch(path, body);
-    serviceStatus.textContent = "Service online";
-    serviceStatus.classList.remove("is-danger");
-    return result;
-  } catch (error) {
-    serviceStatus.textContent = "Service error";
-    serviceStatus.classList.add("is-danger");
-    console.error(error);
-    return null;
-  }
+function renderServiceStatus(danger) {
+  serviceStatus.textContent = state.service;
+  serviceStatus.classList.toggle("is-danger", Boolean(danger));
 }
 
 function absoluteServiceUrl(path) {
@@ -592,7 +561,7 @@ function absoluteServiceUrl(path) {
 }
 
 function formatPolicy(policy) {
-  if (!policy) return "No flight selected";
+  if (!policy) return "—";
   if (typeof policy === "string") return policy;
   return policy.name || JSON.stringify(policy);
 }
