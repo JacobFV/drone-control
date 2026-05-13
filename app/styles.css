@@ -336,6 +336,35 @@ input, select {
 .camera-strip span { color: var(--text); }
 .camera-strip .sep { color: var(--muted-2); }
 
+.sim-frame { background: #07090a; }
+
+.sim-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  cursor: grab;
+  touch-action: none;
+}
+
+.sim-canvas:active { cursor: grabbing; }
+
+.sim-strip.is-danger { color: var(--danger); }
+.sim-strip.is-danger span { color: var(--danger); }
+.sim-strip.is-danger .sep { color: var(--danger); }
+
+.sim-actions {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  gap: 6px;
+  z-index: 2;
+}
+
+.sim-actions .btn { height: 24px; padding: 0 10px; font-size: 11px; }
+
 /* ===== Inspector ===== */
 
 .panel {

@@ -15,6 +15,7 @@
           <div class="segmented" aria-label="Main view">
             <button class="segment is-active" data-view="forward">FWD</button>
             <button class="segment" data-view="downward">DOWN</button>
+            <button class="segment" data-view="simulation">SIM</button>
           </div>
           <div class="toolbar-divider"></div>
           <button id="newFlight" class="btn">NEW FLIGHT</button>
@@ -54,6 +55,26 @@
             <div class="camera-stage">
               <div class="stream-frame">
                 <div class="empty-stream">No downward camera</div>
+              </div>
+            </div>
+          </section>
+
+          <section id="simulationView" class="view-panel" aria-label="Allocentric world view">
+            <div class="camera-stage">
+              <div class="stream-frame sim-frame">
+                <canvas id="simCanvas" class="sim-canvas"></canvas>
+                <div id="simEmpty" class="empty-stream">No estimator</div>
+                <div class="camera-strip sim-strip">
+                  <span id="simState">—</span><span class="sep">·</span>
+                  <span id="simFps">— fps</span><span class="sep">·</span>
+                  <span id="simKeyframes">0 keyframes</span><span class="sep">·</span>
+                  <span id="simScale">scale arbitrary</span><span class="sep">·</span>
+                  <span id="simIntrinsics">intrinsics —</span>
+                </div>
+                <div class="sim-actions">
+                  <button id="poseRecomputeButton" class="btn">RECOMPUTE</button>
+                  <button id="poseResetViewButton" class="btn">RESET VIEW</button>
+                </div>
               </div>
             </div>
           </section>

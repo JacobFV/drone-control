@@ -18,6 +18,11 @@ const state = {
   config: null,
   network: null,
   selectedRecordId: "",
+  poseStatus: null,
+  poseTrack: [],
+  poseLastFrameIndex: -1,
+  poseTimer: null,
+  poseFlightId: "",
 };
 
 const workspace = document.querySelector(".workspace");
@@ -70,6 +75,40 @@ const importPath = document.getElementById("importPath");
 const importFramesButton = document.getElementById("importFramesButton");
 const exportMjpegButton = document.getElementById("exportMjpegButton");
 const exportMp4Button = document.getElementById("exportMp4Button");
+const simCanvas = document.getElementById("simCanvas");
+const simEmpty = document.getElementById("simEmpty");
+const simState = document.getElementById("simState");
+const simFps = document.getElementById("simFps");
+const simKeyframes = document.getElementById("simKeyframes");
+const simScale = document.getElementById("simScale");
+const simIntrinsics = document.getElementById("simIntrinsics");
+const simStrip = document.querySelector(".sim-strip");
+const poseRecomputeButton = document.getElementById("poseRecomputeButton");
+const poseResetViewButton = document.getElementById("poseResetViewButton");
+
+const POSE_STATE_LABELS = {
+  no_estimator: "NO ESTIMATOR",
+  initializing: "INITIALIZING",
+  awaiting_parallax: "AWAITING PARALLAX",
+  tracking: "TRACKING",
+  degraded: "DEGRADED",
+  lost: "TRACKING LOST",
+  stored: "STORED",
+};
+const POSE_DANGER_STATES = new Set(["no_estimator", "lost"]);
+
+const simView = {
+  yaw: -Math.PI / 6,
+  pitch: Math.PI / 5,
+  distance: 60,
+  target: [0, 0, 0],
+  dpr: 1,
+  lastDraw: 0,
+  pendingDraw: false,
+  dragging: false,
+  dragX: 0,
+  dragY: 0,
+};
 
 init();
 
@@ -93,6 +132,7 @@ async function init() {
   wirePolicy();
   wireManualConfig();
   wireRecordActions();
+  wireSimulation();
   state.refreshTimer = window.setInterval(refreshAppState, 5000);
 }
 
@@ -188,6 +228,51 @@ function wireRecordActions() {
   importFramesButton.addEventListener("click", importFrames);
   exportMjpegButton.addEventListener("click", () => exportSelectedRecord("mjpeg"));
   exportMp4Button.addEventListener("click", () => exportSelectedRecord("mp4"));
+}
+
+function wireSimulation() {
+  poseRecomputeButton.addEventListener("click", recomputePoseTrack);
+  poseResetViewButton.addEventListener("click", () => {
+    simView.yaw = -Math.PI / 6;
+    simView.pitch = Math.PI / 5;
+    simView.distance = 60;
+    simView.target = [0, 0, 0];
+    requestSimDraw();
+  });
+  simCanvas.addEventListener("pointerdown", (event) => {
+    simView.dragging = true;
+    simView.dragX = event.clientX;
+    simView.dragY = event.clientY;
+    simCanvas.setPointerCapture(event.pointerId);
+  });
+  simCanvas.addEventListener("pointermove", (event) => {
+    if (!simView.dragging) return;
+    const dx = event.clientX - simView.dragX;
+    const dy = event.clientY - simView.dragY;
+    simView.dragX = event.clientX;
+    simView.dragY = event.clientY;
+    simView.yaw -= dx * 0.008;
+    simView.pitch = Math.max(-Math.PI / 2 + 0.05, Math.min(Math.PI / 2 - 0.05, simView.pitch + dy * 0.008));
+    requestSimDraw();
+  });
+  const releaseDrag = (event) => {
+    if (!simView.dragging) return;
+    simView.dragging = false;
+    try { simCanvas.releasePointerCapture(event.pointerId); } catch (_) {}
+  };
+  simCanvas.addEventListener("pointerup", releaseDrag);
+  simCanvas.addEventListener("pointercancel", releaseDrag);
+  simCanvas.addEventListener("wheel", (event) => {
+    event.preventDefault();
+    const factor = Math.exp(event.deltaY * 0.001);
+    simView.distance = Math.max(2, Math.min(2000, simView.distance * factor));
+    requestSimDraw();
+  }, { passive: false });
+  window.addEventListener("resize", () => {
+    if (state.mainView !== "simulation") return;
+    resizeSimCanvas();
+    requestSimDraw();
+  });
 }
 
 window.addEventListener("beforeunload", () => {
@@ -352,6 +437,13 @@ function renderMainView() {
   document.querySelectorAll(".view-panel").forEach((panel) => panel.classList.remove("is-active"));
   document.getElementById(`${state.mainView}View`).classList.add("is-active");
   renderStream();
+  if (state.mainView === "simulation") {
+    startPosePolling();
+    resizeSimCanvas();
+    requestSimDraw();
+  } else {
+    stopPosePolling();
+  }
 }
 
 function renderInspector() {
@@ -762,6 +854,267 @@ function stopHeartbeat() {
   if (state.heartbeatTimer === null) return;
   window.clearInterval(state.heartbeatTimer);
   state.heartbeatTimer = null;
+}
+
+function startPosePolling() {
+  const flight = selectedFlight();
+  if (!flight) {
+    state.poseFlightId = "";
+    state.poseTrack = [];
+    state.poseLastFrameIndex = -1;
+    state.poseStatus = null;
+    renderSimStrip();
+    requestSimDraw();
+    return;
+  }
+  if (state.poseFlightId !== flight.id) {
+    state.poseFlightId = flight.id;
+    state.poseTrack = [];
+    state.poseLastFrameIndex = -1;
+    state.poseStatus = null;
+  }
+  refreshPoseTrack();
+  if (state.poseTimer !== null) return;
+  state.poseTimer = window.setInterval(refreshPoseTrack, 500);
+}
+
+function stopPosePolling() {
+  if (state.poseTimer === null) return;
+  window.clearInterval(state.poseTimer);
+  state.poseTimer = null;
+}
+
+async function refreshPoseTrack() {
+  const flight = selectedFlight();
+  if (!flight) return;
+  if (flight.id !== state.poseFlightId) {
+    state.poseFlightId = flight.id;
+    state.poseTrack = [];
+    state.poseLastFrameIndex = -1;
+  }
+  const since = state.poseLastFrameIndex;
+  const result = await safeRequest("GET", `/api/flights/${flight.id}/pose/track?since=${since}`);
+  if (!result) return;
+  state.poseStatus = result.status ?? null;
+  const incoming = Array.isArray(result.poses) ? result.poses : [];
+  if (since < 0) {
+    state.poseTrack = incoming;
+  } else if (incoming.length) {
+    state.poseTrack = state.poseTrack.concat(incoming);
+  }
+  if (state.poseTrack.length) {
+    state.poseLastFrameIndex = state.poseTrack[state.poseTrack.length - 1].frameIndex ?? state.poseLastFrameIndex;
+  }
+  renderSimStrip();
+  requestSimDraw();
+}
+
+async function recomputePoseTrack() {
+  const flight = selectedFlight();
+  if (!flight) return;
+  poseRecomputeButton.disabled = true;
+  const previous = poseRecomputeButton.textContent;
+  poseRecomputeButton.textContent = "WORKING";
+  const result = await safeRequest("POST", `/api/flights/${flight.id}/pose/compute`, {});
+  poseRecomputeButton.disabled = false;
+  poseRecomputeButton.textContent = previous;
+  if (!result) return;
+  state.poseTrack = [];
+  state.poseLastFrameIndex = -1;
+  await refreshAppState();
+  await refreshPoseTrack();
+}
+
+function renderSimStrip() {
+  const status = state.poseStatus ?? {};
+  const stateKey = String(status.state ?? "no_estimator");
+  simState.textContent = POSE_STATE_LABELS[stateKey] ?? stateKey.toUpperCase();
+  simStrip?.classList.toggle("is-danger", POSE_DANGER_STATES.has(stateKey));
+  simEmpty.classList.toggle("is-hidden", state.poseTrack.length > 0);
+  simEmpty.textContent = POSE_STATE_LABELS[stateKey] ?? "NO ESTIMATOR";
+  const fps = Number(status.fps ?? 0);
+  simFps.textContent = `${fps > 0 ? fps.toFixed(1) : "—"} fps`;
+  simKeyframes.textContent = `${formatValue(status.keyframes ?? state.poseTrack.length)} keyframes`;
+  simScale.textContent = status.scaleLocked ? "scale metric" : "scale arbitrary";
+  simIntrinsics.textContent = `intrinsics ${String(status.intrinsicsSource ?? "—")}`;
+}
+
+function resizeSimCanvas() {
+  const dpr = window.devicePixelRatio || 1;
+  const rect = simCanvas.getBoundingClientRect();
+  simView.dpr = dpr;
+  simCanvas.width = Math.max(1, Math.floor(rect.width * dpr));
+  simCanvas.height = Math.max(1, Math.floor(rect.height * dpr));
+}
+
+function requestSimDraw() {
+  if (state.mainView !== "simulation") return;
+  if (simView.pendingDraw) return;
+  simView.pendingDraw = true;
+  window.requestAnimationFrame(() => {
+    simView.pendingDraw = false;
+    drawSim();
+  });
+}
+
+function drawSim() {
+  const ctx = simCanvas.getContext("2d");
+  if (!ctx) return;
+  if (simCanvas.width === 0 || simCanvas.height === 0) resizeSimCanvas();
+  const w = simCanvas.width;
+  const h = simCanvas.height;
+  ctx.fillStyle = "#07090a";
+  ctx.fillRect(0, 0, w, h);
+
+  const view = computeViewMatrix();
+  const focal = (Math.min(w, h) * 0.7) / Math.tan(0.5);
+  const project = (p) => projectPoint(p, view, focal, w, h);
+
+  drawGround(ctx, project);
+  drawAxes(ctx, project);
+  drawTrajectory(ctx, project);
+  drawDrone(ctx, project, view);
+}
+
+function computeViewMatrix() {
+  const cy = Math.cos(simView.yaw);
+  const sy = Math.sin(simView.yaw);
+  const cp = Math.cos(simView.pitch);
+  const sp = Math.sin(simView.pitch);
+  const eyeX = simView.target[0] + simView.distance * cp * sy;
+  const eyeY = simView.target[1] + simView.distance * cp * cy;
+  const eyeZ = simView.target[2] + simView.distance * sp;
+  return { eye: [eyeX, eyeY, eyeZ], target: simView.target.slice(), up: [0, 0, 1] };
+}
+
+function projectPoint(p, view, focal, w, h) {
+  const fwd = normalize(sub(view.target, view.eye));
+  const right = normalize(cross(fwd, view.up));
+  const up = cross(right, fwd);
+  const rel = sub(p, view.eye);
+  const xc = dot(rel, right);
+  const yc = -dot(rel, up);
+  const zc = dot(rel, fwd);
+  if (zc <= 0.001) return null;
+  return [w / 2 + (focal * xc) / zc, h / 2 + (focal * yc) / zc, zc];
+}
+
+function sub(a, b) { return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]; }
+function dot(a, b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+function cross(a, b) {
+  return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+}
+function normalize(v) {
+  const len = Math.hypot(v[0], v[1], v[2]) || 1;
+  return [v[0] / len, v[1] / len, v[2] / len];
+}
+
+function drawGround(ctx, project) {
+  ctx.strokeStyle = "rgba(159, 170, 178, 0.18)";
+  ctx.lineWidth = 1;
+  const extent = 50;
+  const step = 5;
+  ctx.beginPath();
+  for (let i = -extent; i <= extent; i += step) {
+    const a = project([i, -extent, 0]);
+    const b = project([i, extent, 0]);
+    if (a && b) { ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); }
+    const c = project([-extent, i, 0]);
+    const d = project([extent, i, 0]);
+    if (c && d) { ctx.moveTo(c[0], c[1]); ctx.lineTo(d[0], d[1]); }
+  }
+  ctx.stroke();
+}
+
+function drawAxes(ctx, project) {
+  const origin = project([0, 0, 0]);
+  if (!origin) return;
+  const len = 6;
+  const axes = [
+    { dir: [len, 0, 0], color: "#ef6a63" },
+    { dir: [0, len, 0], color: "#61c3a8" },
+    { dir: [0, 0, len], color: "#9faab2" },
+  ];
+  ctx.lineWidth = 1.4;
+  axes.forEach((axis) => {
+    const end = project(axis.dir);
+    if (!end) return;
+    ctx.strokeStyle = axis.color;
+    ctx.beginPath();
+    ctx.moveTo(origin[0], origin[1]);
+    ctx.lineTo(end[0], end[1]);
+    ctx.stroke();
+  });
+}
+
+function drawTrajectory(ctx, project) {
+  if (state.poseTrack.length < 2) return;
+  const lost = String(state.poseStatus?.state ?? "") === "lost";
+  ctx.strokeStyle = lost ? "rgba(239, 106, 99, 0.9)" : "rgba(237, 241, 243, 0.9)";
+  ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  let started = false;
+  for (const pose of state.poseTrack) {
+    const projected = project([pose.x, pose.y, pose.z]);
+    if (!projected) { started = false; continue; }
+    if (!started) { ctx.moveTo(projected[0], projected[1]); started = true; }
+    else ctx.lineTo(projected[0], projected[1]);
+  }
+  ctx.stroke();
+}
+
+function drawDrone(ctx, project, view) {
+  if (state.poseTrack.length === 0) return;
+  const last = state.poseTrack[state.poseTrack.length - 1];
+  const center = [last.x, last.y, last.z];
+  const R = quatToMatrix(last.qw, last.qx, last.qy, last.qz);
+  const armLen = Math.max(1.2, simView.distance * 0.025);
+  const fwd = applyR(R, [armLen, 0, 0]);
+  const right = applyR(R, [0, armLen * 0.7, 0]);
+  const back = applyR(R, [-armLen * 0.6, 0, 0]);
+  const left = applyR(R, [0, -armLen * 0.7, 0]);
+  const tip = applyR(R, [armLen * 1.3, 0, 0]);
+  const ptCenter = project(center);
+  if (!ptCenter) return;
+  const fwdP = project(addV(center, fwd));
+  const rightP = project(addV(center, right));
+  const backP = project(addV(center, back));
+  const leftP = project(addV(center, left));
+  const tipP = project(addV(center, tip));
+  ctx.strokeStyle = "rgba(237, 241, 243, 0.95)";
+  ctx.lineWidth = 1.4;
+  ctx.beginPath();
+  if (fwdP && backP) { ctx.moveTo(fwdP[0], fwdP[1]); ctx.lineTo(backP[0], backP[1]); }
+  if (leftP && rightP) { ctx.moveTo(leftP[0], leftP[1]); ctx.lineTo(rightP[0], rightP[1]); }
+  ctx.stroke();
+  if (tipP && ptCenter) {
+    ctx.strokeStyle = "rgba(97, 195, 168, 0.95)";
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.moveTo(ptCenter[0], ptCenter[1]);
+    ctx.lineTo(tipP[0], tipP[1]);
+    ctx.stroke();
+  }
+}
+
+function addV(a, b) { return [a[0] + b[0], a[1] + b[1], a[2] + b[2]]; }
+
+function applyR(R, v) {
+  return [
+    R[0][0] * v[0] + R[0][1] * v[1] + R[0][2] * v[2],
+    R[1][0] * v[0] + R[1][1] * v[1] + R[1][2] * v[2],
+    R[2][0] * v[0] + R[2][1] * v[1] + R[2][2] * v[2],
+  ];
+}
+
+function quatToMatrix(w, x, y, z) {
+  const n = Math.hypot(w, x, y, z) || 1;
+  w /= n; x /= n; y /= n; z /= n;
+  return [
+    [1 - 2 * (y * y + z * z), 2 * (x * y - z * w),     2 * (x * z + y * w)],
+    [2 * (x * y + z * w),     1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+    [2 * (x * z - y * w),     2 * (y * z + x * w),     1 - 2 * (x * x + y * y)],
+  ];
 }
 
 function selectedDrone() {
