@@ -25,6 +25,8 @@ class FrameMetrics:
     smooth_speckle_mae: float
     raw_to_smooth_mae: float
     replaced_pixel_pct: float
+    block_replaced_pixel_pct: float
+    detected_block_count: int
 
 
 def main() -> int:
@@ -34,6 +36,11 @@ def main() -> int:
     parser.add_argument("--pattern", default="*.jpg")
     parser.add_argument("--outlier-threshold", type=int, default=45, help="Current pixel must differ from both neighbors by this much.")
     parser.add_argument("--stable-threshold", type=int, default=28, help="Neighbor pixels must be this close to be considered stable.")
+    parser.add_argument("--block-size", type=int, default=16, help="Tile size for block artifact detection, 0 disables block replacement.")
+    parser.add_argument("--block-outlier-threshold", type=int, default=60, help="Block pixels must differ from both neighbors by this much.")
+    parser.add_argument("--block-stable-threshold", type=int, default=24, help="Neighbor pixels within a block must be this close to be considered stable.")
+    parser.add_argument("--block-min-changed-pct", type=float, default=35.0, help="Minimum percent of a block that must satisfy block thresholds.")
+    parser.add_argument("--block-min-mean-diff", type=float, default=35.0, help="Minimum mean current-to-neighbor block difference.")
     parser.add_argument("--ema", type=float, default=0.12, help="Light blend weight from previous smoothed frame, 0 disables it.")
     parser.add_argument("--quality", type=int, default=92)
     parser.add_argument("--compare-index", type=int, default=13, help="Frame index for raw/smoothed contact sheet.")
@@ -56,9 +63,19 @@ def main() -> int:
         previous_raw = raw_frames[index - 1] if index > 0 else current
         next_raw = raw_frames[index + 1] if index + 1 < len(raw_frames) else current
 
-        corrected, replaced_pixel_pct = temporal_outlier_filter(
+        block_corrected, block_replaced_pixel_pct, detected_block_count = block_artifact_filter(
             previous_raw,
             current,
+            next_raw,
+            args.block_size,
+            args.block_outlier_threshold,
+            args.block_stable_threshold,
+            args.block_min_changed_pct,
+            args.block_min_mean_diff,
+        )
+        corrected, replaced_pixel_pct = temporal_outlier_filter(
+            previous_raw,
+            block_corrected,
             next_raw,
             args.outlier_threshold,
             args.stable_threshold,
@@ -81,6 +98,8 @@ def main() -> int:
                 smooth_speckle_mae=speckle_mae(corrected),
                 raw_to_smooth_mae=image_mae(current, corrected),
                 replaced_pixel_pct=replaced_pixel_pct,
+                block_replaced_pixel_pct=block_replaced_pixel_pct,
+                detected_block_count=detected_block_count,
             )
         )
         previous_smooth = corrected
@@ -126,6 +145,73 @@ def temporal_outlier_filter(
     return filtered, (replaced / pixels) * 100.0
 
 
+def block_artifact_filter(
+    previous: Image.Image,
+    current: Image.Image,
+    next_frame: Image.Image,
+    block_size: int,
+    outlier_threshold: int,
+    stable_threshold: int,
+    min_changed_pct: float,
+    min_mean_diff: float,
+) -> tuple[Image.Image, float, int]:
+    if block_size <= 0:
+        return current.copy(), 0.0, 0
+    if previous.size != current.size or current.size != next_frame.size:
+        raise ValueError("image sizes differ")
+
+    current_previous_diff = max_channel_diff(current, previous)
+    current_next_diff = max_channel_diff(current, next_frame)
+    previous_next_diff = max_channel_diff(previous, next_frame)
+    candidate_pixels = ImageChops.multiply(
+        ImageChops.multiply(
+            threshold_high(current_previous_diff, outlier_threshold),
+            threshold_high(current_next_diff, outlier_threshold),
+        ),
+        threshold_low(previous_next_diff, stable_threshold),
+    )
+
+    block_mask = Image.new("L", current.size, 0)
+    detected_block_count = 0
+    width, height = current.size
+    for top in range(0, height, block_size):
+        bottom = min(top + block_size, height)
+        for left in range(0, width, block_size):
+            right = min(left + block_size, width)
+            box = (left, top, right, bottom)
+            block_pixels = (right - left) * (bottom - top)
+            changed_pct = (candidate_pixels.crop(box).histogram()[255] / block_pixels) * 100.0
+            if changed_pct < min_changed_pct:
+                continue
+
+            prev_mean = ImageStat.Stat(current_previous_diff.crop(box)).mean[0]
+            next_mean = ImageStat.Stat(current_next_diff.crop(box)).mean[0]
+            neighbor_mean = ImageStat.Stat(previous_next_diff.crop(box)).mean[0]
+            if prev_mean < min_mean_diff or next_mean < min_mean_diff or neighbor_mean > stable_threshold:
+                continue
+
+            block_mask.paste(255, box)
+            detected_block_count += 1
+
+    if detected_block_count == 0:
+        return current.copy(), 0.0, 0
+
+    replacement = temporal_median(previous, current, next_frame)
+    filtered = Image.composite(replacement, current, block_mask)
+    replaced = block_mask.histogram()[255]
+    pixels = current.width * current.height
+    return filtered, (replaced / pixels) * 100.0, detected_block_count
+
+
+def temporal_median(previous: Image.Image, current: Image.Image, next_frame: Image.Image) -> Image.Image:
+    channels = []
+    for prev_channel, current_channel, next_channel in zip(previous.split(), current.split(), next_frame.split()):
+        lower_pair = ImageChops.darker(prev_channel, current_channel)
+        upper_pair = ImageChops.lighter(prev_channel, current_channel)
+        channels.append(ImageChops.lighter(lower_pair, ImageChops.darker(upper_pair, next_channel)))
+    return Image.merge(current.mode, channels)
+
+
 def max_channel_diff(left: Image.Image, right: Image.Image) -> Image.Image:
     red, green, blue = ImageChops.difference(left, right).split()
     return ImageChops.lighter(ImageChops.lighter(red, green), blue)
@@ -158,6 +244,7 @@ def summarize(metrics: list[FrameMetrics]) -> dict[str, object]:
     smooth_speckle = [item.smooth_speckle_mae for item in metrics]
     changed = [item.raw_to_smooth_mae for item in metrics]
     replaced = [item.replaced_pixel_pct for item in metrics]
+    block_replaced = [item.block_replaced_pixel_pct for item in metrics]
 
     raw_temporal_mean = mean(raw_temporal)
     smooth_temporal_mean = mean(smooth_temporal)
@@ -174,6 +261,8 @@ def summarize(metrics: list[FrameMetrics]) -> dict[str, object]:
         "speckle_mae_delta_pct": percent_delta(raw_speckle_mean, smooth_speckle_mean),
         "raw_to_smooth_mae": mean(changed),
         "replaced_pixel_pct": mean(replaced),
+        "block_replaced_pixel_pct": mean(block_replaced),
+        "detected_block_count": sum(item.detected_block_count for item in metrics),
         "worst_raw_speckle_frames": [
             item.name for item in sorted(metrics, key=lambda value: value.raw_speckle_mae, reverse=True)[:8]
         ],
@@ -201,6 +290,8 @@ def format_summary(summary: dict[str, object]) -> str:
         f"delta={summary['speckle_mae_delta_pct']:.1f}%\n"
         f"raw_to_smooth_mae={summary['raw_to_smooth_mae']:.3f}\n"
         f"replaced_pixel_pct={summary['replaced_pixel_pct']:.3f}%\n"
+        f"block_replaced_pixel_pct={summary['block_replaced_pixel_pct']:.3f}%\n"
+        f"detected_block_count={summary['detected_block_count']}\n"
         f"worst_raw_speckle_frames={', '.join(summary['worst_raw_speckle_frames'])}\n"
     )
 
