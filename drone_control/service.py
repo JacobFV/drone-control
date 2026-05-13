@@ -6,6 +6,7 @@ import mimetypes
 import re
 import subprocess
 import sys
+import threading
 import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -14,6 +15,7 @@ from urllib.parse import parse_qs, urlparse
 
 from drone_control.live_video import DirectoryFrameSource, mjpeg_chunks
 from drone_control.manual_control import ManualControlConfig, ManualControlSession
+from drone_control.manual_transport import ManualDroneTransport
 from drone_control.store import ControlStationStore
 
 
@@ -35,7 +37,8 @@ class ControlStationHandler(BaseHTTPRequestHandler):
             self.send_json(wifi_capabilities())
             return
         if parsed.path == "/api/manual/status":
-            self.send_json(self.server.manual_status())
+            with self.server.manual_lock:
+                self.send_json(self.server.manual_status())
             return
 
         match = re.fullmatch(r"/api/records/([^/]+)/mjpeg", parsed.path)
@@ -90,43 +93,52 @@ class ControlStationHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/manual/arm":
-            try:
-                self.server.manual.arm()
-            except RuntimeError as exc:
-                self.send_json({"error": str(exc), **self.server.manual_status()}, status=HTTPStatus.CONFLICT)
-                return
-            self.send_json(self.server.manual_status())
+            with self.server.manual_lock:
+                try:
+                    self.server.manual.arm()
+                except RuntimeError as exc:
+                    self.send_json({"error": str(exc), **self.server.manual_status()}, status=HTTPStatus.CONFLICT)
+                    return
+                self.send_json(self.server.manual_status())
             return
         if parsed.path == "/api/manual/clear-fault":
-            self.server.manual.clear_fault()
-            self.send_json(self.server.manual_status())
+            with self.server.manual_lock:
+                self.server.manual.clear_fault()
+                self.send_json(self.server.manual_status())
             return
         if parsed.path == "/api/manual/disarm":
-            action = self.server.manual.disarm()
-            self.send_json(self.server.manual_status(action))
+            with self.server.manual_lock:
+                action = self.server.manual.disarm()
+                self.server.send_manual_action(action)
+                self.send_json(self.server.manual_status(action))
             return
         if parsed.path == "/api/manual/heartbeat":
-            self.server.manual.heartbeat()
-            self.send_json(self.server.manual_status())
+            with self.server.manual_lock:
+                self.server.manual.heartbeat()
+                self.send_json(self.server.manual_status())
             return
         if parsed.path == "/api/manual/axes":
             payload = self.read_json()
-            accepted = self.server.manual.set_target_axes(
-                roll=payload.get("roll"),
-                pitch=payload.get("pitch"),
-                throttle=payload.get("throttle"),
-                yaw=payload.get("yaw"),
-            )
-            action = self.server.manual.tick()
-            self.send_json(self.server.manual_status(action) | {"accepted": accepted})
+            with self.server.manual_lock:
+                accepted = self.server.manual.set_target_axes(
+                    roll=payload.get("roll"),
+                    pitch=payload.get("pitch"),
+                    throttle=payload.get("throttle"),
+                    yaw=payload.get("yaw"),
+                )
+                self.send_json(self.server.manual_status() | {"accepted": accepted})
             return
         if parsed.path == "/api/manual/stop":
-            action = self.server.manual.emergency_stop()
-            self.send_json(self.server.manual_status(action))
+            with self.server.manual_lock:
+                action = self.server.manual.emergency_stop()
+                self.server.send_manual_action(action)
+                self.send_json(self.server.manual_status(action))
             return
         if parsed.path == "/api/manual/tick":
-            action = self.server.manual.tick()
-            self.send_json(self.server.manual_status(action))
+            with self.server.manual_lock:
+                action = self.server.manual.tick()
+                self.server.send_manual_action(action)
+                self.send_json(self.server.manual_status(action))
             return
 
         self.send_error(HTTPStatus.NOT_FOUND)
@@ -219,6 +231,11 @@ class ControlStationServer(ThreadingHTTPServer):
         super().__init__(server_address, ControlStationHandler)
         self.store = store
         self.manual = ManualControlSession(ManualControlConfig())
+        self.manual_lock = threading.RLock()
+        self.manual_transport = ManualDroneTransport.from_env()
+        self.manual_loop_running = True
+        self.manual_thread = threading.Thread(target=self._manual_loop, name="manual-control-loop", daemon=True)
+        self.manual_thread.start()
 
     def manual_status(self, action: object | None = None) -> dict[str, object]:
         payload = {
@@ -227,10 +244,28 @@ class ControlStationServer(ThreadingHTTPServer):
             "faultReason": self.manual.fault_reason,
             "stopReason": self.manual.stop_reason,
             "current": self.manual.current_action_dict(),
+            "transport": self.manual_transport.status().as_dict(),
         }
         if action is not None:
             payload["action"] = action_to_dict(action)
         return payload
+
+    def send_manual_action(self, action: object | None) -> bool:
+        return self.manual_transport.send(action)
+
+    def server_close(self) -> None:
+        self.manual_loop_running = False
+        self.manual_thread.join(timeout=1.0)
+        self.manual_transport.close()
+        super().server_close()
+
+    def _manual_loop(self) -> None:
+        interval = self.manual.config.command_interval_seconds
+        while self.manual_loop_running:
+            with self.manual_lock:
+                action = self.manual.tick()
+                self.send_manual_action(action)
+            time.sleep(interval)
 
 
 def main() -> int:

@@ -187,9 +187,7 @@ function renderManualStatus() {
     ? `Fault: ${status.faultReason}`
     : status.stopReason
       ? `Stopping: ${status.stopReason}`
-      : status.armed
-        ? "Manual control is armed. Heartbeat active."
-        : "Manual control is disarmed.";
+      : manualStatusText(status);
   armButton.textContent = status.state === "faulted" ? "Clear + Arm" : "Arm";
   armButton.disabled = status.armed;
   disarmButton.disabled = !status.armed;
@@ -199,6 +197,18 @@ function renderManualStatus() {
       button.disabled = !status.armed;
     }
   });
+}
+
+function manualStatusText(status) {
+  const transport = status.transport;
+  const stateText = status.armed ? "Manual control is armed. Heartbeat active." : "Manual control is disarmed.";
+  if (!transport?.enabled) {
+    return `${stateText} Drone IO disabled.`;
+  }
+  if (transport.lastError) {
+    return `${stateText} Transport error: ${transport.lastError}`;
+  }
+  return `${stateText} Transport ${transport.connected ? "connected" : "ready"}: ${transport.target}.`;
 }
 
 function render() {
