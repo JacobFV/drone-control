@@ -238,7 +238,7 @@ function renderTree() {
     const droneButton = element("button", "drone-row");
     const statusClass = KNOWN_STATUS.has(drone.status) ? drone.status : "unknown";
     droneButton.innerHTML = `
-      <span class="chevron">▾</span>
+      <svg class="chevron" viewBox="0 0 12 12" aria-hidden="true"><path d="M3 4.5 L6 8 L9 4.5"/></svg>
       <span class="tree-name">${escapeHtml(drone.name)}<span class="tree-sub">${escapeHtml(drone.model)} · ${escapeHtml(drone.lastSeen)}</span></span>
       <span class="status-dot ${statusClass}"></span>
     `;

@@ -84,13 +84,27 @@
               <button id="stopButton" class="btn is-danger">STOP</button>
             </div>
             <div class="control-pad">
-              <button data-control="pitch-up">FWD</button>
-              <button data-control="yaw-left">CCW</button>
-              <button data-control="stop">STOP</button>
-              <button data-control="yaw-right">CW</button>
-              <button data-control="roll-left">LEFT</button>
-              <button data-control="pitch-down">BACK</button>
-              <button data-control="roll-right">RIGHT</button>
+              <button data-control="pitch-up" aria-label="Pitch forward" title="Pitch forward">
+                <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 13 L8 3 M4 7 L8 3 L12 7"/></svg>
+              </button>
+              <button data-control="yaw-left" aria-label="Yaw counter-clockwise" title="Yaw counter-clockwise">
+                <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3 A5 5 0 1 0 13 8"/><path d="M11.5 9.5 L13 8 L14.5 9.5"/></svg>
+              </button>
+              <button data-control="stop" aria-label="Stop" title="Stop">
+                <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="4" y="4" width="8" height="8" fill="currentColor" stroke="none"/></svg>
+              </button>
+              <button data-control="yaw-right" aria-label="Yaw clockwise" title="Yaw clockwise">
+                <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3 A5 5 0 1 1 3 8"/><path d="M1.5 9.5 L3 8 L4.5 9.5"/></svg>
+              </button>
+              <button data-control="roll-left" aria-label="Roll left" title="Roll left">
+                <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13 8 L3 8 M7 4 L3 8 L7 12"/></svg>
+              </button>
+              <button data-control="pitch-down" aria-label="Pitch back" title="Pitch back">
+                <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3 L8 13 M4 9 L8 13 L12 9"/></svg>
+              </button>
+              <button data-control="roll-right" aria-label="Roll right" title="Roll right">
+                <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8 L13 8 M9 4 L13 8 L9 12"/></svg>
+              </button>
             </div>
             <div class="throttle-row">
               <label for="throttle">THR</label>
