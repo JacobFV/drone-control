@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import mimetypes
 import os
@@ -27,7 +28,8 @@ from drone_control.intrinsics import load_intrinsics
 from drone_control.live_video import DirectoryFrameSource, LiveDroneFrameSource, LiveDroneFrameSourceConfig, mjpeg_chunks
 from drone_control.manual_control import ManualControlConfig, ManualControlSession
 from drone_control.manual_transport import ManualDroneTransport
-from drone_control.pose_estimator import load_pose_track, replay_directory
+from drone_control.pose_estimator import estimator_available, load_pose_track, replay_directory
+from drone_control.reconstruction import ReconstructionManager, find_splat_artifact
 from drone_control.store import ControlStationStore
 
 
@@ -50,6 +52,9 @@ class ControlStationHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/config":
             self.send_json(self.server.config_status())
+            return
+        if parsed.path == "/api/reconstruction/tools":
+            self.send_json(self.server.reconstructions.tools_status())
             return
         if parsed.path == "/api/wifi/capabilities":
             self.send_json(wifi_capabilities())
@@ -96,11 +101,28 @@ class ControlStationHandler(BaseHTTPRequestHandler):
             self.send_json(self.server.pose_track(match.group(1), since=since))
             return
 
+        match = re.fullmatch(r"/api/flights/([^/]+)/reconstruction/status", parsed.path)
+        if match:
+            self.send_json(self.server.reconstruction_status(match.group(1)))
+            return
+
         match = re.fullmatch(r"/api/records/([^/]+)/mjpeg", parsed.path)
         if match:
             query = parse_qs(parsed.query)
             fps = float(query.get("fps", ["12"])[0])
             self.send_mjpeg(match.group(1), fps=max(1.0, min(30.0, fps)))
+            return
+
+        match = re.fullmatch(r"/api/records/([^/]+)/artifact", parsed.path)
+        if match:
+            query = parse_qs(parsed.query)
+            relative = query.get("path", [""])[0]
+            self.send_record_artifact(match.group(1), relative)
+            return
+
+        match = re.fullmatch(r"/api/records/([^/]+)/splat-viewer", parsed.path)
+        if match:
+            self.send_splat_viewer(match.group(1))
             return
 
         match = re.fullmatch(r"/api/blobs/([^/]+)/(.+)", parsed.path)
@@ -212,6 +234,16 @@ class ControlStationHandler(BaseHTTPRequestHandler):
         match = re.fullmatch(r"/api/flights/([^/]+)/pose/compute", parsed.path)
         if match:
             self.compute_pose_track(match.group(1))
+            return
+
+        match = re.fullmatch(r"/api/flights/([^/]+)/reconstruction/start", parsed.path)
+        if match:
+            self.start_reconstruction(match.group(1))
+            return
+
+        match = re.fullmatch(r"/api/flights/([^/]+)/reconstruction/stop", parsed.path)
+        if match:
+            self.stop_reconstruction(match.group(1))
             return
 
         if parsed.path == "/api/wifi/connect":
@@ -339,6 +371,51 @@ class ControlStationHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+    def send_record_artifact(self, record_id: str, relative: str) -> None:
+        path = self.server.store.record_path(record_id)
+        if path is None:
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        if path.is_dir():
+            target = (path / relative).resolve()
+            if not target.is_file() or path.resolve() not in target.parents:
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+        else:
+            if relative:
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            target = path
+        data = target.read_bytes()
+        content_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "public, max-age=3600")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def send_splat_viewer(self, record_id: str) -> None:
+        path = self.server.store.record_path(record_id)
+        info = self.server.store.record_info(record_id)
+        if path is None or info is None:
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        artifact = find_splat_artifact(path)
+        if artifact is None:
+            self.send_json({"error": "record has no .ply, .splat, or .spz artifact"}, status=HTTPStatus.NOT_FOUND)
+            return
+        relative = "" if path.is_file() else str(artifact.relative_to(path))
+        artifact_url = f"/api/records/{record_id}/artifact"
+        if relative:
+            artifact_url += f"?path={relative}"
+        body = splat_viewer_html(str(info["label"]), artifact_url).encode()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def log_message(self, fmt: str, *args: object) -> None:
         sys.stderr.write(f"service: {self.address_string()} {fmt % args}\n")
@@ -496,44 +573,50 @@ class ControlStationHandler(BaseHTTPRequestHandler):
             return
         payload = self.read_json()
         record_id = optional_str(payload, "recordId")
-        # Pick the requested frames record, or fall back to the latest one.
-        state = self.server.store.state()
-        frames_record = None
-        for drone in state.get("drones", []):
-            for flight in drone.get("flights", []):
-                if flight.get("id") != flight_id:
-                    continue
-                frame_records = [r for r in flight.get("records", []) if r.get("type") == "frames"]
-                if record_id:
-                    frames_record = next((r for r in frame_records if r.get("id") == record_id), None)
-                elif frame_records:
-                    frames_record = frame_records[-1]
-        if frames_record is None:
-            self.send_json({"error": "no frames record available"}, status=HTTPStatus.NOT_FOUND)
-            return
-        frame_dir = self.server.store.record_path(frames_record["id"])
-        if frame_dir is None or not frame_dir.is_dir():
-            self.send_json({"error": "frames record blob missing"}, status=HTTPStatus.NOT_FOUND)
-            return
-        out_path = self.server.session_work_root / f"replay-{frames_record['id']}" / "pose.jsonl"
-        out_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            status = replay_directory(frame_dir, out_path, fps=float(payload.get("fps") or 12))
+            result = self.server.compute_pose_track_record(
+                flight_id,
+                record_id=record_id,
+                fps=float(payload.get("fps") or 12),
+            )
         except RuntimeError as exc:
             self.send_json({"error": str(exc)}, status=HTTPStatus.SERVICE_UNAVAILABLE)
             return
-        pose_record_id = self.server.store.import_record(
-            flight_id,
-            "pose-track",
-            f"Replay pose track {frames_record['id']}",
-            "application/jsonl",
-            out_path,
-        )
-        self.send_json({
-            "id": pose_record_id,
-            "status": status.as_dict(),
-            "sourceRecordId": frames_record["id"],
-        })
+        except FileNotFoundError as exc:
+            self.send_json({"error": str(exc)}, status=HTTPStatus.NOT_FOUND)
+            return
+        self.send_json(result)
+
+    def start_reconstruction(self, flight_id: str) -> None:
+        if not self.server.store.flight_exists(flight_id):
+            self.send_json({"error": "flight not found"}, status=HTTPStatus.NOT_FOUND)
+            return
+        payload = self.read_json()
+        frame_record = self.server._latest_frame_record(flight_id, record_id=optional_str(payload, "recordId"))
+        if frame_record is None:
+            self.send_json({"error": "no frames record available"}, status=HTTPStatus.NOT_FOUND)
+            return
+        pose_record = self.server._latest_pose_record(flight_id)
+        try:
+            job = self.server.reconstructions.start(
+                flight_id=flight_id,
+                frame_record=frame_record,
+                pose_record=pose_record,
+                max_images=optional_int(payload, "maxImages"),
+                max_iterations=optional_int(payload, "maxIterations"),
+                fps=float(payload.get("fps") or 12),
+            )
+        except RuntimeError as exc:
+            self.send_json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
+            return
+        self.send_json(self.server.reconstruction_status(flight_id) | {"jobId": job.id})
+
+    def stop_reconstruction(self, flight_id: str) -> None:
+        status = self.server.reconstructions.stop(flight_id)
+        if status is None:
+            self.send_json({"error": "no reconstruction job"}, status=HTTPStatus.NOT_FOUND)
+            return
+        self.send_json(self.server.reconstruction_status(flight_id))
 
     def export_record(self, record_id: str) -> None:
         payload = self.read_json()
@@ -567,8 +650,10 @@ class ControlStationServer(ThreadingHTTPServer):
         self.manual_transport = ManualDroneTransport.from_env()
         self.session_work_root = store.db_path.parent / "session_work"
         self.export_root = store.db_path.parent / "exports"
+        self.reconstruction_root = store.db_path.parent / "reconstructions"
         self.export_root.mkdir(parents=True, exist_ok=True)
         self.sessions = FlightSessionManager(self.session_work_root)
+        self.reconstructions = ReconstructionManager(store=store, work_root=self.reconstruction_root)
         self.wifi_previous: dict[str, str] = {}
         self.manual_loop_running = True
         self.manual_thread = threading.Thread(target=self._manual_loop, name="manual-control-loop", daemon=True)
@@ -609,10 +694,41 @@ class ControlStationServer(ThreadingHTTPServer):
                 "useRtsp": env_bool("DRONE_CAMERA_USE_RTSP", True),
             },
             "singleDroneActive": True,
+            "reconstruction": self.reconstructions.tools_status(),
         }
 
     def send_manual_action(self, action: object | None) -> bool:
         return self.manual_transport.send(action)
+
+    def compute_pose_track_record(
+        self,
+        flight_id: str,
+        *,
+        record_id: str | None = None,
+        fps: float = 12.0,
+    ) -> dict[str, object]:
+        frames_record = self._latest_frame_record(flight_id, record_id=record_id)
+        if frames_record is None:
+            raise FileNotFoundError("no frames record available")
+        frame_dir = self.store.record_path(str(frames_record["id"]))
+        if frame_dir is None or not frame_dir.is_dir():
+            raise FileNotFoundError("frames record blob missing")
+
+        out_path = self.session_work_root / f"replay-{frames_record['id']}" / "pose.jsonl"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        status = replay_directory(frame_dir, out_path, fps=fps)
+        pose_record_id = self.store.import_record(
+            flight_id,
+            "pose-track",
+            f"Replay pose track {frames_record['id']}",
+            "application/jsonl",
+            out_path,
+        )
+        return {
+            "id": pose_record_id,
+            "status": status.as_dict(),
+            "sourceRecordId": frames_record["id"],
+        }
 
     def pose_status(self, flight_id: str) -> dict[str, object]:
         session = self.sessions.get(flight_id)
@@ -624,7 +740,7 @@ class ControlStationServer(ThreadingHTTPServer):
             }
         record = self._latest_pose_record(flight_id)
         if record is None:
-            return {"flightId": flight_id, "live": False, "status": {"state": "no_estimator"}}
+            return {"flightId": flight_id, "live": False, "status": self._missing_pose_status(flight_id)}
         return {
             "flightId": flight_id,
             "live": False,
@@ -643,7 +759,7 @@ class ControlStationServer(ThreadingHTTPServer):
             }
         record = self._latest_pose_record(flight_id)
         if record is None:
-            return {"flightId": flight_id, "live": False, "poses": [], "status": {"state": "no_estimator"}}
+            return {"flightId": flight_id, "live": False, "poses": [], "status": self._missing_pose_status(flight_id)}
         path = self.store.record_path(record["id"])
         poses = load_pose_track(path) if path else []
         if since >= 0:
@@ -654,6 +770,48 @@ class ControlStationServer(ThreadingHTTPServer):
             "poses": poses,
             "status": {"state": "stored", "framesProcessed": len(poses)},
         }
+
+    def reconstruction_status(self, flight_id: str) -> dict[str, object]:
+        status = self.reconstructions.status(flight_id)
+        latest_splat = self._latest_splat_record(flight_id)
+        return {
+            "flightId": flight_id,
+            "job": status,
+            "tools": self.reconstructions.tools_status(),
+            "latestSplatRecord": latest_splat,
+        }
+
+    def _missing_pose_status(self, flight_id: str) -> dict[str, object]:
+        frame_record = self._latest_frame_record(flight_id)
+        if frame_record is None:
+            return {"state": "no_estimator", "estimatorAvailable": estimator_available()}
+        if not estimator_available():
+            return {
+                "state": "no_estimator",
+                "estimatorAvailable": False,
+                "framesAvailable": True,
+                "sourceRecordId": frame_record["id"],
+                "lastError": "opencv-python is required for pose estimation",
+            }
+        return {
+            "state": "not_computed",
+            "estimatorAvailable": True,
+            "framesAvailable": True,
+            "sourceRecordId": frame_record["id"],
+        }
+
+    def _latest_frame_record(self, flight_id: str, *, record_id: str | None = None) -> dict[str, object] | None:
+        state = self.store.state()
+        for drone in state.get("drones", []):
+            for flight in drone.get("flights", []):
+                if flight.get("id") != flight_id:
+                    continue
+                frame_records = [r for r in flight.get("records", []) if r.get("type") == "frames"]
+                if record_id:
+                    return next((r for r in frame_records if r.get("id") == record_id), None)
+                if frame_records:
+                    return frame_records[-1]
+        return None
 
     def _latest_pose_record(self, flight_id: str) -> dict[str, object] | None:
         state = self.store.state()
@@ -667,9 +825,22 @@ class ControlStationServer(ThreadingHTTPServer):
                 return pose_records[-1]
         return None
 
+    def _latest_splat_record(self, flight_id: str) -> dict[str, object] | None:
+        state = self.store.state()
+        for drone in state.get("drones", []):
+            for flight in drone.get("flights", []):
+                if flight.get("id") != flight_id:
+                    continue
+                records = [r for r in flight.get("records", []) if r.get("type") == "gaussian-splat"]
+                if not records:
+                    return None
+                return records[-1]
+        return None
+
     def server_close(self) -> None:
         self.manual_loop_running = False
         self.manual_thread.join(timeout=1.0)
+        self.reconstructions.stop_all()
         self.sessions.stop_all()
         self.manual_transport.close()
         super().server_close()
@@ -965,6 +1136,56 @@ def export_frame_dir(frame_dir: Path, export_root: Path, *, fmt: str, fps: float
             raise RuntimeError(completed.stdout.strip() or "ffmpeg export failed")
         return out
     raise RuntimeError(f"unsupported export format: {fmt}")
+
+
+def splat_viewer_html(title: str, artifact_url: str) -> str:
+    escaped_title = html.escape(title)
+    title_json = json.dumps(title)
+    url_json = json.dumps(artifact_url)
+    return f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{escaped_title}</title>
+    <style>
+      html, body {{ margin: 0; width: 100%; height: 100%; overflow: hidden; background: #07090a; color: #edf1f3; font-family: ui-monospace, Menlo, Consolas, monospace; }}
+      #status {{ position: fixed; left: 12px; bottom: 12px; z-index: 2; padding: 6px 10px; background: rgba(0,0,0,.72); border: 1px solid rgba(255,255,255,.12); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; }}
+      canvas {{ display: block; width: 100vw; height: 100vh; }}
+    </style>
+  </head>
+  <body>
+    <div id="status">LOADING</div>
+    <script type="module">
+      import * as SPLAT from "https://cdn.jsdelivr.net/npm/gsplat@latest/+esm";
+      const label = {title_json};
+      const artifactUrl = new URL({url_json}, window.location.href).toString();
+      const status = document.getElementById("status");
+      const scene = new SPLAT.Scene();
+      const camera = new SPLAT.Camera();
+      const renderer = new SPLAT.WebGLRenderer();
+      const controls = new SPLAT.OrbitControls(camera, renderer.canvas);
+      document.body.appendChild(renderer.canvas);
+      try {{
+        await SPLAT.Loader.LoadAsync(artifactUrl, scene, (progress) => {{
+          const pct = Number.isFinite(progress) ? Math.round(progress * 100) : 0;
+          status.textContent = pct > 0 ? `${{label}} ${{pct}}%` : `LOADING ${{label}}`;
+        }});
+        status.textContent = label;
+        const frame = () => {{
+          controls.update();
+          renderer.render(scene, camera);
+          requestAnimationFrame(frame);
+        }};
+        requestAnimationFrame(frame);
+      }} catch (error) {{
+        console.error(error);
+        status.textContent = `LOAD FAILED: ${{error?.message || error}}`;
+      }}
+    </script>
+  </body>
+</html>
+"""
 
 
 def format_duration(seconds: float) -> str:

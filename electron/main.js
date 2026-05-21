@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, ipcMain } = require("electron");
+const { app, BrowserWindow, Menu, ipcMain, shell } = require("electron");
 const { spawn } = require("child_process");
 const path = require("path");
 const readline = require("readline");
@@ -35,6 +35,7 @@ app.whenReady().then(async () => {
   serviceUrl = await startPythonService();
   ipcMain.handle("app:request", async (_event, request) => serviceRequest(request));
   ipcMain.handle("app:serviceUrl", () => serviceUrl);
+  ipcMain.handle("app:openExternal", async (_event, url) => shell.openExternal(url));
   createWindow();
 
   app.on("activate", () => {
@@ -58,10 +59,16 @@ app.on("before-quit", () => {
 
 async function startPythonService() {
   return new Promise((resolve, reject) => {
-    const python = process.env.PYTHON || "python3";
+    const venvPython = process.platform === "win32"
+      ? path.join(rootDir, ".venv", "Scripts", "python.exe")
+      : path.join(rootDir, ".venv", "bin", "python");
+    const python = process.env.PYTHON || (require("fs").existsSync(venvPython) ? venvPython : "python3");
+    const pythonBinDir = path.dirname(python);
+    const env = { ...process.env };
+    env.PATH = `${pythonBinDir}${path.delimiter}${env.PATH || ""}`;
     serviceProcess = spawn(python, ["-m", "drone_control.service", "--host", "127.0.0.1", "--port", "0"], {
       cwd: rootDir,
-      env: process.env,
+      env,
       stdio: ["ignore", "pipe", "pipe"],
     });
 

@@ -1,3 +1,5 @@
 Pillow>=12.0
 numpy>=1.26
 opencv-python>=4.8
+nerfstudio>=1.1
+pymeshlab>=2025.7

@@ -19,6 +19,10 @@ except ImportError:  # pragma: no cover - exercised by deployment shape
 from drone_control.intrinsics import CameraIntrinsics, estimate_intrinsics
 
 
+def estimator_available() -> bool:
+    return cv2 is not None
+
+
 class TrackingState(str, enum.Enum):
     NO_ESTIMATOR = "no_estimator"
     INITIALIZING = "initializing"

@@ -23,6 +23,11 @@ const state = {
   poseLastFrameIndex: -1,
   poseTimer: null,
   poseFlightId: "",
+  poseAutoComputeFlightId: "",
+  poseComputing: false,
+  reconstructionStatus: null,
+  reconstructionTimer: null,
+  reconstructionFlightId: "",
 };
 
 const workspace = document.querySelector(".workspace");
@@ -85,9 +90,18 @@ const simIntrinsics = document.getElementById("simIntrinsics");
 const simStrip = document.querySelector(".sim-strip");
 const poseRecomputeButton = document.getElementById("poseRecomputeButton");
 const poseResetViewButton = document.getElementById("poseResetViewButton");
+const reconState = document.getElementById("reconState");
+const reconMaxImages = document.getElementById("reconMaxImages");
+const reconMaxIterations = document.getElementById("reconMaxIterations");
+const reconStartButton = document.getElementById("reconStartButton");
+const reconStopButton = document.getElementById("reconStopButton");
+const reconViewButton = document.getElementById("reconViewButton");
+const reconList = document.getElementById("reconList");
+const reconMessage = document.getElementById("reconMessage");
 
 const POSE_STATE_LABELS = {
   no_estimator: "NO ESTIMATOR",
+  not_computed: "POSE NOT COMPUTED",
   initializing: "INITIALIZING",
   awaiting_parallax: "AWAITING PARALLAX",
   tracking: "TRACKING",
@@ -125,6 +139,7 @@ async function init() {
   }
   await refreshManualStatus();
   await refreshSessionStatus();
+  await refreshReconstructionStatus();
   render();
   wireToolbar();
   wireModeSelector();
@@ -133,8 +148,10 @@ async function init() {
   wirePolicy();
   wireManualConfig();
   wireRecordActions();
+  wireReconstruction();
   wireSimulation();
   state.refreshTimer = window.setInterval(refreshAppState, 5000);
+  state.reconstructionTimer = window.setInterval(refreshReconstructionStatus, 2000);
 }
 
 function wireToolbar() {
@@ -231,6 +248,12 @@ function wireRecordActions() {
   exportMp4Button.addEventListener("click", () => exportSelectedRecord("mp4"));
 }
 
+function wireReconstruction() {
+  reconStartButton.addEventListener("click", startReconstruction);
+  reconStopButton.addEventListener("click", stopReconstruction);
+  reconViewButton.addEventListener("click", viewLatestSplat);
+}
+
 function wireSimulation() {
   poseRecomputeButton.addEventListener("click", recomputePoseTrack);
   poseResetViewButton.addEventListener("click", () => {
@@ -287,6 +310,7 @@ function wireSimulation() {
 window.addEventListener("beforeunload", () => {
   if (state.heartbeatTimer !== null) window.clearInterval(state.heartbeatTimer);
   if (state.refreshTimer !== null) window.clearInterval(state.refreshTimer);
+  if (state.reconstructionTimer !== null) window.clearInterval(state.reconstructionTimer);
 });
 
 async function emergencyStop() {
@@ -495,6 +519,7 @@ function renderInspector() {
   ].filter(([, v]) => v !== undefined && v !== null));
 
   renderRecords(flight?.records ?? []);
+  renderReconstruction();
   renderStream();
 }
 
@@ -593,9 +618,44 @@ function renderRecords(records) {
     reveal.textContent = "SHOW";
     reveal.addEventListener("click", () => revealRecord(record.id));
     actions.append(select, reveal);
+    if (record.type === "gaussian-splat") {
+      const view = element("button", "btn");
+      view.textContent = "VIEW";
+      view.addEventListener("click", () => viewSplatRecord(record.id));
+      actions.append(view);
+    }
     dd.append(path, actions);
     recordsList.append(dt, dd);
   });
+}
+
+function renderReconstruction() {
+  const flight = selectedFlight();
+  const status = state.reconstructionStatus;
+  const job = status?.job ?? null;
+  const latest = status?.latestSplatRecord ?? selectedSplatRecord();
+  const tools = status?.tools ?? state.config?.reconstruction;
+  const toolsReady = tools?.ready !== false;
+  const active = Boolean(job?.active);
+  const stateLabel = active ? String(job.stage ?? job.state) : String(job?.state ?? (latest ? "ready" : "idle"));
+  reconState.textContent = stateLabel.toUpperCase();
+  reconState.classList.toggle("is-armed", stateLabel === "completed" || stateLabel === "ready");
+  reconState.classList.toggle("is-danger", stateLabel === "failed");
+  reconStartButton.disabled = !flight || active || !selectedFrameRecord() || !toolsReady;
+  reconStopButton.disabled = !active;
+  reconViewButton.disabled = !latest;
+  renderKv(reconList, [
+    ["Tools", toolsReady ? "ready" : "missing"],
+    ["Stage", job?.stage],
+    ["Images", job?.maxImages ?? reconMaxImages.value],
+    ["Steps", job?.maxIterations ?? reconMaxIterations.value],
+    ["Dataset", job?.datasetRecordId],
+    ["Splat", latest?.id ?? job?.splatRecordId],
+  ]);
+  const error = job?.error || (!toolsReady ? "NERFSTUDIO TOOLS MISSING" : "");
+  const tail = String(job?.logTail ?? "").trim().split("\n").slice(-1)[0] ?? "";
+  reconMessage.textContent = (error || tail || "IDLE").toUpperCase();
+  reconMessage.classList.toggle("is-danger", Boolean(error));
 }
 
 async function createDraftFlight() {
@@ -657,6 +717,7 @@ async function refreshAppState() {
   renderTree();
   renderInspector();
   await refreshSessionStatus();
+  await refreshReconstructionStatus();
 }
 
 async function refreshSessionStatus() {
@@ -671,6 +732,27 @@ async function refreshSessionStatus() {
   if (status) state.sessionStatus = status;
   renderRecordToggle();
   renderRecordCounter();
+}
+
+async function refreshReconstructionStatus() {
+  const flight = selectedFlight();
+  if (!flight) {
+    state.reconstructionStatus = null;
+    state.reconstructionFlightId = "";
+    renderReconstruction();
+    return;
+  }
+  if (flight.id !== state.reconstructionFlightId) {
+    state.reconstructionFlightId = flight.id;
+    state.reconstructionStatus = null;
+  }
+  const wasActive = Boolean(state.reconstructionStatus?.job?.active);
+  const status = await safeRequest("GET", `/api/flights/${flight.id}/reconstruction/status`);
+  if (status) state.reconstructionStatus = status;
+  renderReconstruction();
+  if (wasActive && status?.job && !status.job.active) {
+    await refreshAppState();
+  }
 }
 
 function renderRecordToggle() {
@@ -828,6 +910,45 @@ async function importFrames() {
   await refreshAppState();
 }
 
+async function startReconstruction() {
+  const flight = selectedFlight();
+  const frameRecord = selectedFrameRecord();
+  if (!flight || !frameRecord) return;
+  reconStartButton.disabled = true;
+  reconMessage.textContent = "STARTING";
+  const status = await safeRequest("POST", `/api/flights/${flight.id}/reconstruction/start`, {
+    recordId: frameRecord.id,
+    maxImages: Number(reconMaxImages.value || 0),
+    maxIterations: Number(reconMaxIterations.value || 0),
+    fps: 12,
+  });
+  if (status) state.reconstructionStatus = status;
+  renderReconstruction();
+}
+
+async function stopReconstruction() {
+  const flight = selectedFlight();
+  if (!flight) return;
+  const status = await safeRequest("POST", `/api/flights/${flight.id}/reconstruction/stop`, {});
+  if (status) state.reconstructionStatus = status;
+  renderReconstruction();
+}
+
+function viewLatestSplat() {
+  const record = state.reconstructionStatus?.latestSplatRecord ?? selectedSplatRecord();
+  if (!record) return;
+  viewSplatRecord(record.id);
+}
+
+function viewSplatRecord(recordId) {
+  const url = absoluteServiceUrl(`/api/records/${recordId}/splat-viewer`);
+  if (window.droneStation.openExternal) {
+    window.droneStation.openExternal(url);
+    return;
+  }
+  window.open(url, "_blank", "noopener");
+}
+
 async function exportSelectedRecord(format) {
   const record = selectedFrameRecord();
   if (!record) return;
@@ -872,6 +993,7 @@ function startPosePolling() {
     state.poseTrack = [];
     state.poseLastFrameIndex = -1;
     state.poseStatus = null;
+    state.poseAutoComputeFlightId = "";
     renderSimStrip();
     requestSimDraw();
     return;
@@ -881,6 +1003,7 @@ function startPosePolling() {
     state.poseTrack = [];
     state.poseLastFrameIndex = -1;
     state.poseStatus = null;
+    state.poseAutoComputeFlightId = "";
   }
   refreshPoseTrack();
   if (state.poseTimer !== null) return;
@@ -900,6 +1023,7 @@ async function refreshPoseTrack() {
     state.poseFlightId = flight.id;
     state.poseTrack = [];
     state.poseLastFrameIndex = -1;
+    state.poseAutoComputeFlightId = "";
   }
   const since = state.poseLastFrameIndex;
   const result = await safeRequest("GET", `/api/flights/${flight.id}/pose/track?since=${since}`);
@@ -916,17 +1040,34 @@ async function refreshPoseTrack() {
   }
   renderSimStrip();
   requestSimDraw();
+  maybeAutoComputePoseTrack(flight, state.poseStatus);
 }
 
-async function recomputePoseTrack() {
+function maybeAutoComputePoseTrack(flight, status) {
+  if (!flight || !status) return;
+  if (state.poseTrack.length > 0 || state.poseComputing) return;
+  if (String(status.state) !== "not_computed") return;
+  if (!status.framesAvailable || status.estimatorAvailable === false) return;
+  if (state.poseAutoComputeFlightId === flight.id) return;
+  state.poseAutoComputeFlightId = flight.id;
+  recomputePoseTrack({ automatic: true });
+}
+
+async function recomputePoseTrack({ automatic = false } = {}) {
   const flight = selectedFlight();
   if (!flight) return;
+  state.poseComputing = true;
   poseRecomputeButton.disabled = true;
   const previous = poseRecomputeButton.textContent;
-  poseRecomputeButton.textContent = "WORKING";
-  const result = await safeRequest("POST", `/api/flights/${flight.id}/pose/compute`, {});
-  poseRecomputeButton.disabled = false;
-  poseRecomputeButton.textContent = previous;
+  poseRecomputeButton.textContent = automatic ? "COMPUTING" : "WORKING";
+  let result = null;
+  try {
+    result = await safeRequest("POST", `/api/flights/${flight.id}/pose/compute`, {});
+  } finally {
+    state.poseComputing = false;
+    poseRecomputeButton.disabled = false;
+    poseRecomputeButton.textContent = previous;
+  }
   if (!result) return;
   state.poseTrack = [];
   state.poseLastFrameIndex = -1;
@@ -1150,6 +1291,12 @@ function selectedFrameRecord() {
   const records = selectedFlight()?.records ?? [];
   return records.find((r) => r.id === state.selectedRecordId && r.type === "frames" && r.streamUrl)
     ?? records.find((r) => r.type === "frames" && r.streamUrl);
+}
+
+function selectedSplatRecord() {
+  const records = selectedFlight()?.records ?? [];
+  return records.find((r) => r.id === state.selectedRecordId && r.type === "gaussian-splat")
+    ?? records.find((r) => r.type === "gaussian-splat");
 }
 
 function element(tag, className = "") {

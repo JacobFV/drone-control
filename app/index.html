@@ -213,6 +213,24 @@
             </div>
             <dl id="recordsList" class="kv stacked"></dl>
           </section>
+
+          <section class="panel">
+            <div class="panel-title-row">
+              <h3 class="section-label">Scene</h3>
+              <span id="reconState" class="pill">IDLE</span>
+            </div>
+            <div class="form-grid">
+              <label>MAX IMG <input id="reconMaxImages" type="number" min="8" max="5000" value="180" /></label>
+              <label>STEPS <input id="reconMaxIterations" type="number" min="10" max="30000" step="10" value="3000" /></label>
+            </div>
+            <div class="action-row">
+              <button id="reconStartButton" class="btn">BUILD SPLAT</button>
+              <button id="reconStopButton" class="btn">STOP</button>
+              <button id="reconViewButton" class="btn">VIEW</button>
+            </div>
+            <dl id="reconList" class="kv"></dl>
+            <p id="reconMessage" class="manual-message">IDLE</p>
+          </section>
         </aside>
       </div>
     </div>
