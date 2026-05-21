@@ -113,6 +113,32 @@
             </div>
           </section>
 
+          <section class="panel">
+            <div class="panel-title-row">
+              <h3 class="section-label">Runtime</h3>
+              <span id="runtimeState" class="pill">IDLE</span>
+            </div>
+            <div class="form-grid">
+              <label>CTRL
+                <select id="runtimeController">
+                  <option value="disabled">DISABLED</option>
+                  <option value="manual">MANUAL</option>
+                  <option value="neutral">SCRIPT NEUTRAL</option>
+                  <option value="takeoff">SCRIPT TAKEOFF</option>
+                  <option value="land">SCRIPT LAND</option>
+                  <option value="stop">SCRIPT STOP</option>
+                </select>
+              </label>
+            </div>
+            <div class="action-row">
+              <button id="runtimeStartButton" class="btn">START</button>
+              <button id="runtimeStopButton" class="btn">STOP</button>
+              <button id="runtimeApplyButton" class="btn">APPLY</button>
+              <button id="runtimeArmButton" class="btn">ARM</button>
+            </div>
+            <dl id="runtimeList" class="kv"></dl>
+          </section>
+
           <section id="manualPanel" class="panel manual-panel is-hidden">
             <div class="panel-title-row">
               <h3 class="section-label">Control</h3>

@@ -80,6 +80,20 @@ Current endpoints:
 - `POST /api/manual/axes`
 - `POST /api/manual/stop`
 - `POST /api/manual/clear-fault`
+- `GET /api/runtime/status`
+- `GET /api/runtime/events`
+- `POST /api/runtime/start`
+- `POST /api/runtime/stop`
+- `POST /api/runtime/drones/<drone-id>/controller`
+- `POST /api/runtime/drones/<drone-id>/arm`
+- `POST /api/runtime/drones/<drone-id>/disarm`
+- `POST /api/runtime/drones/<drone-id>/heartbeat`
+- `POST /api/runtime/drones/<drone-id>/axes`
+- `POST /api/runtime/drones/<drone-id>/stop`
+- `POST /api/runtime/drones/<drone-id>/clear-fault`
+- `GET /api/mission/progress`
+- `POST /api/mission/start`
+- `POST /api/mission/stop`
 
 ## Live Video Path
 
@@ -301,31 +315,34 @@ The Electron UI now exposes:
   `ffmpeg`
 - pose-track status, automatic compute, and trajectory display
 - Gaussian splat reconstruction controls and external `gsplat.js` viewer launch
+- realtime runtime status, controller selection, runtime arm/disarm, per-drone
+  link/controller/safety/observation state, and coordinator assignment summary
 
-## Current Runtime Baseline
+## Realtime Runtime
 
-The codebase already has the foundations needed for the next realtime
-architecture:
+The realtime architecture now exists as bounded Python modules above the
+verified packet and transport layer:
 
 - `DroneAction` is the shared action representation.
 - `protocols.py` converts actions into verified E99/WIFI_8K control packets.
 - `transport.py` exposes `DroneLink`, with direct UDP and ESP32 serial bridge
   implementations behind the same interface.
-- `swarm.py` can schedule multiple configured drones in one Python process.
-- `manual_transport.py` and `service.py` contain the app-facing manual IO
-  safety loop.
-- `camera.py`, `pose_estimator.py`, and `reconstruction.py` provide the current
-  camera record, pose-track, and Gaussian-splat artifact path.
+- `runtime.DroneRuntime` owns one-drone lifecycle, observation creation,
+  controller stepping, safety wrapping, packet building, link send, snapshots,
+  and typed event emission.
+- `runtime.RuntimeManager` owns multi-drone lifecycle, controller selection,
+  manual axes forwarding, arm/disarm/heartbeat calls, and event fan-out.
+- `perception.state` defines frame, pose, IMU, map-summary, and confidence
+  models used in runtime snapshots.
+- `controllers.base`, `scripted`, `manual`, `safety`, and `vla` define the
+  bounded action-request contract. Scripted and manual controllers share the
+  same safety wrapper. The VLA adapter validates structured output and safe
+  stops when unavailable or invalid.
+- `coordinator.tasks`, `scheduler`, and `vlm` define mission, role, assignment,
+  constraint, and progress models. The scheduler assigns summary-level roles;
+  it never touches packets or motor commands.
 
-The next implementation should keep those pieces and add a runtime layer above
-them. The transport and packet code should remain boring and deterministic; the
-new perception and model-driven control code should not reach around those
-interfaces.
-
-## Target Realtime Architecture
-
-The full stack should be built as three bounded layers over the existing link
-abstraction:
+The runtime path preserves the full deterministic lower layer:
 
 ```text
 mission/task request
@@ -340,22 +357,7 @@ mission/task request
                   -> direct UDP or ESP32 serial bridge
 ```
 
-Layer 1 is realtime scene and state estimation. It owns camera-frame intake,
-pose quality, optional IMU samples, map fragments, and Gaussian-splat or
-related scene artifacts. Its output is a typed observation object, not a UI-only
-record.
-
-Layer 2 is the single-drone controller. It receives one drone's observation
-history, mission context, and safety envelope. It outputs bounded action
-requests or short primitives. It does not write packets and it does not bypass
-the safety layer.
-
-Layer 3 is the swarm coordinator. It sees summaries across drones and assigns
-roles, routes, priorities, and constraints. It does not command motors directly;
-each drone remains controlled by its own Layer 2 controller and deterministic
-local safety wrapper.
-
-Suggested module layout:
+The module layout is:
 
 ```text
 drone_control/runtime/
@@ -381,11 +383,11 @@ drone_control/coordinator/
   scheduler.py       coordinator loop and per-drone constraints
 ```
 
-The first step is not to replace everything at once. The first step is to add
-the runtime data contracts, wire a scripted controller through them, and prove
-that current direct UDP and ESP serial links still pass the same tests. After
-that, manual control can move onto the runtime path, then perception, then VLA,
-then multi-drone coordination.
+Runtime packet emission remains disabled unless `DRONE_RUNTIME_ENABLE_IO=1` is
+set. The default service runtime is dry-run (`DRONE_RUNTIME_DRY_RUN=1`), and it
+loads `DRONE_RUNTIME_CONFIG`, then ignored `config/drones.local.json`, then the
+tracked example config. This lets the UI exercise controller switching and
+mission progress on a fresh checkout without opening serial or UDP links.
 
 ## Compatibility Cleanup Direction
 
@@ -394,7 +396,7 @@ path can do the same dry-run and manual scenarios. The intended cleanup order is
 
 1. Keep `single.py` and `swarm.py` as command-line entry points.
 2. Move their internal loops onto `runtime.DroneRuntime` and
-   `runtime.RuntimeManager`.
+   `runtime.RuntimeManager` when the CLI behavior can remain byte-compatible.
 3. Replace ad hoc model text parsing with typed controller outputs.
 4. Keep transport, protocol, and config compatibility intact.
 5. Remove unused adapters and docs once tests and runbook commands use the new

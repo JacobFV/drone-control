@@ -1,9 +1,39 @@
 # TASKS: Full Realtime Architecture
 
-This is the handoff point for the next implementation chat. The repo baseline
-already supports direct UDP links and ESP32-S3 USB bridge links through the same
-`DroneLink` interface. The next job is to build the full realtime runtime above
-that foundation without changing the verified transport behavior first.
+This file is the implementation checklist for the realtime runtime above the
+verified direct UDP and ESP32-S3 USB bridge `DroneLink` foundation.
+
+## Current Implementation Status
+
+Implemented:
+
+- typed runtime events and observations in `drone_control/runtime/events.py`
+- one-drone runtime lifecycle in `drone_control/runtime/drone_runtime.py`
+- multi-drone runtime manager and event fan-out in
+  `drone_control/runtime/manager.py`
+- controller contracts, scripted controllers, manual adapter, shared safety
+  wrapper, and structured VLA adapter boundary in `drone_control/controllers/`
+- typed perception state, frame-source adapters, and estimator adapter boundary
+  in `drone_control/perception/`
+- mission/task/assignment models, scheduler, and VLM adapter boundary in
+  `drone_control/coordinator/`
+- service endpoints for runtime status, runtime events, controller selection,
+  per-drone arm/disarm/heartbeat/axes/stop/clear-fault, mission start/stop, and
+  mission progress
+- Electron runtime panel showing link type/state, controller, safety state,
+  observation confidence, and coordinator assignment
+- dry-run runtime tests covering no-camera, frame+pose, safety clamping, and
+  two-drone manager behavior
+
+Still hardware/manual bring-up:
+
+- move `single.py` and `swarm.py` internals onto `RuntimeManager` once CLI
+  packet output is proven byte-compatible in hardware runs
+- record one-ESP and two-ESP runtime bring-up in `DRONE_RUNBOOK.md`
+- add stored replay fixtures from real flights when representative data is
+  available
+- verify runtime packet emission with `DRONE_RUNTIME_ENABLE_IO=1` in a
+  controlled test area
 
 ## Starting Baseline
 

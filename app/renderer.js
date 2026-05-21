@@ -28,6 +28,8 @@ const state = {
   reconstructionStatus: null,
   reconstructionTimer: null,
   reconstructionFlightId: "",
+  runtimeStatus: null,
+  runtimeTimer: null,
 };
 
 const workspace = document.querySelector(".workspace");
@@ -103,6 +105,13 @@ const reconStopButton = document.getElementById("reconStopButton");
 const reconViewButton = document.getElementById("reconViewButton");
 const reconList = document.getElementById("reconList");
 const reconMessage = document.getElementById("reconMessage");
+const runtimeState = document.getElementById("runtimeState");
+const runtimeController = document.getElementById("runtimeController");
+const runtimeStartButton = document.getElementById("runtimeStartButton");
+const runtimeStopButton = document.getElementById("runtimeStopButton");
+const runtimeApplyButton = document.getElementById("runtimeApplyButton");
+const runtimeArmButton = document.getElementById("runtimeArmButton");
+const runtimeList = document.getElementById("runtimeList");
 
 const POSE_STATE_LABELS = {
   no_estimator: "NO ESTIMATOR",
@@ -145,6 +154,7 @@ async function init() {
   await refreshManualStatus();
   await refreshSessionStatus();
   await refreshReconstructionStatus();
+  await refreshRuntimeStatus();
   render();
   wireToolbar();
   wireModeSelector();
@@ -154,9 +164,11 @@ async function init() {
   wireManualConfig();
   wireRecordActions();
   wireReconstruction();
+  wireRuntime();
   wireSimulation();
   state.refreshTimer = window.setInterval(refreshAppState, 5000);
   state.reconstructionTimer = window.setInterval(refreshReconstructionStatus, 2000);
+  state.runtimeTimer = window.setInterval(refreshRuntimeStatus, 1000);
 }
 
 function wireToolbar() {
@@ -259,6 +271,13 @@ function wireReconstruction() {
   reconViewButton.addEventListener("click", viewLatestSplat);
 }
 
+function wireRuntime() {
+  runtimeStartButton.addEventListener("click", startRuntime);
+  runtimeStopButton.addEventListener("click", stopRuntime);
+  runtimeApplyButton.addEventListener("click", applyRuntimeController);
+  runtimeArmButton.addEventListener("click", toggleRuntimeArm);
+}
+
 function wireSimulation() {
   poseRecomputeButton.addEventListener("click", recomputePoseTrack);
   poseResetViewButton.addEventListener("click", () => {
@@ -316,11 +335,16 @@ window.addEventListener("beforeunload", () => {
   if (state.heartbeatTimer !== null) window.clearInterval(state.heartbeatTimer);
   if (state.refreshTimer !== null) window.clearInterval(state.refreshTimer);
   if (state.reconstructionTimer !== null) window.clearInterval(state.reconstructionTimer);
+  if (state.runtimeTimer !== null) window.clearInterval(state.runtimeTimer);
 });
 
 async function emergencyStop() {
   const status = await safeRequest("POST", "/api/manual/stop", {});
   if (!status) return;
+  const runtimeDrone = selectedRuntimeDrone();
+  if (runtimeDrone?.controller === "manual") {
+    await safeRequest("POST", `/api/runtime/drones/${runtimeDrone.droneId}/stop`, {});
+  }
   throttle.value = "0";
   throttleValue.textContent = "0";
   updateManualStatus(status);
@@ -330,6 +354,10 @@ async function sendManualAxes(axes) {
   if (state.mode !== "manual") return;
   const status = await safeRequest("POST", "/api/manual/axes", axes);
   if (status) updateManualStatus(status);
+  const runtimeDrone = selectedRuntimeDrone();
+  if (runtimeDrone?.controller === "manual") {
+    await safeRequest("POST", `/api/runtime/drones/${runtimeDrone.droneId}/axes`, axes);
+  }
 }
 
 function controlAxes(control) {
@@ -525,7 +553,34 @@ function renderInspector() {
 
   renderRecords(flight?.records ?? []);
   renderReconstruction();
+  renderRuntime();
   renderStream();
+}
+
+function renderRuntime() {
+  const status = state.runtimeStatus;
+  const selected = selectedRuntimeDrone();
+  const running = Boolean(selected?.running);
+  const dryRun = status?.dryRun !== false;
+  runtimeState.textContent = `${running ? "RUN" : "IDLE"}${dryRun ? " DRY" : ""}`;
+  runtimeState.classList.toggle("is-armed", running);
+  runtimeState.classList.toggle("is-danger", Boolean(selected?.safety?.faultReason));
+  runtimeStartButton.disabled = Boolean(status?.running);
+  runtimeStopButton.disabled = !Boolean(status?.running);
+  runtimeApplyButton.disabled = !selectedDrone();
+  runtimeArmButton.disabled = !selected;
+  runtimeArmButton.textContent = selected?.safety?.armed ? "DISARM" : "ARM";
+  if (selected?.controller) runtimeController.value = runtimeModeValue(selected.controller);
+  renderKv(runtimeList, [
+    ["Drone", selected?.droneId ?? selectedDrone()?.id],
+    ["Link", selected?.linkState],
+    ["Controller", selected?.controller],
+    ["Safety", selected?.safety?.armed ? "armed" : "disarmed"],
+    ["Confidence", selected?.observation?.confidence],
+    ["Sent", selected?.sent],
+    ["Errors", selected?.errors],
+    ["Assignment", missionAssignmentLabel(status?.mission, selected?.droneId)],
+  ]);
 }
 
 function renderNetwork() {
@@ -765,6 +820,45 @@ async function refreshReconstructionStatus() {
   }
 }
 
+async function refreshRuntimeStatus() {
+  const status = await safeRequest("GET", "/api/runtime/status");
+  if (status) state.runtimeStatus = status;
+  renderRuntime();
+}
+
+async function startRuntime() {
+  const status = await safeRequest("POST", "/api/runtime/start", {});
+  if (status) state.runtimeStatus = status;
+  renderRuntime();
+}
+
+async function stopRuntime() {
+  const status = await safeRequest("POST", "/api/runtime/stop", {});
+  if (status) state.runtimeStatus = status;
+  renderRuntime();
+}
+
+async function applyRuntimeController() {
+  const drone = selectedDrone();
+  if (!drone) return;
+  const status = await safeRequest("POST", `/api/runtime/drones/${drone.id}/controller`, {
+    mode: runtimeController.value,
+  });
+  if (status) state.runtimeStatus = status;
+  renderRuntime();
+}
+
+async function toggleRuntimeArm() {
+  const selected = selectedRuntimeDrone();
+  if (!selected) return;
+  const path = selected.safety?.armed
+    ? `/api/runtime/drones/${selected.droneId}/disarm`
+    : `/api/runtime/drones/${selected.droneId}/arm`;
+  const status = await safeRequest("POST", path, {});
+  if (status) state.runtimeStatus = status;
+  renderRuntime();
+}
+
 function renderRecordToggle() {
   const running = Boolean(state.sessionStatus?.running);
   const hasFlight = Boolean(selectedFlight());
@@ -992,6 +1086,10 @@ function startHeartbeat() {
       prev.faultReason !== status.faultReason
     ) {
       renderManualStatus();
+    }
+    const runtimeDrone = selectedRuntimeDrone();
+    if (runtimeDrone?.controller === "manual") {
+      await safeRequest("POST", `/api/runtime/drones/${runtimeDrone.droneId}/heartbeat`, {});
     }
   }, 250);
 }
@@ -1313,6 +1411,27 @@ function selectedSplatRecord() {
   const records = selectedFlight()?.records ?? [];
   return records.find((r) => r.id === state.selectedRecordId && r.type === "gaussian-splat")
     ?? records.find((r) => r.type === "gaussian-splat");
+}
+
+function selectedRuntimeDrone() {
+  const droneId = selectedDrone()?.id;
+  return state.runtimeStatus?.drones?.find((d) => d.droneId === droneId);
+}
+
+function runtimeModeValue(controller) {
+  const key = String(controller).replace(/^safety:/, "");
+  if (key === "manual") return "manual";
+  if (key === "disabled") return "disabled";
+  if (key.includes("takeoff")) return "takeoff";
+  if (key.includes("land")) return "land";
+  if (key.includes("stop")) return "stop";
+  return "neutral";
+}
+
+function missionAssignmentLabel(mission, droneId) {
+  const assignment = mission?.assignments?.find((item) => item.droneId === droneId);
+  if (!assignment) return mission?.state ?? "—";
+  return `${assignment.role}:${assignment.task}`;
 }
 
 function element(tag, className = "") {

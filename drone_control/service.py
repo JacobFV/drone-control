@@ -30,6 +30,10 @@ from drone_control.manual_control import ManualControlConfig, ManualControlSessi
 from drone_control.manual_transport import ManualDroneTransport
 from drone_control.pose_estimator import estimator_available, load_pose_track, replay_directory
 from drone_control.reconstruction import ReconstructionManager, find_splat_artifact
+from drone_control.config import load_config
+from drone_control.coordinator.scheduler import CoordinatorScheduler
+from drone_control.coordinator.tasks import Mission
+from drone_control.runtime.manager import RuntimeManager, RuntimeManagerConfig
 from drone_control.store import ControlStationStore
 
 
@@ -81,6 +85,17 @@ class ControlStationHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/manual/status":
             with self.server.manual_lock:
                 self.send_json(self.server.manual_status())
+            return
+        if parsed.path == "/api/runtime/status":
+            self.send_json(self.server.runtime_status())
+            return
+        if parsed.path == "/api/runtime/events":
+            query = parse_qs(parsed.query)
+            since = int(query.get("since", ["0"])[0])
+            self.send_json(self.server.runtime.event_stream(since=since))
+            return
+        if parsed.path == "/api/mission/progress":
+            self.send_json(self.server.mission_progress())
             return
 
         match = re.fullmatch(r"/api/flights/([^/]+)/session", parsed.path)
@@ -219,6 +234,96 @@ class ControlStationHandler(BaseHTTPRequestHandler):
                 action = self.server.manual.tick()
                 self.server.send_manual_action(action)
                 self.send_json(self.server.manual_status(action))
+            return
+
+        if parsed.path == "/api/runtime/start":
+            try:
+                self.server.runtime.start_all()
+            except (OSError, RuntimeError, ValueError) as exc:
+                self.send_json({"error": str(exc), **self.server.runtime_status()}, status=HTTPStatus.CONFLICT)
+                return
+            self.send_json(self.server.runtime_status())
+            return
+        if parsed.path == "/api/runtime/stop":
+            self.server.runtime.stop_all()
+            self.send_json(self.server.runtime_status())
+            return
+
+        match = re.fullmatch(r"/api/runtime/drones/([^/]+)/controller", parsed.path)
+        if match:
+            payload = self.read_json()
+            try:
+                self.server.runtime.set_controller(match.group(1), str(payload.get("mode") or "disabled"))
+            except (KeyError, ValueError) as exc:
+                self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            self.send_json(self.server.runtime_status())
+            return
+        match = re.fullmatch(r"/api/runtime/drones/([^/]+)/arm", parsed.path)
+        if match:
+            try:
+                self.server.runtime.arm(match.group(1))
+            except (KeyError, RuntimeError) as exc:
+                self.send_json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
+                return
+            self.send_json(self.server.runtime_status())
+            return
+        match = re.fullmatch(r"/api/runtime/drones/([^/]+)/disarm", parsed.path)
+        if match:
+            try:
+                self.server.runtime.disarm(match.group(1))
+            except KeyError as exc:
+                self.send_json({"error": str(exc)}, status=HTTPStatus.NOT_FOUND)
+                return
+            self.send_json(self.server.runtime_status())
+            return
+        match = re.fullmatch(r"/api/runtime/drones/([^/]+)/heartbeat", parsed.path)
+        if match:
+            try:
+                self.server.runtime.heartbeat(match.group(1))
+            except KeyError as exc:
+                self.send_json({"error": str(exc)}, status=HTTPStatus.NOT_FOUND)
+                return
+            self.send_json(self.server.runtime_status())
+            return
+        match = re.fullmatch(r"/api/runtime/drones/([^/]+)/axes", parsed.path)
+        if match:
+            try:
+                self.server.runtime.set_manual_axes(match.group(1), self.read_json())
+            except KeyError as exc:
+                self.send_json({"error": str(exc)}, status=HTTPStatus.NOT_FOUND)
+                return
+            self.send_json(self.server.runtime_status())
+            return
+        match = re.fullmatch(r"/api/runtime/drones/([^/]+)/stop", parsed.path)
+        if match:
+            try:
+                self.server.runtime.stop_manual(match.group(1))
+            except KeyError as exc:
+                self.send_json({"error": str(exc)}, status=HTTPStatus.NOT_FOUND)
+                return
+            self.send_json(self.server.runtime_status())
+            return
+        match = re.fullmatch(r"/api/runtime/drones/([^/]+)/clear-fault", parsed.path)
+        if match:
+            try:
+                self.server.runtime.clear_fault(match.group(1))
+            except KeyError as exc:
+                self.send_json({"error": str(exc)}, status=HTTPStatus.NOT_FOUND)
+                return
+            self.send_json(self.server.runtime_status())
+            return
+
+        if parsed.path == "/api/mission/start":
+            payload = self.read_json()
+            mission_id = str(payload.get("id") or f"mission-{int(time.time())}")
+            objective = str(payload.get("objective") or "civilian robotics training")
+            self.server.coordinator.start(Mission(mission_id, objective, dict(payload.get("context") or {})))
+            self.send_json(self.server.mission_progress())
+            return
+        if parsed.path == "/api/mission/stop":
+            self.server.coordinator.stop()
+            self.send_json(self.server.mission_progress())
             return
 
         match = re.fullmatch(r"/api/flights/([^/]+)/session/start", parsed.path)
@@ -660,6 +765,15 @@ class ControlStationServer(ThreadingHTTPServer):
         self.export_root.mkdir(parents=True, exist_ok=True)
         self.sessions = FlightSessionManager(self.session_work_root)
         self.reconstructions = ReconstructionManager(store=store, work_root=self.reconstruction_root)
+        self.runtime = RuntimeManager(
+            config=RuntimeManagerConfig(
+                control_hz=float(os.environ.get("DRONE_RUNTIME_HZ", "20")),
+                dry_run=env_bool("DRONE_RUNTIME_DRY_RUN", True),
+                enable_io=env_bool("DRONE_RUNTIME_ENABLE_IO", False),
+            )
+        )
+        self.runtime.configure_drones(load_runtime_configs())
+        self.coordinator = CoordinatorScheduler(tick_hz=float(os.environ.get("DRONE_COORDINATOR_HZ", "1")))
         self.wifi_previous: dict[str, str] = {}
         self.manual_loop_running = True
         self.manual_thread = threading.Thread(target=self._manual_loop, name="manual-control-loop", daemon=True)
@@ -706,7 +820,22 @@ class ControlStationServer(ThreadingHTTPServer):
                 "radioModel": "one independent radio association per drone AP",
             },
             "reconstruction": self.reconstructions.tools_status(),
+            "runtime": {
+                "dryRun": self.runtime.config.dry_run,
+                "enableIo": self.runtime.config.enable_io,
+                "controlHz": self.runtime.config.control_hz,
+            },
         }
+
+    def runtime_status(self) -> dict[str, object]:
+        status = self.runtime.snapshots()
+        status["mission"] = self.mission_progress()
+        return status
+
+    def mission_progress(self) -> dict[str, object]:
+        snapshots = self.runtime.snapshot_objects()
+        progress = self.coordinator.step(snapshots)
+        return progress.as_dict()
 
     def send_manual_action(self, action: object | None) -> bool:
         sent = self.manual_transport.send(action)
@@ -854,6 +983,7 @@ class ControlStationServer(ThreadingHTTPServer):
     def server_close(self) -> None:
         self.manual_loop_running = False
         self.manual_thread.join(timeout=1.0)
+        self.runtime.stop_all()
         self.reconstructions.stop_all()
         self.sessions.stop_all()
         self.manual_transport.close()
@@ -1010,6 +1140,18 @@ def make_frame_source(source_name: str, payload: dict[str, object]) -> object:
             use_rtsp=env_bool("DRONE_CAMERA_USE_RTSP", True),
         )
     )
+
+
+def load_runtime_configs() -> list[object]:
+    configured = os.environ.get("DRONE_RUNTIME_CONFIG", "")
+    candidates = []
+    if configured:
+        candidates.append(Path(configured))
+    candidates.extend([REPO_ROOT / "config" / "drones.local.json", REPO_ROOT / "config" / "drones.example.json"])
+    for path in candidates:
+        if path.is_file():
+            return load_config(path)
+    return []
 
 
 def env_bool(name: str, default: bool) -> bool:
