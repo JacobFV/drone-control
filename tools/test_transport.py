@@ -117,7 +117,7 @@ class EspSerialDroneLinkTest(unittest.TestCase):
     def test_mixed_link_config_loads(self) -> None:
         configs = load_config("config/drones.example.json")
         self.assertEqual([cfg.link_type for cfg in configs], ["esp_serial", "esp_serial", "udp"])
-        self.assertEqual(configs[0].serial_port, "/dev/ttyUSB0")
+        self.assertEqual(configs[0].serial_port, "/dev/ttyACM0")
         self.assertEqual(configs[2].iface, "wlan2")
 
 

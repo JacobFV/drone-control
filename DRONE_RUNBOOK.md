@@ -367,8 +367,8 @@ for the first two drones plus one direct PC Wi-Fi AP connection for a third:
     {
       "id": "drone1",
       "link_type": "esp_serial",
-      "serial_port": "/dev/ttyUSB0",
-      "ssid": "WIFI_8K-0c5b90",
+      "serial_port": "/dev/ttyACM0",
+      "ssid": "WIFI_8K-3e67bc",
       "ip": "192.168.1.1",
       "port": 7099,
       "protocol": "wifi_8k_prefixed_short"
@@ -376,7 +376,7 @@ for the first two drones plus one direct PC Wi-Fi AP connection for a third:
     {
       "id": "drone2",
       "link_type": "esp_serial",
-      "serial_port": "/dev/ttyUSB1",
+      "serial_port": "/dev/ttyACM1",
       "ssid": "WIFI_8K-592b10",
       "ip": "192.168.1.1",
       "port": 7099,
@@ -403,6 +403,17 @@ cd firmware/esp32_drone_link
 pio run -t upload
 ```
 
+The checked-in firmware target is ESP32-S3 native USB serial/JTAG hardware,
+which appears as `/dev/ttyACM*` on this workstation. If a future bridge uses a
+CP210x/CH340 adapter and appears as `/dev/ttyUSB*`, only the config serial port
+needs to change.
+
+Scan for visible drone APs from the ESP32 without touching the PC Wi-Fi:
+
+```bash
+python3 tools/esp_scan.py --port /dev/ttyACM0
+```
+
 Run mixed simultaneous control:
 
 ```bash
@@ -414,8 +425,8 @@ Manual IO can use the same link abstraction. Environment examples:
 ```bash
 DRONE_SERVICE_ENABLE_IO=1 \
 DRONE_LINK_TYPE=esp_serial \
-DRONE_ESP_SERIAL_PORT=/dev/ttyUSB0 \
-DRONE_SSID=WIFI_8K-0c5b90 \
+DRONE_ESP_SERIAL_PORT=/dev/ttyACM0 \
+DRONE_SSID=WIFI_8K-3e67bc \
 DRONE_IP=192.168.1.1 \
 DRONE_PORT=7099 \
 DRONE_PROTOCOL=wifi_8k_prefixed_short \

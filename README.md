@@ -23,6 +23,12 @@ cd firmware/esp32_drone_link
 pio run
 ```
 
+Scan drone APs through the ESP32 without touching the PC Wi-Fi:
+
+```bash
+python3 tools/esp_scan.py --port /dev/ttyACM0
+```
+
 Run local verification:
 
 ```bash

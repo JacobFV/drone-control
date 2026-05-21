@@ -3,10 +3,13 @@ from __future__ import annotations
 import argparse
 import os
 import select
+import sys
 import termios
 import time
 import tty
+from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from drone_control.transport import (
     ESP_FRAME_HEADER,
     ESP_FRAME_MAGIC,
