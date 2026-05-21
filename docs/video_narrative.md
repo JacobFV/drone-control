@@ -375,6 +375,9 @@ Close with the technical lesson:
 
 ## Cover Image Prompt
 
+Current cover asset:
+[docs/assets/drone-control-cover.png](assets/drone-control-cover.png)
+
 Create a cinematic but technically grounded cover image for a robotics video.
 Scene: a clean workbench with two small E99-style Wi-Fi camera drones, an
 ESP32-S3 development board connected by USB-C to a laptop, and a subtle screen
@@ -392,7 +395,7 @@ composition, 16:9 aspect ratio.
 
 Keep the language centered on safety, inspection, mapping, coordination,
 low-cost research, and responsible field robotics. Do not frame the system as
-harmful, coercive, or adversarial.
+harmful, coercive, or unsafe.
 
 ## Preferred Framing
 

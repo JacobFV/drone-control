@@ -1,5 +1,7 @@
 # Drone Control
 
+![Drone Control cover](docs/assets/drone-control-cover.png)
+
 Local control-station experiments for small `WIFI_8K-*` / E99-style AP-mode
 camera drones. The current system can control a drone either directly from a PC
 Wi-Fi interface or through an ESP32-S3 USB bridge that joins the drone AP for
