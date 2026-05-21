@@ -145,6 +145,8 @@ Example ESP serial entry:
   technical video, from discovery to future architecture.
 - [docs/control_station_architecture.md](docs/control_station_architecture.md):
   system architecture and service boundaries.
+- [TASKS.md](TASKS.md): next implementation checklist for the full realtime
+  architecture.
 - [DRONE_RUNBOOK.md](DRONE_RUNBOOK.md): operational log, packet findings, camera
   notes, and test commands.
 - [firmware/esp32_drone_link/README.md](firmware/esp32_drone_link/README.md):

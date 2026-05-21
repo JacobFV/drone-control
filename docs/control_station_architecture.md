@@ -301,3 +301,104 @@ The Electron UI now exposes:
   `ffmpeg`
 - pose-track status, automatic compute, and trajectory display
 - Gaussian splat reconstruction controls and external `gsplat.js` viewer launch
+
+## Current Runtime Baseline
+
+The codebase already has the foundations needed for the next realtime
+architecture:
+
+- `DroneAction` is the shared action representation.
+- `protocols.py` converts actions into verified E99/WIFI_8K control packets.
+- `transport.py` exposes `DroneLink`, with direct UDP and ESP32 serial bridge
+  implementations behind the same interface.
+- `swarm.py` can schedule multiple configured drones in one Python process.
+- `manual_transport.py` and `service.py` contain the app-facing manual IO
+  safety loop.
+- `camera.py`, `pose_estimator.py`, and `reconstruction.py` provide the current
+  camera record, pose-track, and Gaussian-splat artifact path.
+
+The next implementation should keep those pieces and add a runtime layer above
+them. The transport and packet code should remain boring and deterministic; the
+new perception and model-driven control code should not reach around those
+interfaces.
+
+## Target Realtime Architecture
+
+The full stack should be built as three bounded layers over the existing link
+abstraction:
+
+```text
+mission/task request
+  -> VLM swarm coordinator
+    -> per-drone roles, routes, and constraints
+      -> VLA single-drone controller
+        -> bounded action requests
+          -> realtime estimator and safety envelope
+            -> DroneAction
+              -> PacketProtocol
+                -> DroneLink
+                  -> direct UDP or ESP32 serial bridge
+```
+
+Layer 1 is realtime scene and state estimation. It owns camera-frame intake,
+pose quality, optional IMU samples, map fragments, and Gaussian-splat or
+related scene artifacts. Its output is a typed observation object, not a UI-only
+record.
+
+Layer 2 is the single-drone controller. It receives one drone's observation
+history, mission context, and safety envelope. It outputs bounded action
+requests or short primitives. It does not write packets and it does not bypass
+the safety layer.
+
+Layer 3 is the swarm coordinator. It sees summaries across drones and assigns
+roles, routes, priorities, and constraints. It does not command motors directly;
+each drone remains controlled by its own Layer 2 controller and deterministic
+local safety wrapper.
+
+Suggested module layout:
+
+```text
+drone_control/runtime/
+  events.py          typed runtime events and observations
+  drone_runtime.py   one-drone loop: link, camera, estimator, controller, safety
+  manager.py         multi-drone lifecycle and event fan-out
+
+drone_control/perception/
+  frames.py          frame sources and timestamps
+  state.py           pose, IMU, map, and confidence data models
+  estimator.py       realtime estimator interface
+
+drone_control/controllers/
+  base.py            controller protocol
+  manual.py          manual controller adapter
+  scripted.py        deterministic test controller
+  vla.py             single-drone VLA adapter
+  safety.py          command clamping, heartbeat, stop, fault behavior
+
+drone_control/coordinator/
+  tasks.py           mission, role, and assignment data models
+  vlm.py             swarm-level VLM adapter
+  scheduler.py       coordinator loop and per-drone constraints
+```
+
+The first step is not to replace everything at once. The first step is to add
+the runtime data contracts, wire a scripted controller through them, and prove
+that current direct UDP and ESP serial links still pass the same tests. After
+that, manual control can move onto the runtime path, then perception, then VLA,
+then multi-drone coordination.
+
+## Compatibility Cleanup Direction
+
+The older simple model-command path should be retired only after the runtime
+path can do the same dry-run and manual scenarios. The intended cleanup order is:
+
+1. Keep `single.py` and `swarm.py` as command-line entry points.
+2. Move their internal loops onto `runtime.DroneRuntime` and
+   `runtime.RuntimeManager`.
+3. Replace ad hoc model text parsing with typed controller outputs.
+4. Keep transport, protocol, and config compatibility intact.
+5. Remove unused adapters and docs once tests and runbook commands use the new
+   runtime path.
+
+See [../TASKS.md](../TASKS.md) for the implementation checklist intended for
+the next development session.

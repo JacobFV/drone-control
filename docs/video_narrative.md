@@ -387,9 +387,9 @@ indoor room and small overlays for "Estimator + IMU", "VLA single-drone
 controller", and "VLM swarm coordinator". The mood should be optimistic,
 civilian, and technical, suggesting firefighting support, inspection, and
 search-and-rescue robotics. Keep the scene calm, constructive, and field-ready,
-with no adversarial or threatening imagery. Use realistic lighting, sharp
-hardware detail, readable but minimal UI text, modern documentary thumbnail
-composition, 16:9 aspect ratio.
+with no unsafe or threatening imagery. Use realistic lighting, sharp hardware
+detail, readable but minimal UI text, modern documentary thumbnail composition,
+16:9 aspect ratio.
 
 ## Framing Guardrails
 
