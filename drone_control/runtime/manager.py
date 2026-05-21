@@ -12,6 +12,8 @@ from drone_control.config import DroneConfig
 from drone_control.controllers.base import DisabledController, SafetyConstraints
 from drone_control.controllers.manual import ManualController
 from drone_control.controllers.scripted import scripted_controller
+from drone_control.controllers.text_command import TextCommandController
+from drone_control.coordinator.tasks import Assignment, MissionProgress
 from drone_control.protocols import make_protocol
 from drone_control.transport import make_drone_link
 
@@ -59,6 +61,7 @@ class RuntimeManager:
                     constraints=SafetyConstraints(command_hz=self.config.control_hz),
                     control_hz=self.config.control_hz,
                     dry_run=dry_run,
+                    link_type=cfg.link_type,
                 )
                 self._runtimes[cfg.id] = runtime
                 self._manual[cfg.id] = manual
@@ -83,16 +86,31 @@ class RuntimeManager:
         if key in {"disabled", "off"}:
             runtime.set_controller(DisabledController())
             return
-        runtime.set_controller(scripted_controller(key))
+        try:
+            runtime.set_controller(scripted_controller(key))
+        except ValueError:
+            runtime.set_controller(TextCommandController(mode))
+
+    def set_all_controllers(self, mode: str) -> None:
+        for drone_id in self.runtime_ids():
+            self.set_controller(drone_id, mode)
 
     def arm(self, drone_id: str) -> None:
         self._get(drone_id).arm()
+
+    def arm_all(self) -> None:
+        for drone_id in self.runtime_ids():
+            self.arm(drone_id)
 
     def disarm(self, drone_id: str) -> None:
         self._get(drone_id).disarm()
 
     def heartbeat(self, drone_id: str) -> None:
         self._get(drone_id).heartbeat()
+
+    def heartbeat_all(self) -> None:
+        for drone_id in self.runtime_ids():
+            self.heartbeat(drone_id)
 
     def clear_fault(self, drone_id: str) -> None:
         self._get(drone_id).clear_fault()
@@ -108,6 +126,35 @@ class RuntimeManager:
     def stop_manual(self, drone_id: str) -> None:
         self._manual[drone_id].stop()
 
+    def apply_mission_progress(self, progress: MissionProgress) -> None:
+        for assignment in progress.assignments:
+            self.apply_assignment(assignment)
+
+    def apply_assignment(self, assignment: Assignment) -> None:
+        constraints = assignment.constraints
+        if constraints is None:
+            return
+        runtime = self._get(assignment.drone_id)
+        current = runtime.controller.constraints
+        runtime.update_constraints(
+            SafetyConstraints(
+                armed=runtime.controller.state.armed,
+                max_throttle=current.max_throttle if constraints.max_throttle is None else constraints.max_throttle,
+                require_heartbeat=current.require_heartbeat
+                if constraints.require_heartbeat is None
+                else constraints.require_heartbeat,
+                heartbeat_timeout_seconds=current.heartbeat_timeout_seconds,
+                throttle_slew_per_second=current.throttle_slew_per_second,
+                command_hz=current.command_hz,
+                metadata={
+                    **current.metadata,
+                    "assignmentRole": assignment.role,
+                    "assignmentTask": assignment.task,
+                    "minConfidence": constraints.min_confidence,
+                },
+            )
+        )
+
     def snapshots(self) -> dict[str, Any]:
         self._collect_events()
         drones = [snapshot.as_dict() for snapshot in self.snapshot_objects()]
@@ -122,6 +169,10 @@ class RuntimeManager:
     def snapshot_objects(self) -> list[DroneRuntimeSnapshot]:
         with self._lock:
             return [runtime.snapshot() for runtime in self._runtimes.values()]
+
+    def runtime_ids(self) -> list[str]:
+        with self._lock:
+            return list(self._runtimes)
 
     def event_stream(self, *, since: int = 0) -> dict[str, Any]:
         self._collect_events()

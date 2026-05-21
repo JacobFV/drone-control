@@ -2,114 +2,59 @@ from __future__ import annotations
 
 import argparse
 import signal
-import threading
 import time
-from dataclasses import dataclass
 
-from .actions import DroneAction, action_from_dict
-from .config import DroneConfig, load_config
-from .model_adapter import ModelAdapter
-from .protocols import PacketProtocol, make_protocol
-from .transport import DroneLink, make_drone_link
-
-
-@dataclass
-class DroneRuntime:
-    config: DroneConfig
-    protocol: PacketProtocol
-    link: DroneLink | None
-    dry_run: bool
-    action: DroneAction
-    lock: threading.Lock
-    sent: int = 0
-    errors: int = 0
-
-    def update(self, action: DroneAction) -> None:
-        with self.lock:
-            self.action = action.sanitized()
-
-    def read_action(self) -> DroneAction:
-        with self.lock:
-            return self.action
+from .config import load_config
+from .protocols import make_protocol
+from .runtime.manager import RuntimeManager, RuntimeManagerConfig
 
 
 class SwarmController:
-    def __init__(self, configs: list[DroneConfig], *, command: str, control_hz: float, model_hz: float, dry_run: bool) -> None:
+    """
+    CLI facade over the production runtime manager.
+
+    The old implementation duplicated packet loops and model parsing here. That
+    made service/runtime behavior diverge from CLI behavior. This facade keeps
+    the public command-line entry point but delegates lifecycle, controller
+    selection, safety, events, and link output to RuntimeManager.
+    """
+
+    def __init__(self, configs: list[object], *, command: str, control_hz: float, model_hz: float, dry_run: bool) -> None:
         self.configs = configs
         self.command = command
         self.control_hz = control_hz
         self.model_hz = model_hz
         self.dry_run = dry_run
-        self.model = ModelAdapter()
-        self.running = False
-        self.runtimes: list[DroneRuntime] = []
-        self.threads: list[threading.Thread] = []
+        self.manager = RuntimeManager(
+            config=RuntimeManagerConfig(control_hz=control_hz, dry_run=dry_run, enable_io=not dry_run)
+        )
+        self.manager.configure_drones(configs)  # type: ignore[arg-type]
+        self.manager.set_all_controllers(command)
 
     def start(self) -> None:
-        self.running = True
-        for cfg in self.configs:
-            link = None
-            if not self.dry_run:
-                link = make_drone_link(cfg)
-            runtime = DroneRuntime(
-                config=cfg,
-                protocol=make_protocol(cfg.protocol),
-                link=link,
-                dry_run=self.dry_run,
-                action=DroneAction.neutral(),
-                lock=threading.Lock(),
-            )
-            self.runtimes.append(runtime)
-            thread = threading.Thread(target=self._control_loop, args=(runtime,), daemon=True)
-            thread.start()
-            self.threads.append(thread)
-
-        model_thread = threading.Thread(target=self._model_loop, daemon=True)
-        model_thread.start()
-        self.threads.append(model_thread)
+        self.manager.arm_all()
+        self.manager.heartbeat_all()
+        self.manager.start_all()
 
     def stop(self) -> None:
-        self.running = False
-        for thread in self.threads:
-            thread.join(timeout=1.0)
-        for runtime in self.runtimes:
-            if runtime.link is not None:
-                for _ in range(5):
-                    runtime.link.send(runtime.protocol.build(DroneAction.motor_stop()))
-                    time.sleep(0.03)
-                runtime.link.close()
+        self.manager.stop_all()
 
-    def _control_loop(self, runtime: DroneRuntime) -> None:
-        interval = 1.0 / self.control_hz
-        while self.running:
-            action = runtime.read_action()
-            packet = runtime.protocol.build(action)
-            if runtime.dry_run:
-                if runtime.sent % max(1, int(self.control_hz)) == 0:
-                    print(f"[{runtime.config.id}] {packet[:32].hex(' ')}")
-            else:
-                try:
-                    assert runtime.link is not None
-                    runtime.link.send(packet)
-                except OSError as exc:
-                    runtime.errors += 1
-                    print(f"[{runtime.config.id}] send error: {exc}")
-            runtime.sent += 1
-            time.sleep(interval)
+    @property
+    def runtimes(self) -> list[object]:
+        return self.manager.snapshot_objects()
 
-    def _model_loop(self) -> None:
-        interval = 1.0 / self.model_hz
-        while self.running:
-            observations = [None] * len(self.runtimes)
-            raw_actions = self.model.step(observations, self.command)
-            if len(raw_actions) != len(self.runtimes):
-                print(f"model returned {len(raw_actions)} actions for {len(self.runtimes)} drones; ignoring tick")
-                time.sleep(interval)
+    def print_dry_run_packets(self) -> None:
+        snapshots = self.manager.snapshot_objects()
+        config_by_id = {cfg.id: cfg for cfg in self.configs if hasattr(cfg, "id")}
+        for snapshot in snapshots:
+            action = snapshot.last_action
+            if action is None:
                 continue
-            for runtime, raw_action in zip(self.runtimes, raw_actions):
-                action = raw_action if isinstance(raw_action, DroneAction) else action_from_dict(raw_action)
-                runtime.update(action)
-            time.sleep(interval)
+            cfg = config_by_id.get(snapshot.drone_id)
+            if cfg is None:
+                continue
+            packet = make_protocol(cfg.protocol).build(action)
+            print(f"[{snapshot.drone_id}] {packet[:32].hex(' ')}")
 
 
 def main() -> int:
@@ -141,14 +86,18 @@ def main() -> int:
 
     controller.start()
     deadline = time.monotonic() + args.seconds if args.seconds > 0 else None
+    next_print = time.monotonic() + max(0.05, 1.0 / max(1.0, args.control_hz))
     try:
         while running and (deadline is None or time.monotonic() < deadline):
-            time.sleep(0.2)
+            if args.dry_run and time.monotonic() >= next_print:
+                controller.print_dry_run_packets()
+                next_print = time.monotonic() + 1.0
+            time.sleep(0.05)
     finally:
         controller.stop()
 
-    for runtime in controller.runtimes:
-        print(f"{runtime.config.id}: sent={runtime.sent} errors={runtime.errors}")
+    for snapshot in controller.runtimes:
+        print(f"{snapshot.drone_id}: sent={snapshot.sent} errors={snapshot.errors}")
     return 0
 
 

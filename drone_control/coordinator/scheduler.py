@@ -38,6 +38,14 @@ class CoordinatorScheduler:
 
         assignments: list[Assignment] = []
         notes: list[str] = []
+        available = [snapshot for snapshot in snapshots if snapshot.link_state in {"connected", "dry_run"}]
+        if not snapshots:
+            self.last_progress = MissionProgress(self.mission.id, "blocked", notes=["missing_drone"])
+            return self.last_progress
+        if not available:
+            self.last_progress = MissionProgress(self.mission.id, "blocked", notes=["all_links_unavailable"])
+            return self.last_progress
+
         for index, snapshot in enumerate(snapshots):
             obs = snapshot.observation
             confidence = obs.confidence
@@ -45,16 +53,16 @@ class CoordinatorScheduler:
                 notes.append(f"{snapshot.drone_id}:link_{snapshot.link_state}")
             if confidence < 0.2:
                 notes.append(f"{snapshot.drone_id}:low_confidence")
-            role = "lead" if index == 0 else "support"
-            task = "survey" if index == 0 else "hold_safe_spacing"
+            role = "lead" if snapshot is available[0] else "support"
+            task = "survey" if snapshot is available[0] else "hold_safe_spacing"
+            max_throttle = 120 if confidence < 0.2 or snapshot.link_state not in {"connected", "dry_run"} else 160
             assignments.append(
                 Assignment(
                     drone_id=snapshot.drone_id,
                     role=role,
                     task=task,
-                    constraints=ConstraintUpdate(drone_id=snapshot.drone_id, max_throttle=160, min_confidence=0.2),
+                    constraints=ConstraintUpdate(drone_id=snapshot.drone_id, max_throttle=max_throttle, min_confidence=0.2),
                 )
             )
         self.last_progress = MissionProgress(self.mission.id, "running", assignments=assignments, notes=notes)
         return self.last_progress
-

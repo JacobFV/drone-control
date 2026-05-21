@@ -573,9 +573,11 @@ function renderRuntime() {
   if (selected?.controller) runtimeController.value = runtimeModeValue(selected.controller);
   renderKv(runtimeList, [
     ["Drone", selected?.droneId ?? selectedDrone()?.id],
-    ["Link", selected?.linkState],
+    ["Link", selected?.linkType],
+    ["State", selected?.linkState],
     ["Controller", selected?.controller],
     ["Safety", selected?.safety?.armed ? "armed" : "disarmed"],
+    ["Max THR", selected?.constraints?.maxThrottle],
     ["Confidence", selected?.observation?.confidence],
     ["Sent", selected?.sent],
     ["Errors", selected?.errors],

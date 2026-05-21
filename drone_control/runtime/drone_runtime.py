@@ -24,24 +24,30 @@ class DroneRuntimeSnapshot:
     drone_id: str
     running: bool
     controller: str
+    link_type: str
     link_state: str
     sent: int
     errors: int
     dry_run: bool
     observation: DroneObservation
     safety: dict[str, object]
+    constraints: dict[str, Any]
+    last_action: DroneAction | None
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "droneId": self.drone_id,
             "running": self.running,
             "controller": self.controller,
+            "linkType": self.link_type,
             "linkState": self.link_state,
             "sent": self.sent,
             "errors": self.errors,
             "dryRun": self.dry_run,
             "observation": self.observation.as_dict(),
             "safety": self.safety,
+            "constraints": self.constraints,
+            "lastAction": _action_dict(self.last_action),
         }
 
 
@@ -59,6 +65,7 @@ class DroneRuntime:
         map_summary: MapSummary | None = None,
         control_hz: float = 20.0,
         dry_run: bool = False,
+        link_type: str = "unknown",
     ) -> None:
         self.drone_id = drone_id
         self.protocol = protocol
@@ -68,6 +75,7 @@ class DroneRuntime:
         self.pose_estimator = pose_estimator or NullPoseEstimator()
         self.map_summary = map_summary or MapSummary()
         self.control_hz = max(1.0, float(control_hz))
+        self.link_type = link_type
         self.dry_run = dry_run
         self.sent = 0
         self.errors = 0
@@ -124,12 +132,15 @@ class DroneRuntime:
                 drone_id=self.drone_id,
                 running=self._running,
                 controller=self.controller.inner.name,
+                link_type=self.link_type,
                 link_state=self.link_state,
                 sent=self.sent,
                 errors=self.errors,
                 dry_run=self.dry_run,
                 observation=self._last_observation,
                 safety=self.controller.state.as_dict(),
+                constraints=self.controller.constraints.as_dict(),
+                last_action=self._action_history[-1] if self._action_history else None,
             )
 
     def drain_events(self, limit: int = 100) -> list[RuntimeEvent]:
@@ -252,3 +263,21 @@ class DroneRuntime:
         recorder = getattr(self.controller.inner, "record_action", None)
         if callable(recorder):
             recorder(action)
+
+
+def _action_dict(action: DroneAction | None) -> dict[str, Any] | None:
+    if action is None:
+        return None
+    action = action.sanitized()
+    return {
+        "roll": action.roll,
+        "pitch": action.pitch,
+        "throttle": action.throttle,
+        "yaw": action.yaw,
+        "takeoff": action.takeoff,
+        "land": action.land,
+        "emergencyStop": action.emergency_stop,
+        "calibrate": action.calibrate,
+        "headless": action.headless,
+        "flip": action.flip,
+    }

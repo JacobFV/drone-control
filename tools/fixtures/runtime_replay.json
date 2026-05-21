@@ -1,0 +1,76 @@
+{
+  "mission": {
+    "id": "fixture-inspection",
+    "objective": "low altitude inspection training"
+  },
+  "observations": [
+    {
+      "timestamp": 1.0,
+      "droneId": "drone-a",
+      "linkState": "dry_run",
+      "latestFrame": {
+        "index": 0,
+        "timestamp": 1.0,
+        "width": 640,
+        "height": 360,
+        "source": "fixture/frame_000000.jpg"
+      },
+      "pose": {
+        "frameIndex": 0,
+        "translation": [0.0, 0.0, 1.0],
+        "rotation": [0.0, 0.0, 0.0, 1.0],
+        "quality": "tracking",
+        "confidence": 0.8
+      },
+      "mapSummary": {
+        "state": "artifact",
+        "recordId": "map-fixture",
+        "keyframes": 1,
+        "points": 0,
+        "label": "fixture map"
+      },
+      "confidence": 0.95
+    },
+    {
+      "timestamp": 1.1,
+      "droneId": "drone-a",
+      "linkState": "dry_run",
+      "latestFrame": {
+        "index": 1,
+        "timestamp": 1.1,
+        "width": 640,
+        "height": 360,
+        "source": "fixture/frame_000001.jpg"
+      },
+      "pose": {
+        "frameIndex": 1,
+        "translation": [0.1, 0.0, 1.0],
+        "rotation": [0.0, 0.0, 0.0, 1.0],
+        "quality": "tracking",
+        "confidence": 0.82
+      },
+      "mapSummary": {
+        "state": "artifact",
+        "recordId": "map-fixture",
+        "keyframes": 2,
+        "points": 0,
+        "label": "fixture map"
+      },
+      "confidence": 0.97
+    }
+  ],
+  "actions": [
+    {
+      "roll": 128,
+      "pitch": 128,
+      "throttle": 128,
+      "yaw": 128
+    },
+    {
+      "roll": 128,
+      "pitch": 132,
+      "throttle": 130,
+      "yaw": 128
+    }
+  ]
+}

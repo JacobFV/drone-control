@@ -835,6 +835,7 @@ class ControlStationServer(ThreadingHTTPServer):
     def mission_progress(self) -> dict[str, object]:
         snapshots = self.runtime.snapshot_objects()
         progress = self.coordinator.step(snapshots)
+        self.runtime.apply_mission_progress(progress)
         return progress.as_dict()
 
     def send_manual_action(self, action: object | None) -> bool:

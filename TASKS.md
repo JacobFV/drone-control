@@ -12,28 +12,34 @@ Implemented:
 - multi-drone runtime manager and event fan-out in
   `drone_control/runtime/manager.py`
 - controller contracts, scripted controllers, manual adapter, shared safety
-  wrapper, and structured VLA adapter boundary in `drone_control/controllers/`
+  wrapper, text-command controller, and strict structured VLA adapter in
+  `drone_control/controllers/`
 - typed perception state, frame-source adapters, and estimator adapter boundary
-  in `drone_control/perception/`
-- mission/task/assignment models, scheduler, and VLM adapter boundary in
-  `drone_control/coordinator/`
+  in `drone_control/perception/`, plus map-summary adapters for stored scene
+  artifacts
+- mission/task/assignment models, scheduler, and strict VLM adapter in
+  `drone_control/coordinator/`; mission assignments now update per-drone
+  runtime safety constraints instead of remaining display-only
+- `swarm.py` now uses `RuntimeManager` instead of a duplicate packet loop, so
+  CLI, service, tests, safety, and event emission share one runtime path
 - service endpoints for runtime status, runtime events, controller selection,
   per-drone arm/disarm/heartbeat/axes/stop/clear-fault, mission start/stop, and
   mission progress
 - Electron runtime panel showing link type/state, controller, safety state,
-  observation confidence, and coordinator assignment
-- dry-run runtime tests covering no-camera, frame+pose, safety clamping, and
-  two-drone manager behavior
+  observation confidence, active max throttle, and coordinator assignment
+- replay fixtures and dry-run runtime tests covering no-camera, frame+pose,
+  safety clamping, two-drone manager behavior, coordinator fault scenarios,
+  VLA schema validation, VLM assignment validation, and replay loading
 
-Still hardware/manual bring-up:
+Still external hardware/model bring-up:
 
-- move `single.py` and `swarm.py` internals onto `RuntimeManager` once CLI
-  packet output is proven byte-compatible in hardware runs
 - record one-ESP and two-ESP runtime bring-up in `DRONE_RUNBOOK.md`
-- add stored replay fixtures from real flights when representative data is
+- replace fixture replay records with representative real flight traces when
   available
 - verify runtime packet emission with `DRONE_RUNTIME_ENABLE_IO=1` in a
   controlled test area
+- supply real VLA/VLM model clients and credentials; current adapters enforce
+  the structured contract and fail safely when no model is configured
 
 ## Starting Baseline
 

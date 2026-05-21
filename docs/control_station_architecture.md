@@ -331,16 +331,22 @@ verified packet and transport layer:
   controller stepping, safety wrapping, packet building, link send, snapshots,
   and typed event emission.
 - `runtime.RuntimeManager` owns multi-drone lifecycle, controller selection,
-  manual axes forwarding, arm/disarm/heartbeat calls, and event fan-out.
+  manual axes forwarding, arm/disarm/heartbeat calls, coordinator-assignment
+  constraint application, and event fan-out.
 - `perception.state` defines frame, pose, IMU, map-summary, and confidence
-  models used in runtime snapshots.
-- `controllers.base`, `scripted`, `manual`, `safety`, and `vla` define the
+  models used in runtime snapshots. `perception.maps` summarizes stored map and
+  scene records without turning reconstruction into a realtime motor path.
+- `controllers.base`, `scripted`, `manual`, `text_command`, `safety`, and `vla` define the
   bounded action-request contract. Scripted and manual controllers share the
-  same safety wrapper. The VLA adapter validates structured output and safe
-  stops when unavailable or invalid.
+  same safety wrapper. The VLA adapter validates structured output, includes
+  recent actions in the model input, and faults to motor stop when unavailable
+  or invalid.
 - `coordinator.tasks`, `scheduler`, and `vlm` define mission, role, assignment,
   constraint, and progress models. The scheduler assigns summary-level roles;
-  it never touches packets or motor commands.
+  it never touches packets or motor commands. VLM output is schema-checked and
+  cannot assign unknown drones.
+- `swarm.py` is now a CLI facade over `RuntimeManager`, not a duplicate packet
+  loop. The service and CLI share the same safety/runtime path.
 
 The runtime path preserves the full deterministic lower layer:
 
@@ -389,17 +395,19 @@ loads `DRONE_RUNTIME_CONFIG`, then ignored `config/drones.local.json`, then the
 tracked example config. This lets the UI exercise controller switching and
 mission progress on a fresh checkout without opening serial or UDP links.
 
+Replay and simulation tests use `tools/fixtures/runtime_replay.json` through
+`runtime.replay`. Those fixtures validate the controller/coordinator contracts
+without requiring drone hardware. Real flight traces should replace or augment
+the fixture once hardware runs are recorded.
+
 ## Compatibility Cleanup Direction
 
-The older simple model-command path should be retired only after the runtime
-path can do the same dry-run and manual scenarios. The intended cleanup order is:
+The duplicated `swarm.py` packet loop has been retired. Remaining cleanup is:
 
-1. Keep `single.py` and `swarm.py` as command-line entry points.
-2. Move their internal loops onto `runtime.DroneRuntime` and
-   `runtime.RuntimeManager` when the CLI behavior can remain byte-compatible.
-3. Replace ad hoc model text parsing with typed controller outputs.
-4. Keep transport, protocol, and config compatibility intact.
-5. Remove unused adapters and docs once tests and runbook commands use the new
+1. Keep `single.py` as a hardware-oriented one-drone utility until each of its
+   specialized manual test modes has a runtime equivalent.
+2. Keep transport, protocol, and config compatibility intact.
+3. Remove unused adapters and docs once tests and runbook commands use the new
    runtime path.
 
 See [../TASKS.md](../TASKS.md) for the implementation checklist intended for

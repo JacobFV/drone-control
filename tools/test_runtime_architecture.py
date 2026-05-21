@@ -2,9 +2,14 @@ from __future__ import annotations
 
 import time
 import unittest
+from pathlib import Path
 
 from drone_control.actions import DroneAction
 from drone_control.config import DroneConfig
+from drone_control.controllers.vla import VLAController, parse_vla_output
+from drone_control.coordinator.scheduler import CoordinatorScheduler
+from drone_control.coordinator.tasks import Mission
+from drone_control.coordinator.vlm import VLMCoordinator
 from drone_control.controllers.base import SafetyConstraints
 from drone_control.controllers.manual import ManualController
 from drone_control.controllers.safety import SafetyController
@@ -15,6 +20,7 @@ from drone_control.protocols import make_protocol
 from drone_control.runtime.drone_runtime import DroneRuntime
 from drone_control.runtime.events import DroneObservation
 from drone_control.runtime.manager import RuntimeManager, RuntimeManagerConfig
+from drone_control.runtime.replay import load_replay_trace
 
 
 class FakeLink:
@@ -106,6 +112,76 @@ class RuntimeArchitectureTest(unittest.TestCase):
         self.assertGreater(drones["drone-a"]["sent"], 0)
         self.assertGreater(drones["drone-b"]["sent"], 0)
         self.assertEqual(drones["drone-a"]["controller"], "manual")
+
+    def test_mission_assignments_apply_safety_constraints(self) -> None:
+        manager = RuntimeManager(config=RuntimeManagerConfig(dry_run=True, enable_io=False, control_hz=40))
+        manager.configure_drones([DroneConfig(id="drone-a"), DroneConfig(id="drone-b")])
+        manager.start_all()
+        try:
+            time.sleep(0.05)
+            progress = CoordinatorScheduler().start(Mission("mission-a", "inspection"))
+            scheduler = CoordinatorScheduler(tick_hz=100)
+            scheduler.start(Mission("mission-a", "inspection"))
+            progress = scheduler.step(manager.snapshot_objects())
+            manager.apply_mission_progress(progress)
+            drones = {item["droneId"]: item for item in manager.snapshots()["drones"]}
+        finally:
+            manager.stop_all()
+        self.assertLessEqual(drones["drone-a"]["constraints"]["maxThrottle"], 160)
+        self.assertIn("assignmentRole", drones["drone-a"]["constraints"]["metadata"])
+
+    def test_coordinator_blocks_missing_and_flags_low_confidence(self) -> None:
+        scheduler = CoordinatorScheduler(tick_hz=100)
+        scheduler.start(Mission("mission-empty", "inspection"))
+        self.assertEqual(scheduler.step([]).state, "blocked")
+        runtime = DroneRuntime(
+            drone_id="drone-low",
+            protocol=make_protocol("wifi_8k_prefixed_short"),
+            link=None,
+            controller=neutral_controller(),
+            constraints=SafetyConstraints(armed=True, require_heartbeat=False),
+            dry_run=True,
+        )
+        runtime.step_once()
+        scheduler.start(Mission("mission-low", "inspection"))
+        progress = scheduler.step([runtime.snapshot()])
+        self.assertTrue(any("low_confidence" in note for note in progress.notes))
+        self.assertEqual(progress.assignments[0].constraints.max_throttle, 120)
+
+    def test_vla_replay_and_bad_schema_faults(self) -> None:
+        trace = load_replay_trace(Path("tools/fixtures/runtime_replay.json"))
+        seen_payloads = []
+
+        def model(payload):
+            seen_payloads.append(payload)
+            return {
+                "action": {"roll": 128, "pitch": 132, "throttle": 130, "yaw": 128},
+                "confidence": 0.9,
+                "reason": "fixture_follow",
+            }
+
+        controller = VLAController(model_step=model, mission_context=trace.mission)
+        request = controller.step(trace.observations[-1], trace.observations[:-1], SafetyConstraints(require_heartbeat=False))
+        self.assertEqual(request.action.pitch, 132)
+        self.assertEqual(seen_payloads[0]["mission"]["id"], "fixture-inspection")
+        self.assertIn("recentActions", seen_payloads[0])
+        with self.assertRaises(ValueError):
+            parse_vla_output({"action": {"roll": 999}, "confidence": 0.5, "reason": "bad"})
+        bad = VLAController(model_step=lambda _payload: {"action": {"roll": "bad"}, "confidence": 0.5, "reason": "bad"})
+        fault = bad.step(trace.observations[-1], [], SafetyConstraints(require_heartbeat=False))
+        self.assertEqual(fault.action, DroneAction.motor_stop())
+        self.assertIsNotNone(fault.fault)
+
+    def test_vlm_rejects_unknown_drone_assignments(self) -> None:
+        coordinator = VLMCoordinator(
+            model_step=lambda _payload: {
+                "state": "running",
+                "assignments": [{"droneId": "missing", "role": "lead", "task": "survey"}],
+            }
+        )
+        progress = coordinator.step(Mission("mission-vlm", "inspection"), [{"droneId": "drone-a"}])
+        self.assertEqual(progress.state, "faulted")
+        self.assertTrue(progress.notes)
 
 
 if __name__ == "__main__":
