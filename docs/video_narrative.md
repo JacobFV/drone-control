@@ -373,6 +373,21 @@ Close with the technical lesson:
 - Electron UI manual IO panel.
 - Gaussian splat/pose UI surfaces for future-state discussion.
 
+## Cover Image Prompt
+
+Create a cinematic but technically grounded cover image for a robotics video.
+Scene: a clean workbench with two small E99-style Wi-Fi camera drones, an
+ESP32-S3 development board connected by USB-C to a laptop, and a subtle screen
+showing a network diagram: "PC -> USB serial -> ESP32-S3 -> drone AP -> UDP".
+In the background, show a ghosted 3D Gaussian-splat-like reconstruction of an
+indoor room and small overlays for "Estimator + IMU", "VLA single-drone
+controller", and "VLM swarm coordinator". The mood should be optimistic,
+civilian, and technical, suggesting firefighting support, inspection, and
+search-and-rescue robotics. Keep the scene calm, constructive, and field-ready,
+with no adversarial or threatening imagery. Use realistic lighting, sharp
+hardware detail, readable but minimal UI text, modern documentary thumbnail
+composition, 16:9 aspect ratio.
+
 ## Framing Guardrails
 
 Keep the language centered on safety, inspection, mapping, coordination,
