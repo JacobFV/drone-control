@@ -111,6 +111,7 @@ class DroneRuntime:
         if thread is not None:
             thread.join(timeout=1.0)
         self._send_stop_burst()
+        self._close_controller()
         if self.link is not None:
             self.link.close()
         self.link_state = "stopped"
@@ -130,6 +131,7 @@ class DroneRuntime:
 
     def set_controller(self, controller: DroneController) -> None:
         with self._lock:
+            self._close_controller()
             self.controller.set_controller(controller)
 
     def snapshot(self) -> DroneRuntimeSnapshot:
@@ -268,6 +270,11 @@ class DroneRuntime:
         recorder = getattr(self.controller.inner, "record_action", None)
         if callable(recorder):
             recorder(action)
+
+    def _close_controller(self) -> None:
+        close = getattr(self.controller.inner, "close", None)
+        if callable(close):
+            close()
 
 
 def _action_dict(action: DroneAction | None) -> dict[str, Any] | None:

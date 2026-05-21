@@ -338,12 +338,14 @@ verified packet and transport layer:
   JSONL/CSV logs, `perception.pipeline` aggregates frame/pose/IMU/map status,
   and `perception.maps` summarizes stored map and scene records without turning
   reconstruction into a realtime motor path.
-- `controllers.base`, `scripted`, `manual`, `text_command`, `local_vla`,
-  `safety`, and `vla` define the
+- `controllers.base`, `scripted`, `manual`, `autonomy`, `text_command`,
+  `local_vla`, `safety`, and `vla` define the
   bounded action-request contract. Scripted and manual controllers share the
-  same safety wrapper. The local VLA client is a JSON-lines subprocess adapter.
-  The VLA adapter validates structured output, includes recent actions in the
-  model input, and faults to motor stop when unavailable or invalid.
+  same safety wrapper. Built-in autonomy is a conservative offline policy for
+  dry-run and provider-failure operation. The local VLA client is a JSON-lines
+  subprocess adapter. The VLA adapter validates structured output, includes
+  recent actions in the model input, and faults to motor stop when unavailable
+  or invalid.
 - `coordinator.tasks`, `scheduler`, and `vlm` define mission, role, assignment,
   constraint, and progress models. The scheduler assigns summary-level roles;
   it never touches packets or motor commands. VLM output is schema-checked and
@@ -402,6 +404,13 @@ set. The default service runtime is dry-run (`DRONE_RUNTIME_DRY_RUN=1`), and it
 loads `DRONE_RUNTIME_CONFIG`, then ignored `config/drones.local.json`, then the
 tracked example config. This lets the UI exercise controller switching and
 mission progress on a fresh checkout without opening serial or UDP links.
+
+`POST /api/mission/start` starts the runtime loop and selects the controller
+mode from `controllerMode` or `DRONE_MISSION_CONTROLLER` (default:
+`autonomy`). It does not arm drones; arming remains an explicit per-drone safety
+action. While a mission is active, the service autonomy loop continuously
+advances the VLM/scheduler, applies coordinator constraints, and heartbeats the
+runtime safety layer for already-armed drones.
 
 Model integration is configured through explicit environment variables:
 

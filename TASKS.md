@@ -12,8 +12,9 @@ Implemented:
 - multi-drone runtime manager and event fan-out in
   `drone_control/runtime/manager.py`
 - controller contracts, scripted controllers, manual adapter, shared safety
-  wrapper, text-command controller, process-backed local VLA client, and strict
-  structured VLA adapter in `drone_control/controllers/`
+  wrapper, built-in bounded autonomy controller, text-command controller,
+  process-backed local VLA client, and strict structured VLA adapter in
+  `drone_control/controllers/`
 - typed perception state, frame-source adapters, and estimator adapter boundary
   in `drone_control/perception/`, plus IMU file extraction, perception
   aggregation, and map-summary adapters for stored scene artifacts
@@ -24,14 +25,15 @@ Implemented:
   CLI, service, tests, safety, and event emission share one runtime path
 - service endpoints for runtime status, runtime events, controller selection,
   per-drone arm/disarm/heartbeat/axes/stop/clear-fault, mission start/stop, and
-  mission progress
+  mission progress; mission start launches runtime and an active autonomy loop
+  by default but does not arm drones
 - Electron runtime panel showing link type/state, controller, safety state,
   observation confidence, active max throttle, and coordinator assignment
 - replay fixtures and dry-run runtime tests covering no-camera,
-  frame+pose+IMU+map, safety clamping, two-drone manager behavior, coordinator
-  fault scenarios, process-backed VLA, HTTP VLM, VLA schema validation, VLM
-  assignment validation, IMU extraction, perception aggregation, and replay
-  loading
+  frame+pose+IMU+map, safety clamping, built-in autonomy, two-drone manager
+  behavior, coordinator fault scenarios, process-backed VLA, HTTP VLM, VLA
+  schema validation, VLM assignment validation, IMU extraction, perception
+  aggregation, and replay loading
 
 Still external hardware/model bring-up:
 

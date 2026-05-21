@@ -57,6 +57,12 @@ class VLAController:
         self.recent_actions.append(action.sanitized())
         del self.recent_actions[:-20]
 
+    def close(self) -> None:
+        closer = getattr(self.model_step, "__self__", None)
+        close = getattr(closer, "close", None)
+        if callable(close):
+            close()
+
 
 def parse_vla_output(result: dict[str, Any]) -> tuple[DroneAction, float, str]:
     if not isinstance(result, dict):

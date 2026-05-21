@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from drone_control.config import DroneConfig
+from drone_control.controllers.autonomy import BoundedAutonomyController
 from drone_control.controllers.base import DisabledController, SafetyConstraints
 from drone_control.controllers.local_vla import LocalVLAClient, LocalVLAConfig
 from drone_control.controllers.manual import ManualController
@@ -86,6 +87,9 @@ class RuntimeManager:
         key = mode.strip().lower()
         if key == "manual":
             runtime.set_controller(self._manual[drone_id])
+            return
+        if key in {"autonomy", "builtin_vla", "builtin-autonomy"}:
+            runtime.set_controller(BoundedAutonomyController())
             return
         if key == "vla":
             if not self.config.local_vla_command:

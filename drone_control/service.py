@@ -34,7 +34,7 @@ from drone_control.reconstruction import ReconstructionManager, find_splat_artif
 from drone_control.config import load_config
 from drone_control.coordinator.http_vlm import HttpVLMClient, HttpVLMConfig
 from drone_control.coordinator.scheduler import CoordinatorScheduler
-from drone_control.coordinator.tasks import Mission
+from drone_control.coordinator.tasks import Mission, MissionProgress
 from drone_control.coordinator.vlm import VLMCoordinator
 from drone_control.runtime.manager import RuntimeManager, RuntimeManagerConfig
 from drone_control.store import ControlStationStore
@@ -322,6 +322,11 @@ class ControlStationHandler(BaseHTTPRequestHandler):
             mission_id = str(payload.get("id") or f"mission-{int(time.time())}")
             objective = str(payload.get("objective") or "civilian robotics training")
             self.server.coordinator.start(Mission(mission_id, objective, dict(payload.get("context") or {})))
+            controller_mode = str(payload.get("controllerMode") or os.environ.get("DRONE_MISSION_CONTROLLER", "autonomy"))
+            if payload.get("setControllers") is not False:
+                self.server.runtime.set_all_controllers(controller_mode)
+            if payload.get("startRuntime") is not False:
+                self.server.runtime.start_all()
             self.send_json(self.server.mission_progress())
             return
         if parsed.path == "/api/mission/stop":
@@ -784,6 +789,9 @@ class ControlStationServer(ThreadingHTTPServer):
         self.manual_loop_running = True
         self.manual_thread = threading.Thread(target=self._manual_loop, name="manual-control-loop", daemon=True)
         self.manual_thread.start()
+        self.autonomy_loop_running = True
+        self.autonomy_thread = threading.Thread(target=self._autonomy_loop, name="autonomy-loop", daemon=True)
+        self.autonomy_thread.start()
 
     def manual_status(self, action: object | None = None) -> dict[str, object]:
         payload = {
@@ -841,6 +849,9 @@ class ControlStationServer(ThreadingHTTPServer):
         return status
 
     def mission_progress(self) -> dict[str, object]:
+        return self._advance_mission().as_dict()
+
+    def _advance_mission(self) -> MissionProgress:
         snapshots = self.runtime.snapshot_objects()
         if self.coordinator.mission is not None and self.vlm.available:
             progress = self.vlm.step(self.coordinator.mission, [snapshot.as_dict() for snapshot in snapshots])
@@ -855,7 +866,9 @@ class ControlStationServer(ThreadingHTTPServer):
         else:
             progress = self.coordinator.step(snapshots)
         self.runtime.apply_mission_progress(progress)
-        return progress.as_dict()
+        if self.coordinator.mission is not None:
+            self.runtime.heartbeat_all()
+        return progress
 
     def send_manual_action(self, action: object | None) -> bool:
         sent = self.manual_transport.send(action)
@@ -1003,6 +1016,8 @@ class ControlStationServer(ThreadingHTTPServer):
     def server_close(self) -> None:
         self.manual_loop_running = False
         self.manual_thread.join(timeout=1.0)
+        self.autonomy_loop_running = False
+        self.autonomy_thread.join(timeout=1.0)
         self.runtime.stop_all()
         self.reconstructions.stop_all()
         self.sessions.stop_all()
@@ -1015,6 +1030,16 @@ class ControlStationServer(ThreadingHTTPServer):
             with self.manual_lock:
                 action = self.manual.tick()
                 self.send_manual_action(action)
+            time.sleep(interval)
+
+    def _autonomy_loop(self) -> None:
+        interval = 1.0 / max(0.1, float(os.environ.get("DRONE_COORDINATOR_HZ", "1")))
+        while self.autonomy_loop_running:
+            try:
+                if self.coordinator.mission is not None:
+                    self._advance_mission()
+            except Exception as exc:
+                sys.stderr.write(f"service: autonomy loop error: {exc}\n")
             time.sleep(interval)
 
 

@@ -10,6 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from drone_control.actions import DroneAction
 from drone_control.config import DroneConfig
+from drone_control.controllers.autonomy import BoundedAutonomyController
 from drone_control.controllers.local_vla import LocalVLAClient, LocalVLAConfig
 from drone_control.controllers.vla import VLAController, parse_vla_output
 from drone_control.coordinator.http_vlm import HttpVLMClient, HttpVLMConfig
@@ -108,6 +109,19 @@ class RuntimeArchitectureTest(unittest.TestCase):
             time.sleep(0.002)
         self.assertLessEqual(request.action.throttle, 140)
 
+    def test_builtin_autonomy_uses_assignment_metadata(self) -> None:
+        controller = BoundedAutonomyController()
+        observation = DroneObservation.empty("drone-auto", link_state="dry_run")
+        constraints = SafetyConstraints(
+            armed=True,
+            require_heartbeat=False,
+            max_throttle=140,
+            metadata={"assignmentTask": "survey", "minConfidence": 0.0},
+        )
+        request = controller.step(observation, [], constraints)
+        self.assertEqual(request.action.pitch, 132)
+        self.assertLessEqual(request.action.throttle, 140)
+
     def test_manager_runs_two_fake_drones_and_switches_manual(self) -> None:
         manager = RuntimeManager(config=RuntimeManagerConfig(dry_run=True, enable_io=False, control_hz=40))
         manager.configure_drones([
@@ -129,6 +143,22 @@ class RuntimeArchitectureTest(unittest.TestCase):
         self.assertGreater(drones["drone-a"]["sent"], 0)
         self.assertGreater(drones["drone-b"]["sent"], 0)
         self.assertEqual(drones["drone-a"]["controller"], "manual")
+
+    def test_manager_autonomy_mode_runs_without_external_models(self) -> None:
+        manager = RuntimeManager(config=RuntimeManagerConfig(dry_run=True, enable_io=False, control_hz=40))
+        manager.configure_drones([DroneConfig(id="drone-a")])
+        manager.set_controller("drone-a", "autonomy")
+        manager.arm("drone-a")
+        manager.heartbeat("drone-a")
+        manager.start_all()
+        try:
+            time.sleep(0.08)
+            status = manager.snapshots()
+        finally:
+            manager.stop_all()
+        drone = status["drones"][0]
+        self.assertEqual(drone["controller"], "autonomy")
+        self.assertGreater(drone["sent"], 0)
 
     def test_mission_assignments_apply_safety_constraints(self) -> None:
         manager = RuntimeManager(config=RuntimeManagerConfig(dry_run=True, enable_io=False, control_hz=40))
