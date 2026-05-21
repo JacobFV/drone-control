@@ -1,5 +1,14 @@
 # Control Station Architecture
 
+This architecture supports the story in [video_narrative.md](video_narrative.md):
+start with AP-mode E99/WIFI_8K drones, learn their UDP/RTSP protocol, hit the
+single-radio laptop limitation, then move drone AP association into one ESP32-S3
+bridge per drone while keeping high-level control code link-agnostic. The
+longer-term direction is civilian, safety-bounded robotics: real-time
+scene/state estimation, a single-drone VLA controller, and a VLM coordinator for
+multi-drone tasks such as firefighting support, infrastructure inspection, and
+search-and-rescue training.
+
 ## Storage
 
 The control station stores operational metadata in `data/control_station.sqlite3`.

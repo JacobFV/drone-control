@@ -1,5 +1,10 @@
 # Drone Control Bring-Up
 
+For the end-to-end story behind this bring-up, including the video outline and
+future architecture, see [docs/video_narrative.md](docs/video_narrative.md).
+This runbook remains the operational log: observed APs, packet formats, camera
+capture, direct Wi-Fi tests, ESP32 bridge tests, and safety notes.
+
 The powered drones currently appear as open APs:
 
 - `WIFI_8K-0c5b90`

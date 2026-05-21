@@ -16,6 +16,13 @@ USB ESP32 bridges plus one direct PC Wi-Fi drone. See
 [config/drones.example.json](config/drones.example.json) for a working config
 shape and [DRONE_RUNBOOK.md](DRONE_RUNBOOK.md) for operating notes.
 
+For a video-oriented project narrative, see
+[docs/video_narrative.md](docs/video_narrative.md). It covers the initial
+objective, E99/WIFI_8K protocol discovery, AP-mode networking limitations,
+multi-radio experiments, the ESP32-S3 bridge, the successful end-to-end link,
+and the future three-layer autonomy direction for civilian robotics use cases
+such as firefighting support, inspection, and search-and-rescue training.
+
 Build the ESP32 bridge firmware with PlatformIO:
 
 ```bash

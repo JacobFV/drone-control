@@ -16,7 +16,7 @@ class ModelAdapter:
 
     def step(self, observations: list[object], text_command: str) -> list[DroneAction]:
         command = text_command.lower()
-        if "stop" in command or "kill" in command:
+        if "stop" in command or "halt" in command:
             return [DroneAction.motor_stop() for _ in observations]
         if "calibrate" in command:
             return [DroneAction(calibrate=True) for _ in observations]
@@ -27,4 +27,3 @@ class ModelAdapter:
 
         phase = math.sin(time.monotonic() * 0.5)
         return [DroneAction(roll=128, pitch=128, throttle=128 + int(4 * phase), yaw=128) for _ in observations]
-

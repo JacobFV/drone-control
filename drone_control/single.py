@@ -22,7 +22,6 @@ COMMANDS = [
     "land",
     "stop",
     "emergency_stop",
-    "kill",
     "axis-test",
     "axis_test",
     "throttle-sweep",
@@ -46,7 +45,7 @@ def action_for_command(command: str) -> DroneAction:
         return DroneAction(land=True)
     if command == "stop":
         return DroneAction(throttle=0)
-    if command in {"emergency_stop", "kill"}:
+    if command == "emergency_stop":
         return DroneAction.motor_stop()
     raise ValueError(f"unknown command {command!r}")
 
