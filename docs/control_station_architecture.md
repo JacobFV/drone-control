@@ -21,6 +21,9 @@ The blob store owns:
 - raw UDP captures
 - pcaps
 - logs
+- pose tracks
+- reconstruction datasets
+- Gaussian splat export directories
 - future encoded video files
 
 The `data/` directory is intentionally gitignored.
@@ -45,7 +48,17 @@ Current endpoints:
 - `GET /api/flights/<flight-id>/session`
 - `POST /api/flights/<flight-id>/session/start`
 - `POST /api/flights/<flight-id>/session/stop`
+- `GET /api/flights/<flight-id>/pose/status`
+- `GET /api/flights/<flight-id>/pose/track`
+- `POST /api/flights/<flight-id>/pose/compute`
+- `GET /api/flights/<flight-id>/reconstruction/status`
+- `POST /api/flights/<flight-id>/reconstruction/start`
+- `POST /api/flights/<flight-id>/reconstruction/stop`
 - `GET /api/records/<record-id>/mjpeg`
+- `GET /api/records/<record-id>/artifact`
+- `GET /api/records/<record-id>/splat-viewer`
+- `POST /api/records/<record-id>/export`
+- `POST /api/records/<record-id>/reveal`
 - `GET /api/wifi/capabilities`
 - `GET /api/wifi/interfaces`
 - `GET /api/wifi/access-points`
@@ -71,6 +84,102 @@ imports that directory into the blob store as a `frames` record when stopped.
 There is no synthetic frame fallback. A `directory` source exists for repeatable
 tests and review-file import. The app-facing Start Capture action uses the
 `live` source, which opens the drone RTSP/RTP camera path.
+
+## Pose Track Path
+
+The pose track is the bridge between captured camera frames and any 3D scene
+workflow. It is stored as a `pose-track` record in the blob store and is served
+through the flight pose endpoints.
+
+For live sessions, the session recorder can expose a replayable frame source and
+pose status. For stored frame records, `POST /api/flights/<flight-id>/pose/compute`
+uses the local visual odometry estimator in `drone_control/pose_estimator.py`.
+The estimator depends on OpenCV and writes a JSONL pose track. Each pose includes
+the source frame index, translation, quaternion rotation, and quality metadata.
+
+The renderer treats a flight with frames but no stored pose track as
+`not_computed` when OpenCV is available. In that state it can automatically run
+the pose computation. The previous `NO ESTIMATOR` state is now reserved for the
+case where required estimator dependencies are unavailable or no usable frame
+record exists.
+
+## Gaussian Splat Reconstruction
+
+Gaussian splatting is implemented as an asynchronous backend job in
+`drone_control/reconstruction.py`. The UI surface is the right-sidebar Scene
+panel, not the black trajectory simulation view.
+
+The reconstruction flow is:
+
+1. Select a flight and a `frames` record.
+2. Optionally compute or select the latest `pose-track` record.
+3. `POST /api/flights/<flight-id>/reconstruction/start` starts a background
+   `ReconstructionJob`.
+4. The job copies a sampled image set into a Nerfstudio dataset directory.
+5. If a pose track exists, the job writes `transforms.json` and trains directly
+   from that frames-plus-poses dataset.
+6. If no pose track exists, the job runs `ns-process-data images`, which invokes
+   COLMAP to estimate camera poses.
+7. The job runs `ns-train splatfacto` with bounded `maxIterations`.
+8. The job runs `ns-export gaussian-splat`.
+9. The exported splat directory is imported as a `gaussian-splat` record.
+
+The Scene panel exposes:
+
+- `MAX IMG`: sampled image count for the dataset.
+- `STEPS`: `splatfacto` training iterations.
+- `BUILD SPLAT`: starts reconstruction.
+- `STOP`: terminates the active reconstruction process.
+- `VIEW`: opens the latest `gaussian-splat` record in an external viewer.
+
+Records of type `gaussian-splat` also get an inline `VIEW` button in the Records
+panel. The view opens `GET /api/records/<record-id>/splat-viewer`, an HTML page
+that loads `gsplat.js` from a CDN and fetches the local artifact through
+`GET /api/records/<record-id>/artifact`.
+
+This architecture deliberately separates the two 3D views:
+
+- The simulation view displays trajectory, pose, and camera path state.
+- The Gaussian splat viewer displays the reconstructed scene artifact.
+
+## Reconstruction Dependencies
+
+Runtime Python dependencies live in the single top-level `requirements.txt`.
+There is no separate 3D requirements file.
+
+The repeatable setup entry point is:
+
+```bash
+tools/setup_reconstruction_deps.sh
+```
+
+That script creates or updates `.venv`, installs apt packages, installs Python
+requirements, verifies Nerfstudio command-line tools, and builds Open3D from
+source on this ARM/aarch64 machine when a compatible wheel is not available.
+
+The dependency roles are:
+
+- `nerfstudio`: provides the `splatfacto` training pipeline and the
+  `ns-process-data`, `ns-train`, and `ns-export` commands.
+- `gsplat`: the training-side Gaussian splatting implementation pulled by
+  Nerfstudio.
+- `pymeshlab`: imported by Nerfstudio's exporter path.
+- `open3d`: native geometry/point-cloud dependency used by Nerfstudio and its
+  supporting tooling.
+- `colmap`: used only when the reconstruction job must estimate poses from
+  images because no pose track exists.
+
+On this machine, Open3D is built under `vendor/Open3D` with build output under
+`vendor/Open3D-build`; both are gitignored. The script also patches Open3D's
+runtime dependency on `libidn2.so.0` after the source-built wheel is installed,
+because the bundled static curl build leaves `idn2_*` symbols unresolved on this
+platform.
+
+Nerfstudio checkpoints are generated locally by the training subprocess.
+PyTorch 2.6+ defaults `torch.load()` to `weights_only=True`, which breaks
+Nerfstudio's exporter for those trusted local checkpoints. Reconstruction
+subprocesses set `TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1` so `ns-export` can load the
+checkpoint it just produced.
 
 ## Drone Identity
 
@@ -169,3 +278,5 @@ The Electron UI now exposes:
 - frame-sequence import from repository-local paths
 - frame-record reveal and export actions for MJPEG and MP4, with MP4 requiring
   `ffmpeg`
+- pose-track status, automatic compute, and trajectory display
+- Gaussian splat reconstruction controls and external `gsplat.js` viewer launch

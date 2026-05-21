@@ -246,6 +246,40 @@ python3 -m drone_control.single --iface wlP9s9 --dry-run --seconds 0.2
 python3 -m drone_control.swarm --config config/drones.example.json --dry-run --seconds 0.3
 ```
 
+## Control Station App
+
+Run the Electron app from the repository root:
+
+```bash
+npm start
+```
+
+Electron starts the Python service automatically and prefers `.venv/bin/python`
+when it exists. Rebuild reconstruction dependencies with:
+
+```bash
+SUDO_PASSWORD='<sudo-password>' JOBS=4 tools/setup_reconstruction_deps.sh
+```
+
+The Scene panel in the right sidebar owns Gaussian splat reconstruction. It is
+separate from the black trajectory simulation view.
+
+Scene controls:
+
+- `MAX IMG`: maximum sampled frames for the reconstruction dataset.
+- `STEPS`: `splatfacto` training iterations.
+- `BUILD SPLAT`: start dataset preparation, training, export, and record import.
+- `STOP`: terminate the active reconstruction process.
+- `VIEW`: open the latest `gaussian-splat` record in the external `gsplat.js`
+  viewer.
+
+The Records panel also shows a `VIEW` button on individual `gaussian-splat`
+records.
+
+For a quick validation run, use a low `STEPS` value such as `20` or `100`. For a
+quality run, increase `STEPS` substantially; Nerfstudio's default `splatfacto`
+training length is `30000`.
+
 ## Live Single-Drone Loop
 
 Only run after confirming the right IP, port, and protocol from the probe:
