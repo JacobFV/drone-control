@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from drone_control.actions import DroneAction, action_from_dict
-from drone_control.perception.state import FrameMetadata, MapSummary, PoseEstimate
+from drone_control.perception.state import FrameMetadata, ImuSample, MapSummary, PoseEstimate
 from drone_control.runtime.events import DroneObservation
 
 
@@ -29,6 +29,7 @@ def _observation_from_dict(item: dict[str, Any]) -> DroneObservation:
     frame_data = item.get("latestFrame")
     pose_data = item.get("pose")
     map_data = item.get("mapSummary")
+    imu_data = item.get("imu")
     return DroneObservation(
         timestamp=float(item.get("timestamp", 0.0)),
         drone_id=str(item.get("droneId", "")),
@@ -55,6 +56,13 @@ def _observation_from_dict(item: dict[str, Any]) -> DroneObservation:
             confidence=float(pose_data.get("confidence", 0.0)),
         )
         if isinstance(pose_data, dict)
+        else None,
+        imu=ImuSample(
+            timestamp=imu_data.get("timestamp"),
+            acceleration=tuple(imu_data["acceleration"]) if isinstance(imu_data.get("acceleration"), list) else None,
+            gyro=tuple(imu_data["gyro"]) if isinstance(imu_data.get("gyro"), list) else None,
+        )
+        if isinstance(imu_data, dict)
         else None,
         map_summary=MapSummary(
             state=str(map_data.get("state", "none")),

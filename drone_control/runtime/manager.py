@@ -10,9 +10,11 @@ from typing import Any
 
 from drone_control.config import DroneConfig
 from drone_control.controllers.base import DisabledController, SafetyConstraints
+from drone_control.controllers.local_vla import LocalVLAClient, LocalVLAConfig
 from drone_control.controllers.manual import ManualController
 from drone_control.controllers.scripted import scripted_controller
 from drone_control.controllers.text_command import TextCommandController
+from drone_control.controllers.vla import VLAController
 from drone_control.coordinator.tasks import Assignment, MissionProgress
 from drone_control.protocols import make_protocol
 from drone_control.transport import make_drone_link
@@ -27,6 +29,8 @@ class RuntimeManagerConfig:
     control_hz: float = 20.0
     dry_run: bool = True
     enable_io: bool = False
+    local_vla_command: list[str] | None = None
+    local_vla_timeout_seconds: float = 0.25
 
 
 class RuntimeManager:
@@ -82,6 +86,18 @@ class RuntimeManager:
         key = mode.strip().lower()
         if key == "manual":
             runtime.set_controller(self._manual[drone_id])
+            return
+        if key == "vla":
+            if not self.config.local_vla_command:
+                runtime.set_controller(VLAController(model_step=None))
+                return
+            client = LocalVLAClient(
+                LocalVLAConfig(
+                    command=self.config.local_vla_command,
+                    timeout_seconds=self.config.local_vla_timeout_seconds,
+                )
+            )
+            runtime.set_controller(VLAController(model_step=client.step))
             return
         if key in {"disabled", "off"}:
             runtime.set_controller(DisabledController())
@@ -162,6 +178,7 @@ class RuntimeManager:
             "running": any(item["running"] for item in drones),
             "dryRun": self.config.dry_run or not self.config.enable_io,
             "enableIo": self.config.enable_io,
+            "localVlaConfigured": bool(self.config.local_vla_command),
             "drones": drones,
             "events": list(self._events)[-50:],
         }

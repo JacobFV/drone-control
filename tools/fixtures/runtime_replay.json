@@ -22,6 +22,11 @@
         "quality": "tracking",
         "confidence": 0.8
       },
+      "imu": {
+        "timestamp": 1.0,
+        "acceleration": [0.0, 0.0, 9.81],
+        "gyro": [0.0, 0.0, 0.0]
+      },
       "mapSummary": {
         "state": "artifact",
         "recordId": "map-fixture",
@@ -48,6 +53,11 @@
         "rotation": [0.0, 0.0, 0.0, 1.0],
         "quality": "tracking",
         "confidence": 0.82
+      },
+      "imu": {
+        "timestamp": 1.1,
+        "acceleration": [0.05, 0.0, 9.8],
+        "gyro": [0.0, 0.01, 0.0]
       },
       "mapSummary": {
         "state": "artifact",

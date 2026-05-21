@@ -5,7 +5,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from drone_control.actions import DroneAction
-from drone_control.perception.state import FrameMetadata, MapSummary, PoseEstimate
+from drone_control.perception.state import FrameMetadata, ImuSample, MapSummary, PoseEstimate
 
 
 @dataclass(frozen=True, slots=True)
@@ -15,6 +15,7 @@ class DroneObservation:
     link_state: str
     latest_frame: FrameMetadata | None = None
     pose: PoseEstimate | None = None
+    imu: ImuSample | None = None
     map_summary: MapSummary | None = None
     battery: float | None = None
     confidence: float = 0.0
@@ -30,6 +31,7 @@ class DroneObservation:
             "linkState": self.link_state,
             "latestFrame": self.latest_frame.as_dict() if self.latest_frame else None,
             "pose": self.pose.as_dict() if self.pose else None,
+            "imu": self.imu.as_dict() if self.imu else None,
             "mapSummary": self.map_summary.as_dict() if self.map_summary else None,
             "battery": self.battery,
             "confidence": self.confidence,

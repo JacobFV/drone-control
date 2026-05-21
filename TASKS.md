@@ -12,14 +12,14 @@ Implemented:
 - multi-drone runtime manager and event fan-out in
   `drone_control/runtime/manager.py`
 - controller contracts, scripted controllers, manual adapter, shared safety
-  wrapper, text-command controller, and strict structured VLA adapter in
-  `drone_control/controllers/`
+  wrapper, text-command controller, process-backed local VLA client, and strict
+  structured VLA adapter in `drone_control/controllers/`
 - typed perception state, frame-source adapters, and estimator adapter boundary
-  in `drone_control/perception/`, plus map-summary adapters for stored scene
-  artifacts
-- mission/task/assignment models, scheduler, and strict VLM adapter in
-  `drone_control/coordinator/`; mission assignments now update per-drone
-  runtime safety constraints instead of remaining display-only
+  in `drone_control/perception/`, plus IMU file extraction, perception
+  aggregation, and map-summary adapters for stored scene artifacts
+- mission/task/assignment models, scheduler, HTTP internet-side VLM client, and
+  strict VLM adapter in `drone_control/coordinator/`; mission assignments now
+  update per-drone runtime safety constraints instead of remaining display-only
 - `swarm.py` now uses `RuntimeManager` instead of a duplicate packet loop, so
   CLI, service, tests, safety, and event emission share one runtime path
 - service endpoints for runtime status, runtime events, controller selection,
@@ -27,9 +27,11 @@ Implemented:
   mission progress
 - Electron runtime panel showing link type/state, controller, safety state,
   observation confidence, active max throttle, and coordinator assignment
-- replay fixtures and dry-run runtime tests covering no-camera, frame+pose,
-  safety clamping, two-drone manager behavior, coordinator fault scenarios,
-  VLA schema validation, VLM assignment validation, and replay loading
+- replay fixtures and dry-run runtime tests covering no-camera,
+  frame+pose+IMU+map, safety clamping, two-drone manager behavior, coordinator
+  fault scenarios, process-backed VLA, HTTP VLM, VLA schema validation, VLM
+  assignment validation, IMU extraction, perception aggregation, and replay
+  loading
 
 Still external hardware/model bring-up:
 
@@ -38,8 +40,8 @@ Still external hardware/model bring-up:
   available
 - verify runtime packet emission with `DRONE_RUNTIME_ENABLE_IO=1` in a
   controlled test area
-- supply real VLA/VLM model clients and credentials; current adapters enforce
-  the structured contract and fail safely when no model is configured
+- configure production VLA/VLM endpoints and credentials:
+  `DRONE_LOCAL_VLA_COMMAND`, `DRONE_VLM_ENDPOINT`, and `DRONE_VLM_API_KEY`
 
 ## Starting Baseline
 

@@ -12,6 +12,7 @@ from drone_control.controllers.base import DroneController, SafetyConstraints
 from drone_control.controllers.safety import SafetyController
 from drone_control.perception.estimator import NullPoseEstimator, PoseEstimator
 from drone_control.perception.frames import FrameMetadataSource, StaticFrameSource
+from drone_control.perception.pipeline import ImuSource, NullImuSource, PerceptionPipeline
 from drone_control.perception.state import MapSummary
 from drone_control.protocols import PacketProtocol
 from drone_control.transport import DroneLink
@@ -62,7 +63,9 @@ class DroneRuntime:
         constraints: SafetyConstraints | None = None,
         frame_source: FrameMetadataSource | None = None,
         pose_estimator: PoseEstimator | None = None,
+        imu_source: ImuSource | None = None,
         map_summary: MapSummary | None = None,
+        perception: PerceptionPipeline | None = None,
         control_hz: float = 20.0,
         dry_run: bool = False,
         link_type: str = "unknown",
@@ -71,9 +74,12 @@ class DroneRuntime:
         self.protocol = protocol
         self.link = link
         self.controller = SafetyController(controller, constraints)
-        self.frame_source = frame_source or StaticFrameSource()
-        self.pose_estimator = pose_estimator or NullPoseEstimator()
-        self.map_summary = map_summary or MapSummary()
+        self.perception = perception or PerceptionPipeline(
+            frame_source=frame_source or StaticFrameSource(),
+            pose_estimator=pose_estimator or NullPoseEstimator(),
+            imu_source=imu_source or NullImuSource(),
+            map_summary=map_summary or MapSummary(),
+        )
         self.control_hz = max(1.0, float(control_hz))
         self.link_type = link_type
         self.dry_run = dry_run
@@ -195,14 +201,12 @@ class DroneRuntime:
             time.sleep(max(0.0, interval - elapsed))
 
     def _observe(self) -> DroneObservation:
-        frame = self.frame_source.latest()
-        pose = self.pose_estimator.latest_pose()
+        perception = self.perception.status()
         confidence = max(
             0.0,
             min(
                 1.0,
-                (0.35 if frame else 0.0)
-                + (pose.confidence if pose else 0.0)
+                perception.confidence
                 + (0.15 if self.link_state in {"connected", "dry_run"} else 0.0),
             ),
         )
@@ -210,9 +214,10 @@ class DroneRuntime:
             timestamp=time.time(),
             drone_id=self.drone_id,
             link_state=self.link_state,
-            latest_frame=frame,
-            pose=pose,
-            map_summary=self.map_summary,
+            latest_frame=perception.frame,
+            pose=perception.pose,
+            imu=perception.imu,
+            map_summary=perception.map_summary,
             battery=None,
             confidence=confidence,
         )

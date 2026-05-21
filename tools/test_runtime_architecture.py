@@ -2,11 +2,17 @@ from __future__ import annotations
 
 import time
 import unittest
+import json
+import tempfile
+import threading
 from pathlib import Path
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from drone_control.actions import DroneAction
 from drone_control.config import DroneConfig
+from drone_control.controllers.local_vla import LocalVLAClient, LocalVLAConfig
 from drone_control.controllers.vla import VLAController, parse_vla_output
+from drone_control.coordinator.http_vlm import HttpVLMClient, HttpVLMConfig
 from drone_control.coordinator.scheduler import CoordinatorScheduler
 from drone_control.coordinator.tasks import Mission
 from drone_control.coordinator.vlm import VLMCoordinator
@@ -15,7 +21,9 @@ from drone_control.controllers.manual import ManualController
 from drone_control.controllers.safety import SafetyController
 from drone_control.controllers.scripted import neutral_controller, takeoff_controller
 from drone_control.perception.frames import StaticFrameSource
-from drone_control.perception.state import FrameMetadata, PoseEstimate
+from drone_control.perception.imu import FileImuSource, imu_samples_from_csv, imu_samples_from_jsonl
+from drone_control.perception.pipeline import PerceptionPipeline
+from drone_control.perception.state import FrameMetadata, ImuSample, MapSummary, PoseEstimate
 from drone_control.protocols import make_protocol
 from drone_control.runtime.drone_runtime import DroneRuntime
 from drone_control.runtime.events import DroneObservation
@@ -41,6 +49,11 @@ class FakeLink:
 class StaticPoseEstimator:
     def latest_pose(self) -> PoseEstimate | None:
         return PoseEstimate(frame_index=7, translation=(1.0, 2.0, 3.0), rotation_xyzw=(0.0, 0.0, 0.0, 1.0), confidence=0.5)
+
+
+class StaticImuSource:
+    def latest(self) -> ImuSample | None:
+        return ImuSample(timestamp=1.0, acceleration=(0.0, 0.0, 9.81), gyro=(0.0, 0.0, 0.0))
 
 
 class RuntimeArchitectureTest(unittest.TestCase):
@@ -71,12 +84,16 @@ class RuntimeArchitectureTest(unittest.TestCase):
             constraints=SafetyConstraints(armed=True, require_heartbeat=False),
             frame_source=StaticFrameSource(FrameMetadata(index=3, width=640, height=360, source="fixture")),
             pose_estimator=StaticPoseEstimator(),
+            imu_source=StaticImuSource(),
+            map_summary=MapSummary(state="artifact", record_id="map-a", keyframes=3),
             dry_run=True,
         )
         runtime.step_once()
         observation = runtime.snapshot().observation
         self.assertEqual(observation.latest_frame.index if observation.latest_frame else None, 3)
         self.assertEqual(observation.pose.frame_index if observation.pose else None, 7)
+        self.assertIsNotNone(observation.imu)
+        self.assertEqual(observation.map_summary.record_id if observation.map_summary else None, "map-a")
         self.assertGreater(observation.confidence, 0.8)
 
     def test_safety_clamps_controller_output_before_action(self) -> None:
@@ -182,6 +199,85 @@ class RuntimeArchitectureTest(unittest.TestCase):
         progress = coordinator.step(Mission("mission-vlm", "inspection"), [{"droneId": "drone-a"}])
         self.assertEqual(progress.state, "faulted")
         self.assertTrue(progress.notes)
+
+    def test_local_vla_client_executes_json_lines_process(self) -> None:
+        command = [
+            "python3",
+            "-u",
+            "-c",
+            (
+                "import json,sys\n"
+                "for line in sys.stdin:\n"
+                " p=json.loads(line)\n"
+                " print(json.dumps({'action': {'roll': 128, 'pitch': 129, 'throttle': 130, 'yaw': 128}, "
+                "'confidence': 0.7, 'reason': 'local'}), flush=True)\n"
+            ),
+        ]
+        client = LocalVLAClient(LocalVLAConfig(command=command, timeout_seconds=1.0))
+        try:
+            result = client.step({"observation": {"droneId": "drone-a"}})
+        finally:
+            client.close()
+        action, confidence, reason = parse_vla_output(result)
+        self.assertEqual(action.throttle, 130)
+        self.assertEqual(confidence, 0.7)
+        self.assertEqual(reason, "local")
+
+    def test_http_vlm_client_executes_post_contract(self) -> None:
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                length = int(self.headers.get("Content-Length", "0"))
+                payload = json.loads(self.rfile.read(length).decode())
+                self.server.payload = payload  # type: ignore[attr-defined]
+                body = json.dumps({
+                    "state": "running",
+                    "assignments": [{
+                        "droneId": "drone-a",
+                        "role": "lead",
+                        "task": "survey",
+                        "constraints": {"maxThrottle": 144, "minConfidence": 0.2},
+                    }],
+                    "notes": ["ok"],
+                }).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, fmt: str, *args: object) -> None:
+                return
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            client = HttpVLMClient(HttpVLMConfig(endpoint=f"http://127.0.0.1:{server.server_port}/vlm"))
+            result = client.step({"mission": {"id": "m"}, "drones": [{"droneId": "drone-a"}]})
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=1.0)
+        self.assertEqual(result["assignments"][0]["constraints"]["maxThrottle"], 144)
+
+    def test_imu_file_extractors_feed_perception_pipeline(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            jsonl = root / "imu.jsonl"
+            csv_path = root / "imu.csv"
+            jsonl.write_text('{"timestamp": 1.0, "ax": 0, "ay": 0, "az": 9.81, "gx": 0, "gy": 0, "gz": 0}\n')
+            csv_path.write_text("timestamp,ax,ay,az,gx,gy,gz\n2.0,0.1,0,9.8,0,0.01,0\n")
+            self.assertEqual(len(imu_samples_from_jsonl(jsonl)), 1)
+            self.assertEqual(len(imu_samples_from_csv(csv_path)), 1)
+            pipeline = PerceptionPipeline(
+                frame_source=StaticFrameSource(FrameMetadata(index=1)),
+                pose_estimator=StaticPoseEstimator(),
+                imu_source=FileImuSource(csv_path),
+                map_summary=MapSummary(state="artifact", record_id="map"),
+            )
+            status = pipeline.status()
+            self.assertIsNotNone(status.imu)
+            self.assertGreaterEqual(status.confidence, 0.9)
 
 
 if __name__ == "__main__":

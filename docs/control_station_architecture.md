@@ -334,17 +334,21 @@ verified packet and transport layer:
   manual axes forwarding, arm/disarm/heartbeat calls, coordinator-assignment
   constraint application, and event fan-out.
 - `perception.state` defines frame, pose, IMU, map-summary, and confidence
-  models used in runtime snapshots. `perception.maps` summarizes stored map and
-  scene records without turning reconstruction into a realtime motor path.
-- `controllers.base`, `scripted`, `manual`, `text_command`, `safety`, and `vla` define the
+  models used in runtime snapshots. `perception.imu` extracts IMU samples from
+  JSONL/CSV logs, `perception.pipeline` aggregates frame/pose/IMU/map status,
+  and `perception.maps` summarizes stored map and scene records without turning
+  reconstruction into a realtime motor path.
+- `controllers.base`, `scripted`, `manual`, `text_command`, `local_vla`,
+  `safety`, and `vla` define the
   bounded action-request contract. Scripted and manual controllers share the
-  same safety wrapper. The VLA adapter validates structured output, includes
-  recent actions in the model input, and faults to motor stop when unavailable
-  or invalid.
+  same safety wrapper. The local VLA client is a JSON-lines subprocess adapter.
+  The VLA adapter validates structured output, includes recent actions in the
+  model input, and faults to motor stop when unavailable or invalid.
 - `coordinator.tasks`, `scheduler`, and `vlm` define mission, role, assignment,
   constraint, and progress models. The scheduler assigns summary-level roles;
   it never touches packets or motor commands. VLM output is schema-checked and
-  cannot assign unknown drones.
+  cannot assign unknown drones. `coordinator.http_vlm` is the internet-side JSON
+  POST adapter for a hosted coordinator.
 - `swarm.py` is now a CLI facade over `RuntimeManager`, not a duplicate packet
   loop. The service and CLI share the same safety/runtime path.
 
@@ -374,17 +378,21 @@ drone_control/runtime/
 drone_control/perception/
   frames.py          frame sources and timestamps
   state.py           pose, IMU, map, and confidence data models
+  imu.py             JSONL/CSV IMU extraction
+  pipeline.py        frame, pose, IMU, and map aggregation
   estimator.py       realtime estimator interface
 
 drone_control/controllers/
   base.py            controller protocol
   manual.py          manual controller adapter
   scripted.py        deterministic test controller
+  local_vla.py       JSON-lines local model process client
   vla.py             single-drone VLA adapter
   safety.py          command clamping, heartbeat, stop, fault behavior
 
 drone_control/coordinator/
   tasks.py           mission, role, and assignment data models
+  http_vlm.py        internet-side VLM JSON POST client
   vlm.py             swarm-level VLM adapter
   scheduler.py       coordinator loop and per-drone constraints
 ```
@@ -394,6 +402,19 @@ set. The default service runtime is dry-run (`DRONE_RUNTIME_DRY_RUN=1`), and it
 loads `DRONE_RUNTIME_CONFIG`, then ignored `config/drones.local.json`, then the
 tracked example config. This lets the UI exercise controller switching and
 mission progress on a fresh checkout without opening serial or UDP links.
+
+Model integration is configured through explicit environment variables:
+
+- `DRONE_LOCAL_VLA_COMMAND`: command string or JSON string list for a local
+  JSON-lines VLA process.
+- `DRONE_LOCAL_VLA_TIMEOUT`: per-step timeout for that process.
+- `DRONE_VLM_ENDPOINT`: internet-side VLM coordinator endpoint.
+- `DRONE_VLM_API_KEY`: optional bearer token for the VLM endpoint.
+- `DRONE_VLM_TIMEOUT`: HTTP timeout for coordinator calls.
+
+If those are absent, the runtime remains usable with manual, scripted, and
+text-command controllers, while VLA/VLM paths fail closed or fall back to the
+deterministic scheduler.
 
 Replay and simulation tests use `tools/fixtures/runtime_replay.json` through
 `runtime.replay`. Those fixtures validate the controller/coordinator contracts

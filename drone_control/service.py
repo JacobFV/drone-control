@@ -7,6 +7,7 @@ import mimetypes
 import os
 import platform
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -31,8 +32,10 @@ from drone_control.manual_transport import ManualDroneTransport
 from drone_control.pose_estimator import estimator_available, load_pose_track, replay_directory
 from drone_control.reconstruction import ReconstructionManager, find_splat_artifact
 from drone_control.config import load_config
+from drone_control.coordinator.http_vlm import HttpVLMClient, HttpVLMConfig
 from drone_control.coordinator.scheduler import CoordinatorScheduler
 from drone_control.coordinator.tasks import Mission
+from drone_control.coordinator.vlm import VLMCoordinator
 from drone_control.runtime.manager import RuntimeManager, RuntimeManagerConfig
 from drone_control.store import ControlStationStore
 
@@ -770,10 +773,13 @@ class ControlStationServer(ThreadingHTTPServer):
                 control_hz=float(os.environ.get("DRONE_RUNTIME_HZ", "20")),
                 dry_run=env_bool("DRONE_RUNTIME_DRY_RUN", True),
                 enable_io=env_bool("DRONE_RUNTIME_ENABLE_IO", False),
+                local_vla_command=env_command("DRONE_LOCAL_VLA_COMMAND"),
+                local_vla_timeout_seconds=float(os.environ.get("DRONE_LOCAL_VLA_TIMEOUT", "0.25")),
             )
         )
         self.runtime.configure_drones(load_runtime_configs())
         self.coordinator = CoordinatorScheduler(tick_hz=float(os.environ.get("DRONE_COORDINATOR_HZ", "1")))
+        self.vlm = make_vlm_coordinator()
         self.wifi_previous: dict[str, str] = {}
         self.manual_loop_running = True
         self.manual_thread = threading.Thread(target=self._manual_loop, name="manual-control-loop", daemon=True)
@@ -824,6 +830,8 @@ class ControlStationServer(ThreadingHTTPServer):
                 "dryRun": self.runtime.config.dry_run,
                 "enableIo": self.runtime.config.enable_io,
                 "controlHz": self.runtime.config.control_hz,
+                "localVlaConfigured": bool(self.runtime.config.local_vla_command),
+                "internetVlmConfigured": self.vlm.available,
             },
         }
 
@@ -834,7 +842,18 @@ class ControlStationServer(ThreadingHTTPServer):
 
     def mission_progress(self) -> dict[str, object]:
         snapshots = self.runtime.snapshot_objects()
-        progress = self.coordinator.step(snapshots)
+        if self.coordinator.mission is not None and self.vlm.available:
+            progress = self.vlm.step(self.coordinator.mission, [snapshot.as_dict() for snapshot in snapshots])
+            if progress.state == "faulted":
+                fallback = self.coordinator.step(snapshots)
+                progress = type(progress)(
+                    mission_id=progress.mission_id,
+                    state=fallback.state,
+                    assignments=fallback.assignments,
+                    notes=[*progress.notes, "vlm_failed_using_scheduler", *fallback.notes],
+                )
+        else:
+            progress = self.coordinator.step(snapshots)
         self.runtime.apply_mission_progress(progress)
         return progress.as_dict()
 
@@ -1153,6 +1172,33 @@ def load_runtime_configs() -> list[object]:
         if path.is_file():
             return load_config(path)
     return []
+
+
+def make_vlm_coordinator() -> VLMCoordinator:
+    endpoint = os.environ.get("DRONE_VLM_ENDPOINT", "")
+    if not endpoint:
+        return VLMCoordinator()
+    client = HttpVLMClient(
+        HttpVLMConfig(
+            endpoint=endpoint,
+            api_key=os.environ.get("DRONE_VLM_API_KEY", ""),
+            timeout_seconds=float(os.environ.get("DRONE_VLM_TIMEOUT", "5")),
+        )
+    )
+    return VLMCoordinator(model_step=client.step)
+
+
+def env_command(name: str) -> list[str] | None:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        return shlex.split(raw)
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError(f"{name} must be a JSON string list or shell-like command string")
+    return value
 
 
 def env_bool(name: str, default: bool) -> bool:

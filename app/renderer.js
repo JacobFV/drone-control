@@ -1423,6 +1423,7 @@ function selectedRuntimeDrone() {
 function runtimeModeValue(controller) {
   const key = String(controller).replace(/^safety:/, "");
   if (key === "manual") return "manual";
+  if (key === "vla") return "vla";
   if (key === "disabled") return "disabled";
   if (key.includes("takeoff")) return "takeoff";
   if (key.includes("land")) return "land";
