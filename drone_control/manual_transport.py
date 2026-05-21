@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from drone_control.actions import DroneAction
 from drone_control.protocols import PacketProtocol, make_protocol
-from drone_control.transport import UdpDroneLink, UdpTarget
+from drone_control.transport import DroneLink, UdpTarget, make_drone_link
 
 
 def env_bool(name: str, default: bool = False) -> bool:
@@ -45,12 +45,24 @@ class ManualDroneTransport:
         port: int,
         protocol: str,
         bind_device: bool,
+        link_type: str = "udp",
+        ssid: str = "",
+        password: str = "",
+        serial_port: str = "",
+        serial_baud: int = 921600,
+        esp_connect_timeout: float = 12.0,
     ) -> None:
         self.enabled = enabled
         self.target = UdpTarget(ip=ip, port=port, iface=iface or None)
         self.protocol: PacketProtocol = make_protocol(protocol)
         self.bind_device = bind_device
-        self.link: UdpDroneLink | None = None
+        self.link_type = link_type
+        self.ssid = ssid
+        self.password = password
+        self.serial_port = serial_port
+        self.serial_baud = serial_baud
+        self.esp_connect_timeout = esp_connect_timeout
+        self.link: DroneLink | None = None
         self.sent = 0
         self.errors = 0
         self.last_error: str | None = None
@@ -64,6 +76,12 @@ class ManualDroneTransport:
             port=int(os.environ.get("DRONE_PORT", "7099")),
             protocol=os.environ.get("DRONE_PROTOCOL", "wifi_8k_prefixed_short"),
             bind_device=env_bool("DRONE_BIND_DEVICE", False),
+            link_type=os.environ.get("DRONE_LINK_TYPE", "udp"),
+            ssid=os.environ.get("DRONE_SSID", ""),
+            password=os.environ.get("DRONE_WIFI_PASSWORD", ""),
+            serial_port=os.environ.get("DRONE_ESP_SERIAL_PORT", ""),
+            serial_baud=int(os.environ.get("DRONE_ESP_SERIAL_BAUD", "921600")),
+            esp_connect_timeout=float(os.environ.get("DRONE_ESP_CONNECT_TIMEOUT", "12")),
         )
 
     def configure(
@@ -75,6 +93,12 @@ class ManualDroneTransport:
         port: int | None = None,
         protocol: str | None = None,
         bind_device: bool | None = None,
+        link_type: str | None = None,
+        ssid: str | None = None,
+        password: str | None = None,
+        serial_port: str | None = None,
+        serial_baud: int | None = None,
+        esp_connect_timeout: float | None = None,
     ) -> None:
         target_changed = False
         if enabled is not None:
@@ -91,6 +115,24 @@ class ManualDroneTransport:
         if bind_device is not None and bind_device != self.bind_device:
             self.bind_device = bind_device
             target_changed = True
+        if link_type is not None and link_type != self.link_type:
+            self.link_type = link_type
+            target_changed = True
+        if ssid is not None and ssid != self.ssid:
+            self.ssid = ssid
+            target_changed = True
+        if password is not None and password != self.password:
+            self.password = password
+            target_changed = True
+        if serial_port is not None and serial_port != self.serial_port:
+            self.serial_port = serial_port
+            target_changed = True
+        if serial_baud is not None and serial_baud != self.serial_baud:
+            self.serial_baud = serial_baud
+            target_changed = True
+        if esp_connect_timeout is not None and esp_connect_timeout != self.esp_connect_timeout:
+            self.esp_connect_timeout = esp_connect_timeout
+            target_changed = True
         if target_changed:
             self.close()
 
@@ -102,6 +144,11 @@ class ManualDroneTransport:
             "port": self.target.port,
             "protocol": self.protocol.name,
             "bindDevice": self.bind_device,
+            "linkType": self.link_type,
+            "ssid": self.ssid,
+            "serialPort": self.serial_port,
+            "serialBaud": self.serial_baud,
+            "espConnectTimeout": self.esp_connect_timeout,
         }
 
     def send(self, action: DroneAction | None) -> bool:
@@ -109,7 +156,7 @@ class ManualDroneTransport:
             return False
         try:
             if self.link is None:
-                self.link = UdpDroneLink(self.target, bind_device=self.bind_device)
+                self.link = make_drone_link(self)
             self.link.send(self.protocol.build(action))
             self.sent += 1
             self.last_error = None
@@ -127,8 +174,10 @@ class ManualDroneTransport:
         self.link = None
 
     def status(self) -> ManualTransportStatus:
-        target = f"{self.target.ip}:{self.target.port}"
-        if self.target.iface:
+        target = f"{self.link_type} {self.target.ip}:{self.target.port}"
+        if self.link_type == "esp_serial":
+            target = f"{self.serial_port or '-'} -> {self.ssid or '-'} -> {self.target.ip}:{self.target.port}"
+        elif self.target.iface:
             target = f"{self.target.iface} -> {target}"
         return ManualTransportStatus(
             enabled=self.enabled,
@@ -138,3 +187,15 @@ class ManualDroneTransport:
             errors=self.errors,
             last_error=self.last_error,
         )
+
+    @property
+    def ip(self) -> str:
+        return self.target.ip
+
+    @property
+    def port(self) -> int:
+        return self.target.port
+
+    @property
+    def iface(self) -> str | None:
+        return self.target.iface

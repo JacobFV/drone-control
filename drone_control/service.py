@@ -309,6 +309,12 @@ class ControlStationHandler(BaseHTTPRequestHandler):
                     port=optional_int(payload, "port"),
                     protocol=optional_str(payload, "protocol"),
                     bind_device=optional_bool(payload, "bindDevice"),
+                    link_type=optional_str(payload, "linkType"),
+                    ssid=optional_str(payload, "ssid"),
+                    password=optional_str(payload, "password"),
+                    serial_port=optional_str(payload, "serialPort"),
+                    serial_baud=optional_int(payload, "serialBaud"),
+                    esp_connect_timeout=optional_float(payload, "espConnectTimeout"),
                 )
             except (RuntimeError, ValueError) as exc:
                 self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
@@ -693,12 +699,20 @@ class ControlStationServer(ThreadingHTTPServer):
                 "bindDevice": env_bool("DRONE_CAMERA_BIND_DEVICE", False),
                 "useRtsp": env_bool("DRONE_CAMERA_USE_RTSP", True),
             },
-            "singleDroneActive": True,
+            "linkCapabilities": {
+                "mixedLinks": True,
+                "directUdp": True,
+                "espSerial": True,
+                "radioModel": "one independent radio association per drone AP",
+            },
             "reconstruction": self.reconstructions.tools_status(),
         }
 
     def send_manual_action(self, action: object | None) -> bool:
-        return self.manual_transport.send(action)
+        sent = self.manual_transport.send(action)
+        if sent:
+            self.manual.ack()
+        return sent
 
     def compute_pose_track_record(
         self,

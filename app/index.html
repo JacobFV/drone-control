@@ -177,7 +177,17 @@
             </div>
             <div class="form-grid">
               <label><input id="ioEnabled" type="checkbox" /> ENABLE PACKETS</label>
+              <label>LINK
+                <select id="manualLinkType">
+                  <option value="udp">DIRECT UDP</option>
+                  <option value="esp_serial">ESP SERIAL</option>
+                </select>
+              </label>
               <label>IFACE <input id="manualIface" type="text" /></label>
+              <label>ESP PORT <input id="manualSerialPort" type="text" placeholder="/dev/ttyUSB0" /></label>
+              <label>ESP BAUD <input id="manualSerialBaud" type="number" min="1200" max="3000000" /></label>
+              <label>SSID <input id="manualSsid" type="text" placeholder="WIFI_8K-..." /></label>
+              <label>PASS <input id="manualPassword" type="password" placeholder="optional" /></label>
               <label>IP <input id="manualIp" type="text" /></label>
               <label>PORT <input id="manualPort" type="number" min="1" max="65535" /></label>
               <label>PROTO <input id="manualProtocol" type="text" /></label>

@@ -70,7 +70,12 @@ const policyHeartbeat = document.getElementById("policyHeartbeat");
 const savePolicyButton = document.getElementById("savePolicyButton");
 const ioState = document.getElementById("ioState");
 const ioEnabled = document.getElementById("ioEnabled");
+const manualLinkType = document.getElementById("manualLinkType");
 const manualIface = document.getElementById("manualIface");
+const manualSerialPort = document.getElementById("manualSerialPort");
+const manualSerialBaud = document.getElementById("manualSerialBaud");
+const manualSsid = document.getElementById("manualSsid");
+const manualPassword = document.getElementById("manualPassword");
 const manualIp = document.getElementById("manualIp");
 const manualPort = document.getElementById("manualPort");
 const manualProtocol = document.getElementById("manualProtocol");
@@ -555,7 +560,12 @@ function renderNetwork() {
 function renderManualConfig() {
   const manual = state.config?.manual || state.manualStatus?.transport || {};
   ioEnabled.checked = Boolean(manual.enabled);
+  manualLinkType.value = manual.linkType ?? "udp";
   manualIface.value = manual.iface ?? ifaceSelect.value ?? "";
+  manualSerialPort.value = manual.serialPort ?? "";
+  manualSerialBaud.value = manual.serialBaud ?? 921600;
+  manualSsid.value = manual.ssid ?? selectedDrone()?.connection?.ssid ?? "";
+  if (!manualPassword.value) manualPassword.value = manual.password ?? "";
   manualIp.value = manual.ip ?? "192.168.1.1";
   manualPort.value = manual.port ?? 7099;
   manualProtocol.value = manual.protocol ?? "wifi_8k_prefixed_short";
@@ -853,7 +863,12 @@ async function refreshNetwork() {
 async function saveManualIoConfig() {
   const result = await safeRequest("POST", "/api/manual/config", {
     enabled: ioEnabled.checked,
+    linkType: manualLinkType.value,
     iface: manualIface.value.trim(),
+    serialPort: manualSerialPort.value.trim(),
+    serialBaud: Number(manualSerialBaud.value || 921600),
+    ssid: manualSsid.value.trim(),
+    password: manualPassword.value,
     ip: manualIp.value.trim(),
     port: Number(manualPort.value),
     protocol: manualProtocol.value.trim(),
@@ -876,7 +891,8 @@ async function savePolicy() {
     commandHz: Number(policyCommandHz.value),
     throttleSlewPerSecond: Number(policySlew.value),
     requireHeartbeat: policyHeartbeat.checked,
-    singleActiveDrone: true,
+    mixedLinkControl: true,
+    radioRequirement: "one independent radio link per drone",
   };
   const updated = await safeRequest("PATCH", `/api/flights/${flight.id}`, { policy });
   if (!updated) return;
