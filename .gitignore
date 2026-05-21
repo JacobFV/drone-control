@@ -8,3 +8,4 @@ logs/
 captures/
 camera_captures/
 .drone.env
+config/*.local.json
