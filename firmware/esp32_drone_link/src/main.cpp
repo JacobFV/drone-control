@@ -12,6 +12,7 @@ constexpr size_t kMaxPayload = 2048;
 
 constexpr uint8_t kMsgConfig = 0x01;
 constexpr uint8_t kMsgSend = 0x02;
+constexpr uint8_t kMsgScan = 0x03;
 constexpr uint8_t kMsgStatus = 0x81;
 constexpr uint8_t kMsgAck = 0x82;
 constexpr uint8_t kMsgError = 0x83;
@@ -154,6 +155,30 @@ void handleSend(const uint8_t *payload, uint16_t len) {
   }
 }
 
+void handleScan() {
+  bridgeReady = false;
+  udp.stop();
+  WiFi.disconnect(false, false);
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  const int count = WiFi.scanNetworks(/*async=*/false, /*hidden=*/true);
+  if (count < 0) {
+    sendText(kMsgError, "scan failed");
+    return;
+  }
+  for (int i = 0; i < count; ++i) {
+    String line = "SCAN ";
+    line += WiFi.SSID(i);
+    line += "\t";
+    line += String(WiFi.RSSI(i));
+    line += "\t";
+    line += String(static_cast<int>(WiFi.encryptionType(i)));
+    sendText(kMsgStatus, line);
+  }
+  sendText(kMsgStatus, "SCAN_DONE " + String(count));
+  WiFi.scanDelete();
+}
+
 void handleFrame(uint8_t type, const uint8_t *payload, uint16_t payloadLen) {
   switch (type) {
     case kMsgConfig:
@@ -161,6 +186,9 @@ void handleFrame(uint8_t type, const uint8_t *payload, uint16_t payloadLen) {
       break;
     case kMsgSend:
       handleSend(payload, payloadLen);
+      break;
+    case kMsgScan:
+      handleScan();
       break;
     default:
       sendText(kMsgError, "unknown message type");
