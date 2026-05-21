@@ -426,5 +426,5 @@ def _redacted_command(args: list[str]) -> list[str]:
 
 def _platform_notes(interface_count: int) -> str:
     if interface_count <= 1:
-        return "One usable Wi-Fi interface was detected. Use Ethernet, USB tethering, or another Wi-Fi adapter for internet while connected to a drone AP."
-    return "Multiple Wi-Fi interfaces were detected. Assign one interface per drone AP for simultaneous live control."
+        return "One usable PC Wi-Fi interface was detected. Direct UDP can use one drone AP at a time; add ESP32 bridges or another Wi-Fi adapter for simultaneous drones."
+    return "Multiple PC Wi-Fi interfaces were detected. Assign one direct UDP interface or one ESP32 bridge per drone AP for simultaneous live control."

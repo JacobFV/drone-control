@@ -354,10 +354,85 @@ that provide one.
 
 ## Multi-Drone Requirement
 
-Simultaneous two-drone control needs two Wi-Fi interfaces. Eight drones need
-eight interfaces or a namespace/router setup that still gives each drone its own
-radio link.
+Simultaneous control needs one independent radio link per drone AP. That can be
+a direct PC Wi-Fi interface, an isolated namespace/router interface, or one
+ESP32 bridge per drone.
 
-On a single-radio macOS or Windows laptop, treat the app as one active drone
-connection at a time. Use Ethernet, USB tethering, or a second Wi-Fi adapter if
-you need internet while connected to the drone AP.
+The swarm config can mix link types in one run. For example, two ESP32 bridges
+for the first two drones plus one direct PC Wi-Fi AP connection for a third:
+
+```json
+{
+  "drones": [
+    {
+      "id": "drone1",
+      "link_type": "esp_serial",
+      "serial_port": "/dev/ttyUSB0",
+      "ssid": "WIFI_8K-0c5b90",
+      "ip": "192.168.1.1",
+      "port": 7099,
+      "protocol": "wifi_8k_prefixed_short"
+    },
+    {
+      "id": "drone2",
+      "link_type": "esp_serial",
+      "serial_port": "/dev/ttyUSB1",
+      "ssid": "WIFI_8K-592b10",
+      "ip": "192.168.1.1",
+      "port": 7099,
+      "protocol": "wifi_8k_prefixed_short"
+    },
+    {
+      "id": "drone3",
+      "link_type": "udp",
+      "iface": "wlan2",
+      "ssid": "WIFI_8K-third",
+      "ip": "192.168.1.1",
+      "port": 7099,
+      "protocol": "wifi_8k_prefixed_short",
+      "bind_device": true
+    }
+  ]
+}
+```
+
+Build and flash each ESP32 bridge:
+
+```bash
+cd firmware/esp32_drone_link
+pio run -t upload
+```
+
+Run mixed simultaneous control:
+
+```bash
+python3 -m drone_control.swarm --config config/drones.example.json --command neutral
+```
+
+Manual IO can use the same link abstraction. Environment examples:
+
+```bash
+DRONE_SERVICE_ENABLE_IO=1 \
+DRONE_LINK_TYPE=esp_serial \
+DRONE_ESP_SERIAL_PORT=/dev/ttyUSB0 \
+DRONE_SSID=WIFI_8K-0c5b90 \
+DRONE_IP=192.168.1.1 \
+DRONE_PORT=7099 \
+DRONE_PROTOCOL=wifi_8k_prefixed_short \
+npm start
+```
+
+```bash
+DRONE_SERVICE_ENABLE_IO=1 \
+DRONE_LINK_TYPE=udp \
+DRONE_IFACE=wlan2 \
+DRONE_IP=192.168.1.1 \
+DRONE_PORT=7099 \
+DRONE_PROTOCOL=wifi_8k_prefixed_short \
+npm start
+```
+
+On a single-radio macOS or Windows laptop, direct PC Wi-Fi can associate with
+only one drone AP at a time. ESP32 bridges avoid that PC radio limit because
+each ESP32 owns one drone Wi-Fi association and the PC only talks to the bridge
+over USB.

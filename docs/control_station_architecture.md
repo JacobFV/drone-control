@@ -204,17 +204,21 @@ control path should enforce these rules in Python, not just in the UI:
 - No command is sent while disarmed.
 - Stop command is always accepted.
 - Any lost UI heartbeat ramps throttle to zero.
-- Any lost drone ACK/keepalive ramps throttle to zero.
+- Any missing local transport acceptance faults manual output to motor stop.
 - Throttle commands are rate-limited.
 - Maximum throttle is capped by a per-flight policy until deliberately raised.
 - Switching away from manual mode sends a ramped stop.
 - Closing the app sends a ramped stop when a manual session is active.
 
 The Electron control pad sends desired axes to the local service. The service
-holds the safety state machine and a 20 Hz command loop. UDP output is disabled
-by default; setting `DRONE_SERVICE_ENABLE_IO=1` enables packet emission through
-the configured `DRONE_IFACE`, `DRONE_IP`, `DRONE_PORT`, and `DRONE_PROTOCOL`.
-Opening the app without that flag cannot send motor packets.
+holds the safety state machine and a 20 Hz command loop. Packet output is
+disabled by default; setting `DRONE_SERVICE_ENABLE_IO=1` enables packet
+emission through the configured link. Direct UDP uses `DRONE_LINK_TYPE=udp`,
+`DRONE_IFACE`, `DRONE_IP`, `DRONE_PORT`, and `DRONE_PROTOCOL`. ESP32 bridge
+manual IO uses `DRONE_LINK_TYPE=esp_serial`, `DRONE_ESP_SERIAL_PORT`,
+`DRONE_ESP_SERIAL_BAUD`, `DRONE_SSID`, optional `DRONE_WIFI_PASSWORD`,
+`DRONE_IP`, `DRONE_PORT`, and `DRONE_PROTOCOL`. Opening the app without packet
+output enabled cannot send motor packets.
 
 ## Wi-Fi Concurrency
 
@@ -251,19 +255,26 @@ created while `wlP9s9` stayed connected to `CircularEconomy`, and the virtual
 interface saw `WIFI_8K-0c5b90` during scan. A full association attempt was not
 confirmed because the drone SSID was not visible on retry.
 
-For multiple simultaneous drones, the cleanest reliable path is still multiple
-Wi-Fi adapters, one managed interface per drone AP. Single-radio multi-interface
-support can be used opportunistically after a full connect/ping test passes.
+For multiple simultaneous drones, each drone still needs an independent radio
+association to its AP. The control process now abstracts that link, so a swarm
+can mix direct PC UDP links and ESP32 USB-serial bridge links. A direct UDP link
+uses a PC Wi-Fi interface bound to the drone AP. An ESP32 bridge link uses one
+ESP32 per drone; the ESP32 joins that drone AP and forwards PC-built control
+packets from USB serial to UDP.
+
+Single-radio multi-interface support can be used opportunistically after a full
+connect/ping test passes, but one ESP32 per drone is the cleaner way to add more
+drone AP links without adding PC Wi-Fi adapters.
 
 The service exposes Wi-Fi discovery and explicit connect/reconnect endpoints.
 `POST /api/wifi/connect` requires `confirmDisconnect: true` because a successful
 drone AP association can drop the app's internet path until the reconnect
 endpoint is called or NetworkManager restores the previous connection.
 
-On single-radio machines, the UI intentionally presents the system as one active
-drone connection at a time. Ethernet, USB tethering, or an additional Wi-Fi
-adapter can provide internet while the built-in Wi-Fi interface is associated
-with a drone AP.
+On single-radio machines, direct PC Wi-Fi association is still one drone AP at a
+time. Mixed-link operation is available by using ESP32 bridges for additional
+drone APs; each ESP32 owns one AP association and the PC talks to it over USB
+serial.
 
 ## Implemented Control-Station Surfaces
 
@@ -271,7 +282,8 @@ The Electron UI now exposes:
 
 - platform/network status, scan, connect, and reconnect controls
 - provisional drone creation from likely drone SSIDs such as `WIFI_8K-*`
-- manual IO configuration for interface, IP, port, protocol, bind-device, and
+- manual IO configuration for direct UDP and ESP32 serial links, including
+  interface, serial port, SSID, IP, port, protocol, bind-device, and
   packet-emission enablement
 - per-flight policy editing for max throttle, command rate, slew rate, and
   heartbeat requirement
