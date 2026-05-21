@@ -10,14 +10,14 @@ from .actions import DroneAction, action_from_dict
 from .config import DroneConfig, load_config
 from .model_adapter import ModelAdapter
 from .protocols import PacketProtocol, make_protocol
-from .transport import UdpDroneLink, UdpTarget
+from .transport import DroneLink, make_drone_link
 
 
 @dataclass
 class DroneRuntime:
     config: DroneConfig
     protocol: PacketProtocol
-    link: UdpDroneLink | None
+    link: DroneLink | None
     dry_run: bool
     action: DroneAction
     lock: threading.Lock
@@ -50,7 +50,7 @@ class SwarmController:
         for cfg in self.configs:
             link = None
             if not self.dry_run:
-                link = UdpDroneLink(UdpTarget(cfg.ip, cfg.port, cfg.iface), bind_device=cfg.bind_device)
+                link = make_drone_link(cfg)
             runtime = DroneRuntime(
                 config=cfg,
                 protocol=make_protocol(cfg.protocol),
@@ -154,4 +154,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

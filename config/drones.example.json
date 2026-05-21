@@ -2,17 +2,29 @@
   "drones": [
     {
       "id": "drone1",
-      "iface": "wlan1",
+      "link_type": "esp_serial",
+      "serial_port": "/dev/ttyUSB0",
+      "serial_baud": 921600,
       "ssid": "WIFI_8K-0c5b90",
       "ip": "192.168.1.1",
       "port": 7099,
-      "protocol": "wifi_8k_prefixed_short",
-      "bind_device": true
+      "protocol": "wifi_8k_prefixed_short"
     },
     {
       "id": "drone2",
-      "iface": "wlan2",
+      "link_type": "esp_serial",
+      "serial_port": "/dev/ttyUSB1",
+      "serial_baud": 921600,
       "ssid": "WIFI_8K-592b10",
+      "ip": "192.168.1.1",
+      "port": 7099,
+      "protocol": "wifi_8k_prefixed_short"
+    },
+    {
+      "id": "drone3",
+      "link_type": "udp",
+      "iface": "wlan2",
+      "ssid": "WIFI_8K-third",
       "ip": "192.168.1.1",
       "port": 7099,
       "protocol": "wifi_8k_prefixed_short",

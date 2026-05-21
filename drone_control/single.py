@@ -9,10 +9,11 @@ import time
 import tty
 from collections.abc import Callable
 from collections.abc import Iterable
+from types import SimpleNamespace
 
 from .actions import DroneAction
 from .protocols import make_protocol
-from .transport import UdpDroneLink, UdpTarget
+from .transport import DroneLink, make_drone_link
 
 COMMANDS = [
     "neutral",
@@ -145,7 +146,7 @@ def read_key(fd: int) -> str | None:
 
 def send_action(
     protocol: object,
-    link: UdpDroneLink | None,
+    link: DroneLink | None,
     action: DroneAction,
     dry_run: bool,
     count: int,
@@ -161,7 +162,7 @@ def send_action(
 
 def send_keepalive_if_due(
     protocol: object,
-    link: UdpDroneLink | None,
+    link: DroneLink | None,
     dry_run: bool,
     next_keepalive: float,
 ) -> float:
@@ -175,7 +176,7 @@ def send_keepalive_if_due(
 
 def ramp_throttle(
     protocol: object,
-    link: UdpDroneLink | None,
+    link: DroneLink | None,
     action: DroneAction,
     target: int,
     step: int,
@@ -200,7 +201,7 @@ def ramp_throttle(
 
 def ramped_motor_stop(
     protocol: object,
-    link: UdpDroneLink | None,
+    link: DroneLink | None,
     action: DroneAction,
     step: int,
     interval: float,
@@ -229,7 +230,7 @@ def ramped_motor_stop(
 
 def interactive_loop(
     protocol: object,
-    link: UdpDroneLink | None,
+    link: DroneLink | None,
     args: argparse.Namespace,
     interval: float,
     is_running: Callable[[], bool],
@@ -352,9 +353,15 @@ def interactive_loop(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run one drone command loop.")
-    parser.add_argument("--iface", required=True)
+    parser.add_argument("--link-type", default="udp", choices=["udp", "esp_serial"])
+    parser.add_argument("--iface", default="")
     parser.add_argument("--ip", default="192.168.1.1")
     parser.add_argument("--port", type=int, default=7099)
+    parser.add_argument("--ssid", default="", help="Drone AP SSID. Required for --link-type esp_serial.")
+    parser.add_argument("--password", default="", help="Drone AP password for ESP bridge, if any.")
+    parser.add_argument("--serial-port", default="", help="ESP32 USB serial device for --link-type esp_serial.")
+    parser.add_argument("--serial-baud", type=int, default=921600)
+    parser.add_argument("--esp-connect-timeout", type=float, default=12.0)
     parser.add_argument("--protocol", default="wifi_8k_prefixed_short")
     parser.add_argument("--command", default="neutral", choices=COMMANDS)
     parser.add_argument("--hz", type=float, default=20.0)
@@ -389,10 +396,24 @@ def main() -> int:
 
     link = None
     if not args.dry_run:
-        link = UdpDroneLink(UdpTarget(args.ip, args.port, args.iface), bind_device=not args.no_bind_device)
+        link = make_drone_link(
+            SimpleNamespace(
+                link_type=args.link_type,
+                iface=args.iface or None,
+                ip=args.ip,
+                port=args.port,
+                bind_device=not args.no_bind_device,
+                ssid=args.ssid,
+                password=args.password,
+                serial_port=args.serial_port,
+                serial_baud=args.serial_baud,
+                esp_connect_timeout=args.esp_connect_timeout,
+            )
+        )
 
     print(
-        f"single loop iface={args.iface} ip={args.ip} port={args.port} "
+        f"single loop link={args.link_type} iface={args.iface or '-'} serial={args.serial_port or '-'} "
+        f"ssid={args.ssid or '-'} ip={args.ip} port={args.port} "
         f"protocol={args.protocol} command={args.command} dry_run={args.dry_run}"
     )
     if args.command in {"axis-test", "axis_test"}:
