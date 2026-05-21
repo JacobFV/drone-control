@@ -12,6 +12,9 @@ that foundation without changing the verified transport behavior first.
   links and optional direct UDP links in one config.
 - The PC can keep its normal internet connection while ESP bridges own drone AP
   associations.
+- Camera through the ESP bridge is not solved. The current ESP bridge forwards
+  control packets only; live camera still uses the direct RTSP/RTP/JPEG path
+  from a device associated with the drone AP.
 - `DroneAction`, packet protocols, and link transports are the stable lower
   layers.
 - The current Electron/Python service has manual IO, camera records, pose-track
@@ -22,6 +25,9 @@ that foundation without changing the verified transport behavior first.
 - Keep packet protocol and link transport deterministic and model-free.
 - No controller may write UDP packets directly; all output becomes
   `DroneAction` through the safety layer.
+- Do not assume ESP bridge camera support exists. Any realtime perception work
+  must either use a direct camera network path, recorded frame source, or a new
+  explicitly designed ESP/video bridge.
 - The swarm coordinator assigns work and constraints, not motor commands.
 - Add tests around every new interface before wiring hardware paths through it.
 - Preserve ignored local files: `config/drones.local.json` and `.drone.env`.
@@ -86,6 +92,8 @@ Definition of done:
 
 ## Phase 3: Observation and Perception Pipeline
 
+- Treat ESP camera transport as out of scope until a dedicated design exists.
+  The current ESP bridge is a control link, not a video relay.
 - Add `drone_control/perception/state.py` for pose, IMU sample, map summary,
   frame metadata, and confidence models.
 - Add `perception/frames.py` adapters for live camera, stored frame sequence,
