@@ -93,7 +93,7 @@ class EspSerialDroneLink:
     control code can mix this link with direct UDP links in the same swarm.
     """
 
-    def __init__(self, target: EspSerialTarget, *, timeout: float = 0.15) -> None:
+    def __init__(self, target: EspSerialTarget, *, timeout: float = 1.0) -> None:
         if not target.port:
             raise ValueError("ESP serial port is required")
         if not target.drone_ssid:
