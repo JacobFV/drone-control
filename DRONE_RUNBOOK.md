@@ -408,10 +408,30 @@ cd firmware/esp32_drone_link
 pio run -t upload
 ```
 
-The checked-in firmware target is ESP32-S3 native USB serial/JTAG hardware,
-which appears as `/dev/ttyACM*` on this workstation. If a future bridge uses a
+The firmware supports both the original ESP32-S3 target and the Seeed XIAO
+ESP32-C6 target. The 2026-05-28 hardware bring-up used Seeed XIAO ESP32-C6
+boards, which report as `303a:1001 Espressif USB JTAG/serial debug unit` and
+appear as `/dev/ttyACM*` on this workstation. If a future bridge uses a
 CP210x/CH340 adapter and appears as `/dev/ttyUSB*`, only the config serial port
 needs to change.
+
+For the Seeed XIAO ESP32-C6 boards:
+
+```bash
+cd firmware/esp32_drone_link
+pio run -e seeed_xiao_esp32c6 -t upload \
+  --upload-port /dev/serial/by-id/<esp32-c6-id>
+```
+
+Three ESP32-C6 bridge boards were flashed and reflashed successfully over the
+native USB-C port, without pressing a boot button:
+
+- `58:E6:C5:1A:62:C4`
+- `58:E6:C5:1A:66:68`
+- `58:E6:C5:1A:F5:68`
+
+A Seeed XIAO M0 also appeared during bring-up as `2886:802f Seeed XIAO M0`.
+That board has no Wi-Fi and cannot be used as a drone bridge.
 
 Scan for visible drone APs from the ESP32 without touching the PC Wi-Fi:
 
@@ -419,11 +439,71 @@ Scan for visible drone APs from the ESP32 without touching the PC Wi-Fi:
 python3 tools/esp_scan.py --port /dev/ttyACM0
 ```
 
+Observed drone APs on 2026-05-28:
+
+- `WIFI_8K-3e67bc`
+- `WIFI_8K-0c5b90`
+- `WIFI_8K-592b10`
+- `WIFI_8K_1351d8`
+
+Single ESP bridge communication was verified against all four APs with neutral
+packets. The bridge associated to each SSID and forwarded ten neutral UDP
+control packets to `192.168.1.1:7099`.
+
 Run mixed simultaneous control:
 
 ```bash
 python3 -m drone_control.swarm --config config/drones.example.json --command neutral
 ```
+
+On 2026-05-28, three simultaneous ESP bridges worked through a two-hub USB
+chain after forcing USB configuration on the ESP devices:
+
+```bash
+for d in /sys/bus/usb/devices/5-1.2.1 /sys/bus/usb/devices/5-1.2.2 /sys/bus/usb/devices/5-1.2.3; do
+  echo 1 | sudo tee "$d/bConfigurationValue"
+done
+sudo chmod a+rw /dev/ttyACM0 /dev/ttyACM1 /dev/ttyACM2
+```
+
+The stable serial paths were:
+
+- `62:C4 -> /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_58:E6:C5:1A:62:C4-if00`
+- `66:68 -> /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_58:E6:C5:1A:66:68-if00`
+- `F5:68 -> /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_58:E6:C5:1A:F5:68-if00`
+
+Verified simultaneous neutral assignments:
+
+- `62:C4 -> WIFI_8K-3e67bc`: `sent=21 errors=0`
+- `66:68 -> WIFI_8K-592b10`: `sent=23 errors=0`
+- `F5:68 -> WIFI_8K-0c5b90`: `sent=25 errors=0`
+
+Short simultaneous upward throttle was also verified with `throttle=141` for
+`0.5s` on all three bridges, ten packets each. Treat this as a restrained bench
+test only.
+
+Do not use full-throttle multi-drone commands through the nested hub chain as a
+normal validation test. A restrained `throttle=255` test on 2026-05-28 completed
+for two drones but the third ESP serial path timed out and desynchronized. Raw
+`motor_stop` frames were then sent directly to all three ESP serial ports, 50
+frames each. This incident means the next hardware-control pass should improve
+fail-stop behavior before aggressive multi-drone thrust testing:
+
+- command all links from one coordinated runtime, not separate shell processes
+- keep an always-available raw stop path per serial port
+- abort all links immediately if any link write times out
+- avoid nested hubs for high-energy tests; use a powered hub that enumerates
+  all ESPs cleanly as `/dev/ttyACM*`
+
+Hub findings:
+
+- `computer -> hub1 -> hub2 -> ESPs` can expose all three ESPs, but sometimes
+  the ESP devices appear with `Cfg#=0` and need `bConfigurationValue=1`.
+- `computer -> hub2 -> ESPs` did not enumerate hub2 or the ESPs, even with
+  hub2's power input connected and multiple USB-C orientations tried.
+- The ESP board LEDs are not a reliable health signal. Use `/dev/serial/by-id`,
+  `python3 tools/esp_scan.py`, and neutral packet counts as the operational
+  checks.
 
 Manual IO can use the same link abstraction. Environment examples:
 
