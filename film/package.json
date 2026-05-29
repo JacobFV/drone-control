@@ -1,0 +1,19 @@
+{
+  "name": "drone-control-film",
+  "version": "1.0.0",
+  "private": true,
+  "description": "30-second technical launch film for drone-control",
+  "scripts": {
+    "dev": "remotion studio",
+    "render": "remotion render Film out/drone-control.mp4 --concurrency=4"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.380",
+    "react": "19.0.0",
+    "react-dom": "19.0.0",
+    "remotion": "4.0.380"
+  },
+  "devDependencies": {
+    "@types/react": "19.0.0"
+  }
+}
