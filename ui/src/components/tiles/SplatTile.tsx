@@ -25,10 +25,10 @@ export function SplatTile() {
     return null;
   }, [state, sessionId]);
 
-  const viewerUrl =
-    splatRecord && serviceBase
-      ? `${serviceBase.replace(/\/$/, "")}/api/records/${splatRecord.id}/splat-viewer`
-      : null;
+  const base = serviceBase ? serviceBase.replace(/\/$/, "") : null;
+  // Prefer the live splat while one is building; else a stored splat record.
+  const liveUrl = base && world?.running && (world.gaussians ?? 0) > 0 ? `${base}/api/session/splat/viewer` : null;
+  const viewerUrl = liveUrl ?? (splatRecord && base ? `${base}/api/records/${splatRecord.id}/splat-viewer` : null);
 
   return (
     <TileFrame
