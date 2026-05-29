@@ -1,277 +1,15 @@
-// Shapes returned by the Python control-station service. These mirror the JSON
-// emitted by drone_control/service.py. Fields are intentionally permissive
-// (optional / index signatures) because the service evolves independently.
-
-export interface Connection {
-  ssid?: string;
-  iface?: string;
-  ip?: string;
-  control?: string;
-  camera?: string;
-}
-
-export interface RecordEntry {
-  id: string;
-  label: string;
-  type: string;
-  mime?: string;
-  path?: string;
-  blobKey?: string;
-  streamUrl?: string;
-}
-
-export interface FlightMetrics {
-  frames?: number;
-  packets?: number;
-  bytes?: number;
-  resolution?: string;
-  temporalMae?: number;
-  smoothedTemporalMae?: number;
-  [key: string]: unknown;
-}
-
-export interface Flight {
-  id: string;
-  name: string;
-  mode?: string;
-  duration?: string;
-  startedAt?: string;
-  policy?: Record<string, unknown> | string;
-  metadata?: Record<string, unknown>;
-  metrics?: FlightMetrics;
-  records?: RecordEntry[];
-}
-
-export interface Drone {
-  id: string;
-  name: string;
-  model: string;
-  status: string;
-  lastSeen: string;
-  connection: Connection;
-  flights: Flight[];
-}
-
-export interface StationState {
-  drones: Drone[];
-}
-
-export interface NetworkInterface {
-  name: string;
-  connection?: string;
-}
-
-export interface NetworkSummary {
-  platform?: string;
-  defaultInterface?: string;
-  interfaces?: NetworkInterface[];
-  singleWifiLikely?: boolean;
-  notes?: string;
-}
-
-export interface ManualTransport {
-  enabled?: boolean;
-  connected?: boolean;
-  target?: string;
-  lastError?: string;
-  linkType?: string;
-  iface?: string;
-  ip?: string;
-  port?: number;
-  protocol?: string;
-  bindDevice?: boolean;
-  ssid?: string;
-  password?: string;
-  serialPort?: string;
-  serialBaud?: number;
-}
-
-export interface ManualStatus {
-  state: string;
-  armed?: boolean;
-  faultReason?: string;
-  stopReason?: string;
-  transport?: ManualTransport;
-}
-
-export interface ConfigStatus {
-  platform?: string;
-  network?: NetworkSummary;
-  manual?: ManualTransport;
-  policy?: {
-    maxThrottle?: number;
-    commandHz?: number;
-    throttleSlewPerSecond?: number;
-    heartbeatTimeoutSeconds?: number;
-  };
-  reconstruction?: ReconstructionTools;
-  runtime?: {
-    dryRun?: boolean;
-    enableIo?: boolean;
-    controlHz?: number;
-    localVlaConfigured?: boolean;
-    internetVlmConfigured?: boolean;
-  };
-  linkCapabilities?: Record<string, unknown>;
-  camera?: Record<string, unknown>;
-}
-
-export interface ReconstructionTools {
-  ready?: boolean;
-  [key: string]: unknown;
-}
-
-export interface SessionStatus {
-  running?: boolean;
-  frames?: number;
-  flightId?: string;
-}
-
-export interface ReconstructionJob {
-  active?: boolean;
-  state?: string;
-  stage?: string;
-  maxImages?: number;
-  maxIterations?: number;
-  datasetRecordId?: string;
-  splatRecordId?: string;
-  error?: string;
-  logTail?: string;
-}
-
-export interface ReconstructionStatus {
-  job?: ReconstructionJob | null;
-  latestSplatRecord?: RecordEntry | null;
-  tools?: ReconstructionTools;
-}
-
-export interface RuntimeSafety {
-  armed?: boolean;
-  faultReason?: string;
-}
-
-export interface RuntimeConstraints {
-  maxThrottle?: number;
-}
-
-export interface RuntimeObservation {
-  confidence?: number;
-}
-
-export interface RuntimeDrone {
-  droneId: string;
-  running?: boolean;
-  controller?: string;
-  linkType?: string;
-  linkState?: string;
-  sent?: number;
-  errors?: number;
-  dryRun?: boolean;
-  observation?: RuntimeObservation;
-  safety?: RuntimeSafety;
-  constraints?: RuntimeConstraints;
-  lastAction?: unknown;
-}
-
-export interface BatchedVla {
-  active?: boolean;
-  command?: string;
-  batches?: number;
-  lastBatchSize?: number;
-  maxWaitSeconds?: number;
-}
-
-export interface MissionAssignment {
-  droneId: string;
-  role: string;
-  task: string;
-}
-
-export interface MissionProgress {
-  state?: string;
-  assignments?: MissionAssignment[];
-  notes?: string[];
-}
-
-export interface RuntimeStatus {
-  running?: boolean;
-  dryRun?: boolean;
-  enableIo?: boolean;
-  localVlaConfigured?: boolean;
-  batchedVlaConfigured?: boolean;
-  batchedVla?: BatchedVla;
-  drones?: RuntimeDrone[];
-  events?: unknown[];
-  mission?: MissionProgress;
-}
-
-export interface WorldDroneStatus {
-  droneId?: string;
-  keyframes?: number;
-  gaussians?: number;
-  [key: string]: unknown;
-}
-
-export interface WorldSplatStatus {
-  available?: boolean;
-  running?: boolean;
-  gaussians?: number;
-  keyframes?: number;
-  keyframesByDrone?: Record<string, number>;
-  drones?: WorldDroneStatus[];
-  steps?: number;
-  lastLoss?: number;
-  reason?: string;
-}
-
-export interface PoseStatus {
-  state?: string;
-  fps?: number;
-  keyframes?: number;
-  scaleLocked?: boolean;
-  intrinsicsSource?: string;
-  framesAvailable?: boolean;
-  estimatorAvailable?: boolean;
-}
+// Shapes returned by the session-centric Python service (drone_control/service.py
+// + session_service.py). Permissive on purpose — the backend evolves.
 
 export interface Pose {
   frameIndex?: number;
   x: number;
   y: number;
   z: number;
-  qw: number;
-  qx: number;
-  qy: number;
-  qz: number;
-}
-
-export interface PoseTrackResult {
-  status?: PoseStatus;
-  poses?: Pose[];
-}
-
-export interface DiscoverResult {
-  state?: StationState;
-  discovered?: Array<{ ssid: string }>;
-}
-
-export interface SimDrone {
-  droneId: string;
-  color: string;
-  position: number[];
-  goal: number[];
-  distance: number;
-  hasFrame: boolean;
-}
-
-export interface SimStatus {
-  running?: boolean;
-  task?: string;
-  numDrones?: number;
-  rateHz?: number;
-  step?: number;
-  render?: boolean;
-  drones?: SimDrone[];
+  qw?: number;
+  qx?: number;
+  qy?: number;
+  qz?: number;
 }
 
 export interface TrajectoryDrone {
@@ -281,7 +19,153 @@ export interface TrajectoryDrone {
   poses: Pose[];
 }
 
-export interface TrajectoriesResult {
+export interface RecordEntry {
+  id: string;
+  sessionId?: string;
+  droneId?: string | null;
+  source: string; // camera | pose | control | splat | seg-screen | seg-world | artifact
+  type: string;
+  label: string;
+  mime?: string;
+  byteCount?: number;
+  path?: string;
+  blobKey?: string;
+  streamUrl?: string;
+  poseUrl?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface Session {
+  id: string;
+  environmentId: string;
+  name: string;
+  state: string;
+  drones: string[];
+  startedAt?: string;
+  endedAt?: string | null;
+  duration?: string;
+  metadata?: Record<string, unknown>;
+  metrics?: Record<string, unknown>;
+  records: RecordEntry[];
+}
+
+export interface Environment {
+  id: string;
+  name: string;
+  kind: string; // sim | real
+  config?: Record<string, unknown>;
+  createdAt?: string;
+  sessions: Session[];
+}
+
+export interface Drone {
+  id: string;
+  name: string;
+  model: string;
+  status: string;
+  lastSeen: string;
+  identity?: Record<string, unknown>;
+  connection?: Record<string, unknown>;
+}
+
+export interface StationState {
+  environments: Environment[];
+  drones: Drone[];
+}
+
+export interface ScreenDetection {
+  cls: string;
+  score: number;
+  bbox: number[]; // [x,y,w,h] px
+  centroid: number[]; // [cx,cy] px
+  polygon: number[][]; // normalized [[x,y],...]
+  width: number;
+  height: number;
+}
+
+export interface WorldObject {
+  id: number;
+  cls: string;
+  centroid: number[]; // [x,y,z]
+  count: number;
+  drones: string[];
+  score: number;
+}
+
+export interface SegmentationStatus {
+  available: boolean;
+  reason?: string | null;
+  model?: string;
+  objects?: number;
+  dronesWithScreen?: string[];
+}
+
+export interface SessionStatus {
+  active: boolean;
+  sessionId?: string;
+  environmentId?: string;
+  kind?: string;
+  recording?: boolean;
+  speed?: "realtime" | "max";
+  elapsedSeconds?: number;
+  drones?: string[];
+  frameCounts?: Record<string, number>;
+  trajectories?: TrajectoryDrone[];
+  worldModel?: { available?: boolean; running?: boolean; gaussians?: number; reason?: string };
+  segmentation?: {
+    status: SegmentationStatus;
+    screen: Record<string, ScreenDetection[]>;
+    world: WorldObject[];
+  };
+  env?: Record<string, unknown>;
+  metrics?: Record<string, unknown>;
+}
+
+export interface RuntimeDrone {
+  droneId: string;
   running?: boolean;
-  drones: TrajectoryDrone[];
+  controller?: string;
+  linkState?: string;
+  safety?: { armed?: boolean; faultReason?: string };
+}
+
+export interface RuntimeStatus {
+  running?: boolean;
+  drones?: RuntimeDrone[];
+  mission?: { state?: string; notes?: string[] };
+}
+
+export interface ManualStatus {
+  state: string;
+  armed?: boolean;
+  faultReason?: string;
+  transport?: Record<string, unknown>;
+}
+
+export interface WsSnapshot {
+  session: SessionStatus;
+  runtime: RuntimeStatus;
+  manual: ManualStatus;
+}
+
+export interface NetworkSummary {
+  platform?: string;
+  defaultInterface?: string;
+  interfaces?: { name: string; connection?: string }[];
+  notes?: string;
+}
+
+export interface ConfigStatus {
+  platform?: string;
+  network?: NetworkSummary;
+  manual?: Record<string, unknown>;
+  policy?: Record<string, unknown>;
+  camera?: Record<string, unknown>;
+  reconstruction?: { ready?: boolean; [k: string]: unknown };
+  runtime?: Record<string, unknown>;
+}
+
+export interface DiscoverResult {
+  discovered?: { ssid: string }[];
+  state?: StationState;
 }

@@ -1,6 +1,6 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { StationProvider } from "./store/StationContext";
+import { SessionProvider } from "./store/SessionContext";
 import { App } from "./App";
 import "./styles.css";
 
@@ -9,8 +9,8 @@ if (!container) throw new Error("root element missing");
 
 createRoot(container).render(
   <StrictMode>
-    <StationProvider>
+    <SessionProvider>
       <App />
-    </StationProvider>
+    </SessionProvider>
   </StrictMode>,
 );

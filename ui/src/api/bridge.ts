@@ -19,6 +19,8 @@ export interface SnapshotResult {
 export interface DroneStationBridge {
   request: (request: DroneStationRequest) => Promise<unknown>;
   serviceUrl: () => Promise<string>;
+  // WebSocket base URL announced by the Python service (empty if WS unavailable).
+  wsUrl?: () => Promise<string>;
   openExternal: (url: string) => Promise<void>;
   // Optional binary fetch, added to preload.js to support the .ply snapshot.
   fetchBinary?: (path: string) => Promise<SnapshotResult>;
