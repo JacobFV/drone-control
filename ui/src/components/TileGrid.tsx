@@ -2,9 +2,11 @@ import { useSession } from "../store/SessionContext";
 import { Button } from "./primitives";
 import { PlusIcon } from "./icons";
 import { CameraTile } from "./tiles/CameraTile";
+import { DepthTile } from "./tiles/DepthTile";
 import { SegOverlayTile } from "./tiles/SegOverlayTile";
 import { TrajectoryTile } from "./tiles/TrajectoryTile";
 import { WorldSegTile } from "./tiles/WorldSegTile";
+import { PointCloudTile } from "./tiles/PointCloudTile";
 import { SplatTile } from "./tiles/SplatTile";
 
 /**
@@ -42,9 +44,13 @@ export function TileGrid() {
         <CameraTile key={`cam-${id}`} droneId={id} color={colorOf(id)} />
       ))}
       <TrajectoryTile />
+      <PointCloudTile />
       <SplatTile />
       {drones.map((id) => (
         <SegOverlayTile key={`seg-${id}`} droneId={id} />
+      ))}
+      {drones.map((id) => (
+        <DepthTile key={`depth-${id}`} droneId={id} />
       ))}
       <WorldSegTile />
     </div>

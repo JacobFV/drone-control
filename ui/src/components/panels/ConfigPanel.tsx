@@ -4,6 +4,7 @@ import { KeyValue, Panel, Pill } from "../primitives";
 export function ConfigPanel() {
   const { config, snapshot, transport } = useSession();
   const seg = snapshot?.session.segmentation?.status;
+  const depth = snapshot?.session.depth;
   const runtime = (config?.runtime ?? {}) as Record<string, unknown>;
   const recon = config?.reconstruction ?? {};
   const camera = (config?.camera ?? {}) as Record<string, unknown>;
@@ -41,6 +42,17 @@ export function ConfigPanel() {
           ]}
         />
         {seg && !seg.available && <p className="muted">{seg.reason}</p>}
+      </Panel>
+
+      <Panel title="Depth model">
+        <KeyValue
+          entries={[
+            { key: "Model", value: depth?.model ?? "—" },
+            { key: "Available", value: depth?.available ?? false },
+            { key: "Cloud points", value: depth?.points ?? 0 },
+          ]}
+        />
+        {depth && !depth.available && <p className="muted">{depth.reason}</p>}
       </Panel>
 
       <Panel title="Reconstruction tools" right={<Pill tone={recon.ready ? "ok" : "danger"}>{recon.ready ? "ready" : "missing"}</Pill>}>

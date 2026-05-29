@@ -117,6 +117,13 @@ export interface SessionStatus {
     screen: Record<string, ScreenDetection[]>;
     world: WorldObject[];
   };
+  depth?: {
+    available: boolean;
+    reason?: string | null;
+    model?: string;
+    points?: number;
+    dronesWithDepth?: string[];
+  };
   env?: Record<string, unknown>;
   metrics?: Record<string, unknown>;
 }

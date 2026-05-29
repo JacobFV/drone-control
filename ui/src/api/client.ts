@@ -87,6 +87,9 @@ export const api = {
   sessionSpeed: (mode: "realtime" | "max") =>
     request<SessionStatus>("POST", "/api/session/speed", { mode }),
 
+  getPointCloud: (max = 2500) =>
+    request<{ points: number[][] }>("GET", `/api/session/pointcloud?max=${max}`),
+
   // ----- Pose / reconstruction (per session) -----
   computePoseTrack: (sessionId: string) =>
     request("POST", `/api/sessions/${sessionId}/pose/compute`, {}),
@@ -129,6 +132,11 @@ export const api = {
 /** Service-relative live camera frame path for a drone in the active session. */
 export function sessionFramePath(droneId: string): string {
   return `/api/session/drones/${encodeURIComponent(droneId)}/frame`;
+}
+
+/** Service-relative colorized depth-map frame path for a drone. */
+export function sessionDepthPath(droneId: string): string {
+  return `/api/session/drones/${encodeURIComponent(droneId)}/depth`;
 }
 
 /** Open the backend's gsplat orbit viewer for a stored splat record. */
