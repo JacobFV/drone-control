@@ -355,9 +355,41 @@ class LiveSplatEngine:
     def _viewmat(self, drone_id: str, pose: dict[str, Any] | None):
         c2w_drone = _camera_to_world(pose)
         world_T_drone = self._world_T_drone.get(drone_id, np.eye(4))
-        c2w_world = world_T_drone @ c2w_drone
+        c2w_world = apply_similarity_to_pose(world_T_drone, c2w_drone)
         viewmat = np.linalg.inv(c2w_world)
         return torch.from_numpy(viewmat.astype(np.float32)).to(self.device)
+
+    def seed_from_points(self, xyz: np.ndarray, rgb: np.ndarray | None = None) -> int:
+        """Initialise the gaussian set from a (COLMAP) point cloud in the shared frame.
+
+        This replaces self-bootstrap with real geometry once cross-drone
+        co-registration has solved a sparse cloud. Returns the gaussian count.
+        """
+
+        xyz = np.asarray(xyz, dtype=np.float32)
+        if xyz.ndim != 2 or xyz.shape[1] != 3 or xyz.shape[0] == 0:
+            raise ValueError("xyz must be a non-empty (N, 3) array")
+        if rgb is None:
+            rgb = np.full_like(xyz, 0.5)
+        rgb = np.asarray(rgb, dtype=np.float32).reshape(-1, 3)
+        count = xyz.shape[0]
+        with self._lock:
+            means = torch.from_numpy(xyz).to(self.device)
+            colors = torch.from_numpy(np.clip(rgb, 1e-3, 1 - 1e-3)).to(self.device)
+            scales_log = torch.full((count, 3), float(np.log(0.05)), device=self.device)
+            quats = torch.zeros((count, 4), device=self.device)
+            quats[:, 0] = 1.0
+            opacities_raw = torch.full((count,), -1.0, device=self.device)
+            self._params = {
+                "means": torch.nn.Parameter(means),
+                "quats": torch.nn.Parameter(quats),
+                "scales_log": torch.nn.Parameter(scales_log),
+                "opacities_raw": torch.nn.Parameter(opacities_raw),
+                "colors_raw": torch.nn.Parameter(torch.logit(colors)),
+            }
+            self._optimizer = torch.optim.Adam(list(self._params.values()), lr=self.config.learning_rate)
+            self._mean_grad_accum = None
+        return count
 
 
 # --------------------------------------------------------------------------- #
@@ -375,6 +407,27 @@ def _pose_center(pose: dict[str, Any] | None) -> np.ndarray:
         [float(pose.get("x", 0.0)), float(pose.get("y", 0.0)), float(pose.get("z", 0.0))],
         dtype=np.float64,
     )
+
+
+def apply_similarity_to_pose(world_T_drone: np.ndarray, c2w_drone: np.ndarray) -> np.ndarray:
+    """Place a drone-frame camera pose into the shared world frame.
+
+    ``world_T_drone`` may be a similarity (scale*R, t) from cross-drone Umeyama
+    alignment. gsplat needs a rigid extrinsic, so scale is applied only to the
+    camera centre while the rotation stays orthonormal. Identity in -> pose out
+    unchanged.
+    """
+
+    world_T_drone = np.asarray(world_T_drone, dtype=np.float64).reshape(4, 4)
+    c2w_drone = np.asarray(c2w_drone, dtype=np.float64).reshape(4, 4)
+    m3 = world_T_drone[:3, :3]
+    scale = float(np.cbrt(max(abs(np.linalg.det(m3)), 1e-12)))
+    r_align = m3 / scale if scale > 1e-9 else np.eye(3)
+    t_align = world_T_drone[:3, 3]
+    c2w_world = np.eye(4)
+    c2w_world[:3, :3] = r_align @ c2w_drone[:3, :3]
+    c2w_world[:3, 3] = scale * (r_align @ c2w_drone[:3, 3]) + t_align
+    return c2w_world
 
 
 def _camera_to_world(pose: dict[str, Any] | None) -> np.ndarray:

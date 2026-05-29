@@ -55,6 +55,7 @@ class RuntimeManager:
         self._vla_client: BatchLocalVLAClient | None = None
         self._vla_log_lock = threading.Lock()
         self._world_model: Any | None = None
+        self._ingestors: dict[str, Any] = {}
 
     def configure_drones(self, configs: list[DroneConfig]) -> None:
         with self._lock:
@@ -90,6 +91,7 @@ class RuntimeManager:
                 runtime.start()
 
     def stop_all(self) -> None:
+        self.stop_ingestion()
         with self._lock:
             runtimes = list(self._runtimes.values())
         for runtime in runtimes:
@@ -260,6 +262,53 @@ class RuntimeManager:
     # Live cross-drone Gaussian-splat world model
     # ------------------------------------------------------------------ #
 
+    def attach_frame_source(self, drone_id: str, source: Any, *, pose_provider: Any | None = None) -> None:
+        """Stream a live camera FrameSource for a drone into ingest_frame.
+
+        Defaults the pose provider to the drone's latest runtime observation pose
+        so frames carry a pose for the world model without extra wiring.
+        """
+
+        from drone_control.perception.ingestion import FrameIngestor
+
+        if pose_provider is None:
+            pose_provider = lambda: self._latest_pose(drone_id)  # noqa: E731
+        with self._lock:
+            existing = self._ingestors.pop(drone_id, None)
+        if existing is not None:
+            existing.stop()
+        ingestor = FrameIngestor(drone_id, source, self.ingest_frame, pose_provider=pose_provider)
+        ingestor.start()
+        with self._lock:
+            self._ingestors[drone_id] = ingestor
+
+    def detach_frame_source(self, drone_id: str) -> None:
+        with self._lock:
+            ingestor = self._ingestors.pop(drone_id, None)
+        if ingestor is not None:
+            ingestor.stop()
+
+    def stop_ingestion(self) -> None:
+        with self._lock:
+            ingestors = list(self._ingestors.values())
+            self._ingestors.clear()
+        for ingestor in ingestors:
+            ingestor.stop()
+
+    def ingestion_status(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return [ingestor.status() for ingestor in self._ingestors.values()]
+
+    def _latest_pose(self, drone_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            runtime = self._runtimes.get(drone_id)
+        if runtime is None:
+            return None
+        observation = runtime._last_observation
+        if observation is None or observation.pose is None:
+            return None
+        return observation.pose.as_dict()
+
     def ingest_frame(self, drone_id: str, jpeg: bytes, pose: dict[str, Any] | None = None) -> None:
         """Publish a camera frame for both the batched VLA hub and the world model.
 
@@ -318,6 +367,34 @@ class RuntimeManager:
             world = self._world_model
         if world is not None:
             world.set_drone_transform(drone_id, np.asarray(transform, dtype=float))
+
+    def bootstrap_world_model(
+        self,
+        drone_frames: dict[str, list[Path]],
+        work_dir: str | Path,
+        *,
+        vo_centers_by_image: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Run COLMAP-union cross-drone co-registration and seed the world model."""
+
+        from drone_control.perception import cross_drone, live_splat
+
+        if not live_splat.available():
+            return {"available": False, "reason": live_splat.unavailable_reason()}
+        if not cross_drone.colmap_available():
+            return {"available": True, "error": "colmap CLI not found on PATH"}
+        with self._lock:
+            if self._world_model is None:
+                self._world_model = live_splat.LiveSplatEngine()
+            world = self._world_model
+        result = cross_drone.bootstrap_world_model(
+            world,
+            {k: [Path(p) for p in v] for k, v in drone_frames.items()},
+            Path(work_dir),
+            vo_centers_by_image=vo_centers_by_image,
+        )
+        world.start()
+        return result.as_status() | world.snapshot()
 
     def close_vla(self) -> None:
         with self._lock:

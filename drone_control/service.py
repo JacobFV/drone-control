@@ -266,6 +266,10 @@ class ControlStationHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/world/splat/bootstrap":
             payload = self.read_json()
+            flight_drones = payload.get("flightIds") or payload.get("flights")
+            if flight_drones:
+                self.bootstrap_world_model(flight_drones)
+                return
             transforms = payload.get("transforms") or {}
             applied = []
             for drone_id, transform in transforms.items():
@@ -351,6 +355,15 @@ class ControlStationHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": str(exc)}, status=HTTPStatus.NOT_FOUND)
                 return
             self.send_json(self.server.runtime_status())
+            return
+        match = re.fullmatch(r"/api/runtime/drones/([^/]+)/camera/start", parsed.path)
+        if match:
+            self.start_drone_camera(match.group(1))
+            return
+        match = re.fullmatch(r"/api/runtime/drones/([^/]+)/camera/stop", parsed.path)
+        if match:
+            self.server.runtime.detach_frame_source(match.group(1))
+            self.send_json({"ingestion": self.server.runtime.ingestion_status()})
             return
 
         if parsed.path == "/api/mission/start":
@@ -758,6 +771,81 @@ class ControlStationHandler(BaseHTTPRequestHandler):
             return
         except FileNotFoundError as exc:
             self.send_json({"error": str(exc)}, status=HTTPStatus.NOT_FOUND)
+            return
+        self.send_json(result)
+
+    def start_drone_camera(self, drone_id: str) -> None:
+        """Attach a live camera source for a drone so frames flow to the VLA hub
+        and the world model.
+
+        Body either ``{"framesDir": "/path"}`` (DirectoryFrameSource replay, also
+        useful without hardware) or live camera config
+        ``{"iface": "...", "droneIp": "...", ...}``.
+        """
+
+        payload = self.read_json()
+        frames_dir = optional_str(payload, "framesDir")
+        try:
+            if frames_dir:
+                source = DirectoryFrameSource(frames_dir, fps=float(payload.get("fps") or 10.0))
+            else:
+                iface = optional_str(payload, "iface")
+                if not iface:
+                    self.send_json({"error": "iface or framesDir required"}, status=HTTPStatus.BAD_REQUEST)
+                    return
+                config = LiveDroneFrameSourceConfig(
+                    iface=iface,
+                    local_ip=str(payload.get("localIp") or ""),
+                    drone_ip=str(payload.get("droneIp") or "192.168.1.1"),
+                    use_rtsp=bool(payload.get("useRtsp", True)),
+                )
+                source = LiveDroneFrameSource(config)
+            self.server.runtime.attach_frame_source(drone_id, source)
+        except (FileNotFoundError, ValueError, OSError) as exc:
+            self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+        self.send_json({"ingestion": self.server.runtime.ingestion_status()})
+
+    def bootstrap_world_model(self, flight_drones: Any) -> None:
+        """COLMAP-union cross-drone bootstrap from recorded flights.
+
+        ``flight_drones`` may be a list of flight ids (each treated as its own
+        drone, labelled by flight id) or a mapping ``{flightId: droneId}`` so the
+        resulting transforms apply to the matching live runtime drone.
+        """
+
+        if isinstance(flight_drones, dict):
+            mapping = {str(k): str(v) for k, v in flight_drones.items()}
+        elif isinstance(flight_drones, list):
+            mapping = {str(f): str(f) for f in flight_drones}
+        else:
+            self.send_json({"error": "flightIds must be a list or {flightId: droneId} object"}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        drone_frames: dict[str, list[str]] = {}
+        for flight_id, drone_id in mapping.items():
+            if not self.server.store.flight_exists(flight_id):
+                self.send_json({"error": f"flight not found: {flight_id}"}, status=HTTPStatus.NOT_FOUND)
+                return
+            frame_record = self.server._latest_frame_record(flight_id)
+            if frame_record is None:
+                self.send_json({"error": f"no frames record for flight: {flight_id}"}, status=HTTPStatus.NOT_FOUND)
+                return
+            frame_dir = self.server.store.record_path(str(frame_record["id"]))
+            if frame_dir is None or not frame_dir.is_dir():
+                self.send_json({"error": f"frame blob missing for flight: {flight_id}"}, status=HTTPStatus.NOT_FOUND)
+                return
+            frames = [str(p) for p in sorted(frame_dir.glob("*.jpg"))]
+            if not frames:
+                self.send_json({"error": f"no .jpg frames for flight: {flight_id}"}, status=HTTPStatus.NOT_FOUND)
+                return
+            drone_frames.setdefault(drone_id, []).extend(frames)
+
+        work_dir = self.server.reconstruction_root / "world_bootstrap"
+        try:
+            result = self.server.runtime.bootstrap_world_model(drone_frames, work_dir)
+        except Exception as exc:
+            self.send_json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
             return
         self.send_json(result)
 

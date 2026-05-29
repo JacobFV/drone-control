@@ -9,3 +9,5 @@ captures/
 camera_captures/
 .drone.env
 config/*.local.json
+ui/dist/
+runs/
