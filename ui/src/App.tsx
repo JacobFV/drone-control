@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useState } from "react";
 import { TileGrid } from "./components/TileGrid";
 import { ReviewGrid } from "./components/ReviewGrid";
 import { SessionPicker } from "./components/SessionPicker";
@@ -7,8 +7,22 @@ import { FlightPanel } from "./components/panels/FlightPanel";
 import { ConnectionsPanel } from "./components/panels/ConnectionsPanel";
 import { ConfigPanel } from "./components/panels/ConfigPanel";
 import { useSession, type RhsTab } from "./store/SessionContext";
-import { ConfigIcon, ConnectionsIcon, FlightIcon, PanelIcon, PlusIcon } from "./components/icons";
+import { ConfigIcon, ConnectionsIcon, FlightIcon, MoonIcon, PanelIcon, PlusIcon, SunIcon } from "./components/icons";
 import type { ComponentType, SVGProps } from "react";
+
+type Theme = "dark" | "light";
+
+function useTheme(): [Theme, () => void] {
+  const [theme, setTheme] = useState<Theme>(() => {
+    const saved = typeof localStorage !== "undefined" ? localStorage.getItem("theme") : null;
+    return saved === "light" || saved === "dark" ? saved : "light";
+  });
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem("theme", theme);
+  }, [theme]);
+  return [theme, () => setTheme((t) => (t === "dark" ? "light" : "dark"))];
+}
 
 const TABS: { id: RhsTab; label: string; Icon: ComponentType<SVGProps<SVGSVGElement> & { size?: number }> }[] = [
   { id: "flight", label: "Flight", Icon: FlightIcon },
@@ -20,7 +34,6 @@ export function App() {
   const {
     health,
     transport,
-    snapshot,
     state,
     rhsTab,
     setRhsTab,
@@ -30,21 +43,11 @@ export function App() {
     setNewSessionOpen,
   } = useSession();
 
-  const active = snapshot?.session.active;
+  const [theme, toggleTheme] = useTheme();
+
   const reviewed = reviewSessionId
     ? state?.environments.flatMap((e) => e.sessions).find((s) => s.id === reviewSessionId) ?? null
     : null;
-
-  // Surface the new-session modal once when the app opens idle (no live session,
-  // not reviewing) so there is a clear place to begin.
-  const autoShown = useRef(false);
-  useEffect(() => {
-    if (autoShown.current) return;
-    if (health === "ready" && snapshot && !active && !reviewSessionId) {
-      autoShown.current = true;
-      setNewSessionOpen(true);
-    }
-  }, [health, snapshot, active, reviewSessionId, setNewSessionOpen]);
 
   return (
     <div className={`shell${rhsCollapsed ? " rhs-collapsed" : ""}`}>
@@ -65,6 +68,15 @@ export function App() {
           <span className="status-text">
             {health === "ready" ? "ready" : health} · {transport}
           </span>
+          <button
+            type="button"
+            className="theme-toggle"
+            title={theme === "dark" ? "Switch to light" : "Switch to dark"}
+            aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+            onClick={toggleTheme}
+          >
+            {theme === "dark" ? <SunIcon size={16} /> : <MoonIcon size={16} />}
+          </button>
           <button
             type="button"
             className={`rhs-toggle${rhsCollapsed ? " is-collapsed" : ""}`}
