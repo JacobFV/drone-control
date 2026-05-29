@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useSession } from "../../store/SessionContext";
 import { openSplatViewer } from "../../api/client";
 import { TileFrame } from "./TileFrame";
@@ -26,8 +26,18 @@ export function SplatTile() {
   }, [state, sessionId]);
 
   const base = serviceBase ? serviceBase.replace(/\/$/, "") : null;
-  // Prefer the live splat while one is building; else a stored splat record.
-  const liveUrl = base && world?.running && (world.gaussians ?? 0) > 0 ? `${base}/api/session/splat/viewer` : null;
+  const isLive = Boolean(base && world?.running && (world.gaussians ?? 0) > 0);
+
+  // The splat keeps converging (gaussians densify, loss drops). The gsplat viewer
+  // loads its .ply once, so periodically reload the live viewer to show progress.
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    if (!isLive) return;
+    const id = window.setInterval(() => setTick((t) => t + 1), 6000);
+    return () => window.clearInterval(id);
+  }, [isLive]);
+
+  const liveUrl = isLive ? `${base}/api/session/splat/viewer?r=${tick}` : null;
   const viewerUrl = liveUrl ?? (splatRecord && base ? `${base}/api/records/${splatRecord.id}/splat-viewer` : null);
 
   return (
