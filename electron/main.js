@@ -6,6 +6,7 @@ const readline = require("readline");
 const rootDir = path.resolve(__dirname, "..");
 let serviceProcess = null;
 let serviceUrl = "";
+let serviceWsUrl = "";
 
 app.disableHardwareAcceleration();
 app.commandLine.appendSwitch("disable-gpu");
@@ -27,12 +28,25 @@ function createWindow() {
     },
   });
 
-  // Prefer the built React UI (ui/dist) when present; fall back to the legacy
-  // vanilla app/ so the window still loads if the UI has not been built.
+  // Single UI: the built React app in ui/dist. If it has not been built yet,
+  // show a clear instruction page instead of silently loading something else.
   const builtUi = path.join(rootDir, "ui", "dist", "index.html");
-  const legacyUi = path.join(rootDir, "app", "index.html");
-  const indexFile = require("fs").existsSync(builtUi) ? builtUi : legacyUi;
-  window.loadFile(indexFile);
+  if (require("fs").existsSync(builtUi)) {
+    window.loadFile(builtUi);
+  } else {
+    window.loadURL(
+      "data:text/html;charset=utf-8," +
+        encodeURIComponent(`<!doctype html><html><head><meta charset="utf-8">
+<style>html,body{margin:0;height:100%;background:#0b0e10;color:#e7edf0;
+font:14px/1.6 ui-monospace,Menlo,Consolas,monospace;display:flex;align-items:center;
+justify-content:center}main{max-width:560px;padding:32px}h1{font-size:16px;
+letter-spacing:.08em;text-transform:uppercase;color:#7fd1ff}code{background:#161b1f;
+padding:2px 6px;border-radius:4px;color:#ffd35a}</style></head><body><main>
+<h1>UI not built</h1><p>The React UI has not been built yet. Run:</p>
+<p><code>npm --prefix ui install &amp;&amp; npm --prefix ui run build</code></p>
+<p>then restart the app with <code>npm start</code>.</p></main></body></html>`),
+    );
+  }
 }
 
 app.whenReady().then(async () => {
@@ -40,6 +54,7 @@ app.whenReady().then(async () => {
   serviceUrl = await startPythonService();
   ipcMain.handle("app:request", async (_event, request) => serviceRequest(request));
   ipcMain.handle("app:serviceUrl", () => serviceUrl);
+  ipcMain.handle("app:wsUrl", () => serviceWsUrl);
   ipcMain.handle("app:openExternal", async (_event, url) => shell.openExternal(url));
   ipcMain.handle("app:fetchBinary", async (_event, servicePath) => serviceFetchBinary(servicePath));
   createWindow();
@@ -84,6 +99,10 @@ async function startPythonService() {
 
     const stdout = readline.createInterface({ input: serviceProcess.stdout });
     stdout.on("line", (line) => {
+      if (line.startsWith("WS_READY ")) {
+        serviceWsUrl = line.replace("WS_READY ", "").trim();
+        return;
+      }
       if (line.startsWith("SERVICE_READY ")) {
         clearTimeout(timeout);
         resolve(line.replace("SERVICE_READY ", "").trim());

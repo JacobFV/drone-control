@@ -5,8 +5,11 @@
   "description": "Local Electron control station for WIFI_8K drone experiments.",
   "main": "electron/main.js",
   "scripts": {
-    "start": "electron --no-sandbox .",
-    "check": "node --check electron/main.js && node --check electron/preload.js && node --check app/renderer.js"
+    "start": "npm run ui:build && electron --no-sandbox .",
+    "ui:install": "npm --prefix ui install",
+    "ui:build": "npm --prefix ui run build",
+    "ui:dev": "npm --prefix ui run dev",
+    "check": "node --check electron/main.js && node --check electron/preload.js"
   },
   "devDependencies": {
     "electron": "^39.2.4"
