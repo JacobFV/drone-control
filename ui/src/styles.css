@@ -36,8 +36,10 @@ input, select { font-family: inherit; }
 .status-dot.status-starting { background: #ffd35a; }
 .rhs-toggle {
   background: var(--panel-2); color: var(--ink-dim); border: 1px solid var(--line);
-  border-radius: 6px; padding: 4px 10px; font-size: 11px;
+  border-radius: 6px; padding: 5px; display: inline-flex; align-items: center;
 }
+.rhs-toggle:hover { color: var(--ink); border-color: var(--accent); }
+.rhs-toggle.is-collapsed { color: var(--accent); }
 
 .workspace { flex: 1 1 auto; display: flex; min-height: 0; }
 .wall { flex: 1 1 auto; min-width: 0; overflow: auto; padding: 12px; }
@@ -50,8 +52,9 @@ input, select { font-family: inherit; }
 .rhs-tabs { display: flex; border-bottom: 1px solid var(--line); flex: 0 0 auto; }
 .rhs-tab {
   flex: 1; background: transparent; color: var(--ink-dim); border: none;
-  padding: 12px 0; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase;
+  padding: 11px 0; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase;
   border-bottom: 2px solid transparent;
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
 }
 .rhs-tab.is-active { color: var(--ink); border-bottom-color: var(--accent); }
 .rhs-body { overflow: auto; padding: 14px; flex: 1 1 auto; }
@@ -92,8 +95,11 @@ input, select { font-family: inherit; }
 }
 .tile-max, .tile-mini {
   background: transparent; border: 1px solid var(--line); color: var(--ink-dim);
-  border-radius: 5px; padding: 2px 7px; font-size: 12px; line-height: 1;
+  border-radius: 5px; padding: 3px 6px; font-size: 12px; line-height: 0;
+  display: inline-flex; align-items: center; justify-content: center;
 }
+.tile-max:hover { color: var(--ink); border-color: var(--accent); }
+.tile-mini { line-height: 1; }
 .tile-mini { font-size: 10px; }
 .tile-body { flex: 1 1 auto; position: relative; min-height: 0; background: #05070a; }
 .tile-empty {

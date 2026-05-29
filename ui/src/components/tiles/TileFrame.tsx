@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { useSession } from "../../store/SessionContext";
+import { MaximizeIcon, RestoreIcon } from "../icons";
 
 interface TileFrameProps {
   id: string;
@@ -27,7 +28,7 @@ export function TileFrame({ id, title, badge, interactive, children }: TileFrame
             aria-label={isMax ? "Restore" : "Maximize"}
             onClick={() => setMaximizedTile(isMax ? null : id)}
           >
-            {isMax ? "▾" : "⛶"}
+            {isMax ? <RestoreIcon size={14} /> : <MaximizeIcon size={14} />}
           </button>
         </div>
       </div>

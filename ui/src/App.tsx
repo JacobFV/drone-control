@@ -3,11 +3,13 @@ import { FlightPanel } from "./components/panels/FlightPanel";
 import { ConnectionsPanel } from "./components/panels/ConnectionsPanel";
 import { ConfigPanel } from "./components/panels/ConfigPanel";
 import { useSession, type RhsTab } from "./store/SessionContext";
+import { ConfigIcon, ConnectionsIcon, FlightIcon, PanelIcon } from "./components/icons";
+import type { ComponentType, SVGProps } from "react";
 
-const TABS: { id: RhsTab; label: string }[] = [
-  { id: "flight", label: "Flight" },
-  { id: "connections", label: "Connections" },
-  { id: "config", label: "Config" },
+const TABS: { id: RhsTab; label: string; Icon: ComponentType<SVGProps<SVGSVGElement> & { size?: number }> }[] = [
+  { id: "flight", label: "Flight", Icon: FlightIcon },
+  { id: "connections", label: "Connections", Icon: ConnectionsIcon },
+  { id: "config", label: "Config", Icon: ConfigIcon },
 ];
 
 export function App() {
@@ -29,8 +31,14 @@ export function App() {
             {transport}
             {active ? " · live session" : " · idle"}
           </span>
-          <button type="button" className="rhs-toggle" onClick={() => setRhsCollapsed(!rhsCollapsed)}>
-            {rhsCollapsed ? "◀ panel" : "panel ▶"}
+          <button
+            type="button"
+            className={`rhs-toggle${rhsCollapsed ? " is-collapsed" : ""}`}
+            title={rhsCollapsed ? "Show panel" : "Hide panel"}
+            aria-label={rhsCollapsed ? "Show panel" : "Hide panel"}
+            onClick={() => setRhsCollapsed(!rhsCollapsed)}
+          >
+            <PanelIcon size={16} />
           </button>
         </div>
       </header>
@@ -50,7 +58,8 @@ export function App() {
                   className={`rhs-tab${rhsTab === tab.id ? " is-active" : ""}`}
                   onClick={() => setRhsTab(tab.id)}
                 >
-                  {tab.label}
+                  <tab.Icon size={15} />
+                  <span>{tab.label}</span>
                 </button>
               ))}
             </nav>
