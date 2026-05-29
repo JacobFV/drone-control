@@ -69,55 +69,69 @@ def _colorize(depth_norm: np.ndarray) -> np.ndarray:
     return rgb.astype(np.uint8)
 
 
-@dataclass(slots=True)
 class _Cloud:
-    voxel: float = 0.15
-    max_points: int = 50_000
-    _keys: set = None  # type: ignore
-    xyz: list = None   # type: ignore
-    rgb: list = None   # type: ignore
+    """Accumulating point cloud. Every point is streamed to disk (full fidelity,
+    nothing discarded); a bounded in-memory ring holds the most recent points for
+    live display and splat seeding."""
 
-    def __post_init__(self) -> None:
-        self._keys = set()
-        self.xyz = []
-        self.rgb = []
+    def __init__(self, stream_path: "Path | None" = None, display_cap: int = 50_000) -> None:
+        from collections import deque
+
+        self.display_cap = display_cap
+        self.stream_path = stream_path
+        self._disp = deque(maxlen=display_cap)   # rows [x,y,z,r,g,b] float32
+        self._total = 0
+        self._fh = open(stream_path, "wb") if stream_path is not None else None
 
     def add(self, points: np.ndarray, colors: np.ndarray) -> None:
-        if len(self.xyz) >= self.max_points:
+        if points.shape[0] == 0:
             return
-        keys = np.round(points / self.voxel).astype(np.int64)
-        for i in range(points.shape[0]):
-            if len(self.xyz) >= self.max_points:
-                break
-            key = (int(keys[i, 0]), int(keys[i, 1]), int(keys[i, 2]))
-            if key in self._keys:
-                continue
-            self._keys.add(key)
-            self.xyz.append(points[i])
-            self.rgb.append(colors[i])
+        rows = np.concatenate(
+            [np.asarray(points, np.float32), np.asarray(colors, np.float32).reshape(-1, 3)], axis=1
+        ).astype(np.float32)
+        if self._fh is not None:
+            self._fh.write(rows.tobytes())
+            self._fh.flush()
+        self._total += rows.shape[0]
+        self._disp.extend(rows)
 
-    def arrays(self) -> tuple[np.ndarray, np.ndarray]:
-        if not self.xyz:
+    def display_arrays(self) -> tuple[np.ndarray, np.ndarray]:
+        if not self._disp:
             return np.zeros((0, 3)), np.zeros((0, 3))
-        return np.asarray(self.xyz, dtype=np.float64), np.asarray(self.rgb, dtype=np.uint8)
+        arr = np.asarray(self._disp, dtype=np.float32)
+        return arr[:, 0:3].astype(np.float64), arr[:, 3:6].astype(np.uint8)
+
+    def all_arrays(self) -> tuple[np.ndarray, np.ndarray]:
+        """The full streamed cloud (read back from disk) — used for export."""
+        if self._fh is not None:
+            self._fh.flush()
+        if self.stream_path is not None and self.stream_path.exists():
+            raw = np.fromfile(self.stream_path, dtype=np.float32)
+            m = raw.size // 6
+            if m:
+                arr = raw[: m * 6].reshape(m, 6)
+                return arr[:, 0:3].astype(np.float64), arr[:, 3:6].astype(np.uint8)
+        return self.display_arrays()
 
     def snapshot(self, max_points: int) -> list[list[float]]:
-        n = len(self.xyz)
-        if n == 0:
+        """The latest ``max_points`` points (most-recently observed)."""
+        if not self._disp:
             return []
-        step = max(1, n // max_points)
-        out = []
-        for i in range(0, n, step):
-            p = self.xyz[i]
-            c = self.rgb[i]
-            out.append([round(float(p[0]), 2), round(float(p[1]), 2), round(float(p[2]), 2),
-                        int(c[0]), int(c[1]), int(c[2])])
-        return out
+        items = list(self._disp)[-max_points:]
+        return [
+            [round(float(r[0]), 2), round(float(r[1]), 2), round(float(r[2]), 2),
+             int(r[3]), int(r[4]), int(r[5])]
+            for r in items
+        ]
 
-    def clear(self) -> None:
-        self._keys.clear()
-        self.xyz.clear()
-        self.rgb.clear()
+    @property
+    def total(self) -> int:
+        return self._total
+
+    def close(self) -> None:
+        if self._fh is not None:
+            self._fh.close()
+            self._fh = None
 
 
 class DepthEstimator:
@@ -128,7 +142,7 @@ class DepthEstimator:
         fov_deg: float = 75.0,
         near: float = 0.5,
         far: float = 12.0,
-        stride: int = 6,
+        stride: int = 4,
     ) -> None:
         self.model_name = model_name
         self.fov_deg = fov_deg
@@ -149,7 +163,7 @@ class DepthEstimator:
                 "available": available(),
                 "reason": unavailable_reason(),
                 "model": self.model_name,
-                "points": len(self._cloud.xyz),
+                "points": self._cloud.total,
                 "dronesWithDepth": sorted(self._depth_jpeg.keys()),
             }
 
@@ -166,10 +180,15 @@ class DepthEstimator:
         if depth_norm is None:
             return
         metric = self.far - depth_norm * (self.far - self.near)  # near where depth_norm high
-        colorized = _colorize(depth_norm)
-        jpeg_out = _encode_jpeg(colorized)
+        # Temporal EMA per drone: noisy (OV2640-style) frames make monocular depth
+        # jitter frame-to-frame, which scatters the back-projected cloud. Blending
+        # with the previous frame's depth stabilises the geometry.
         with self._lock:
-            self._depth_jpeg[drone_id] = jpeg_out
+            prev = self._depth_map.get(drone_id)
+            if prev is not None and prev.shape == metric.shape:
+                metric = (0.6 * prev + 0.4 * metric).astype(np.float64)
+            colorized_src = (self.far - metric) / (self.far - self.near)
+            self._depth_jpeg[drone_id] = _encode_jpeg(_colorize(colorized_src))
             self._depth_map[drone_id] = metric
         if pose is not None:
             xyz, rgb = self._backproject(metric, frame_rgb, pose, cam_rot)
@@ -251,14 +270,21 @@ class DepthEstimator:
             return self._cloud.snapshot(max_points)
 
     def cloud_arrays(self) -> tuple[np.ndarray, np.ndarray]:
+        """Recent (bounded) cloud — for live splat seeding."""
         with self._lock:
-            return self._cloud.arrays()
+            return self._cloud.display_arrays()
 
-    def reset(self) -> None:
+    def cloud_full_arrays(self) -> tuple[np.ndarray, np.ndarray]:
+        """The complete streamed cloud — for export (nothing discarded)."""
+        with self._lock:
+            return self._cloud.all_arrays()
+
+    def reset(self, stream_path: "Path | None" = None) -> None:
         with self._lock:
             self._depth_jpeg.clear()
             self._depth_map.clear()
-            self._cloud.clear()
+            self._cloud.close()
+            self._cloud = _Cloud(stream_path)
 
 
 def _resize(arr: np.ndarray, w: int, h: int) -> np.ndarray:

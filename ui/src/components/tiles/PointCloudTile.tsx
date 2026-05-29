@@ -21,7 +21,7 @@ export function PointCloudTile() {
   useEffect(() => {
     let cancelled = false;
     const tick = async () => {
-      const res = await api.getPointCloud(3000);
+      const res = await api.getPointCloud(8000);  // latest N points
       if (!cancelled && res?.points) pointsRef.current = res.points;
     };
     void tick();

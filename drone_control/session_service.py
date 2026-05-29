@@ -123,7 +123,9 @@ class SessionService:
             )
 
             self.segmenter.reset()
-            self.depth.reset()
+            cloud_dir = self.export_root / "clouds"
+            cloud_dir.mkdir(parents=True, exist_ok=True)
+            self.depth.reset(stream_path=cloud_dir / f"{session['id']}.bin")
             self._seeded = False
             # The sim owns its own splat engine (it has exact poses); the real
             # runtime builds its splat through its own ingestion path.
@@ -380,13 +382,13 @@ class SessionService:
                     drone_id, jpeg,
                     {"x": float(center[0]), "y": float(center[1]), "z": float(center[2]), "rotation_xyzw": quat},
                 )
-        # Seed the sim splat once from the metric depth cloud for a dense init.
-        if run_depth and self._splat is not None and not self._seeded:
+        # Re-seed the sim splat from the latest cloud each depth tick so it grows
+        # denser as the swarm explores (rather than freezing at the first ~1k).
+        if run_depth and self._splat is not None:
             xyz, rgb = self.depth.cloud_arrays()
             if xyz.shape[0]:
                 try:
-                    # Visible gaussian size at scene scale (~voxel size of the cloud).
-                    self._splat.seed_from_points(xyz, rgb, scale=0.18)
+                    self._splat.seed_from_points(xyz, rgb, scale=0.22)
                     self._seeded = True
                 except Exception:
                     pass
@@ -512,8 +514,8 @@ class SessionService:
             )
         metrics["worldObjects"] = len(world)
 
-        # Estimated-depth point cloud.
-        xyz, rgb = self.depth.cloud_arrays()
+        # Estimated-depth point cloud (full, streamed — nothing discarded).
+        xyz, rgb = self.depth.cloud_full_arrays()
         if xyz.shape[0]:
             cloud_path = session_dir / "pointcloud.ply"
             write_ply(cloud_path, xyz, rgb)
