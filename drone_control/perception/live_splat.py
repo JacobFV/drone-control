@@ -190,6 +190,10 @@ class LiveSplatEngine:
             grad = params["means"].grad
             if grad is not None:
                 norm = grad.norm(dim=1)
+                # The gaussian count can change under us (re-seed / densify / prune);
+                # drop a stale accumulator whose length no longer matches.
+                if self._mean_grad_accum is not None and self._mean_grad_accum.shape[0] != norm.shape[0]:
+                    self._mean_grad_accum = None
                 self._mean_grad_accum = norm if self._mean_grad_accum is None else self._mean_grad_accum + norm
         optimizer.step()
 

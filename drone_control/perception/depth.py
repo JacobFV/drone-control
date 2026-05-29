@@ -74,13 +74,14 @@ class _Cloud:
     nothing discarded); a bounded in-memory ring holds the most recent points for
     live display and splat seeding."""
 
-    def __init__(self, stream_path: "Path | None" = None, display_cap: int = 50_000) -> None:
-        from collections import deque
-
+    def __init__(self, stream_path: "Path | None" = None, display_cap: int = 1_000_000) -> None:
         self.display_cap = display_cap
         self.stream_path = stream_path
-        self._disp = deque(maxlen=display_cap)   # rows [x,y,z,r,g,b] float32
-        self._total = 0
+        # Contiguous ring buffer [cap, 6] (x,y,z,r,g,b); cheap at 1M (~24 MB).
+        self._buf = np.zeros((display_cap, 6), dtype=np.float32)
+        self._w = 0          # write head
+        self._n = 0          # filled count (<= cap)
+        self._total = 0      # lifetime points (also streamed to disk)
         self._fh = open(stream_path, "wb") if stream_path is not None else None
 
     def add(self, points: np.ndarray, colors: np.ndarray) -> None:
@@ -90,15 +91,33 @@ class _Cloud:
             [np.asarray(points, np.float32), np.asarray(colors, np.float32).reshape(-1, 3)], axis=1
         ).astype(np.float32)
         if self._fh is not None:
-            self._fh.write(rows.tobytes())
+            self._fh.write(rows.tobytes())   # full fidelity, nothing dropped
             self._fh.flush()
         self._total += rows.shape[0]
-        self._disp.extend(rows)
+        cap = self.display_cap
+        if rows.shape[0] > cap:
+            rows = rows[-cap:]
+        k = rows.shape[0]
+        end = self._w + k
+        if end <= cap:
+            self._buf[self._w:end] = rows
+        else:
+            first = cap - self._w
+            self._buf[self._w:] = rows[:first]
+            self._buf[: k - first] = rows[first:]
+        self._w = (self._w + k) % cap
+        self._n = min(cap, self._n + k)
+
+    def _ordered(self) -> np.ndarray:
+        """Ring contents oldest -> newest."""
+        if self._n < self.display_cap:
+            return self._buf[: self._n]
+        return np.concatenate([self._buf[self._w:], self._buf[: self._w]], axis=0)
 
     def display_arrays(self) -> tuple[np.ndarray, np.ndarray]:
-        if not self._disp:
+        arr = self._ordered()
+        if arr.shape[0] == 0:
             return np.zeros((0, 3)), np.zeros((0, 3))
-        arr = np.asarray(self._disp, dtype=np.float32)
         return arr[:, 0:3].astype(np.float64), arr[:, 3:6].astype(np.uint8)
 
     def all_arrays(self) -> tuple[np.ndarray, np.ndarray]:
@@ -115,13 +134,14 @@ class _Cloud:
 
     def snapshot(self, max_points: int) -> list[list[float]]:
         """The latest ``max_points`` points (most-recently observed)."""
-        if not self._disp:
+        arr = self._ordered()
+        if arr.shape[0] == 0:
             return []
-        items = list(self._disp)[-max_points:]
+        arr = arr[-max_points:]
         return [
             [round(float(r[0]), 2), round(float(r[1]), 2), round(float(r[2]), 2),
              int(r[3]), int(r[4]), int(r[5])]
-            for r in items
+            for r in arr
         ]
 
     @property
@@ -248,6 +268,15 @@ class DepthEstimator:
         gx = gx.reshape(-1)
         gy = gy.reshape(-1)
         d = metric[gy, gx]
+        # Reject far-plane pixels: monocular depth has no true far signal, so a
+        # pixel mapped at (or very near) the far plane is sky / "no return", not a
+        # real surface. Without multi-view parallax we can't distinguish a genuine
+        # distant surface from that — so we treat the far band as invalid and drop
+        # it rather than spraying a false dome of points at the clip distance.
+        valid = (d < self.far * 0.96) & (d > self.near * 1.02)
+        gx, gy, d = gx[valid], gy[valid], d[valid]
+        if gx.size == 0:
+            return np.zeros((0, 3)), np.zeros((0, 3))
         rays = np.stack([(gx - cx) / focal, (gy - cy) / focal, np.ones_like(gx, dtype=float)], axis=1)
         rays = rays / (np.linalg.norm(rays, axis=1, keepdims=True) + 1e-9)
         cam = rays * d[:, None]

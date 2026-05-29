@@ -382,13 +382,18 @@ class SessionService:
                     drone_id, jpeg,
                     {"x": float(center[0]), "y": float(center[1]), "z": float(center[2]), "rotation_xyzw": quat},
                 )
-        # Re-seed the sim splat from the latest cloud each depth tick so it grows
-        # denser as the swarm explores (rather than freezing at the first ~1k).
-        if run_depth and self._splat is not None:
+        # Seed the splat ONCE from an initial metric cloud (good geometry init),
+        # then let the optimizer + densification converge against the keyframes
+        # ingested above. Re-seeding every tick would reset the optimizer and the
+        # splat could never converge to true Gaussian-splat quality.
+        if run_depth and self._splat is not None and not self._seeded:
             xyz, rgb = self.depth.cloud_arrays()
-            if xyz.shape[0]:
+            if xyz.shape[0] >= 1500:
+                if xyz.shape[0] > 60_000:  # cap the init set; densify grows it
+                    idx = np.linspace(0, xyz.shape[0] - 1, 60_000).astype(int)
+                    xyz, rgb = xyz[idx], rgb[idx]
                 try:
-                    self._splat.seed_from_points(xyz, rgb, scale=0.22)
+                    self._splat.seed_from_points(xyz, rgb, scale=0.15)
                     self._seeded = True
                 except Exception:
                     pass
