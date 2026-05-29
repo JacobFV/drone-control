@@ -10,7 +10,9 @@ import type {
   ReconstructionTools,
   RuntimeStatus,
   SessionStatus,
+  SimStatus,
   StationState,
+  TrajectoriesResult,
   WorldSplatStatus,
 } from "./types";
 
@@ -188,7 +190,29 @@ export const api = {
     request("POST", `/api/runtime/drones/${droneId}/camera/start`, body),
   cameraStop: (droneId: string) =>
     request("POST", `/api/runtime/drones/${droneId}/camera/stop`, {}),
+
+  // ----- Simulation (live) -----
+  getSimStatus: () => request<SimStatus>("GET", "/api/sim/status"),
+  getSimTrajectories: () => request<TrajectoriesResult>("GET", "/api/sim/trajectories"),
+  simStart: (body: Record<string, unknown>) => request<SimStatus>("POST", "/api/sim/start", body),
+  simStop: () => request<SimStatus>("POST", "/api/sim/stop", {}),
+
+  // ----- Multi-drone trajectories (real runtime) -----
+  getRuntimeTrajectories: () => request<TrajectoriesResult>("GET", "/api/runtime/trajectories"),
+
+  // ----- Guidance -----
+  setDroneGuidance: (droneId: string, body: Record<string, unknown>) =>
+    request("POST", `/api/guidance/drones/${droneId}`, body),
 };
+
+/** Service-relative per-drone camera frame paths (used as <img> src). */
+export function simFramePath(index: number): string {
+  return `/api/sim/drones/${index}/frame`;
+}
+
+export function runtimeFramePath(droneId: string): string {
+  return `/api/runtime/drones/${droneId}/frame`;
+}
 
 /**
  * Download the live world-model .ply snapshot. The snapshot endpoint returns a

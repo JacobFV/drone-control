@@ -272,6 +272,60 @@ export function ReconstructPanel() {
 }
 
 // --------------------------------------------------------------------------- //
+// Simulation (always visible)
+// --------------------------------------------------------------------------- //
+
+const SIM_TASKS = ["goto", "hover", "formation"];
+
+export function SimPanel() {
+  const { setMainView, setDataSource } = useStation();
+  const [status, setStatus] = useState<{ running?: boolean; step?: number; numDrones?: number } | null>(null);
+  const [numDrones, setNumDrones] = useState(4);
+  const [task, setTask] = useState("goto");
+
+  usePolling(async () => {
+    const result = await api.getSimStatus();
+    if (result) setStatus(result);
+  }, 1000);
+
+  const running = Boolean(status?.running);
+  const start = async () => {
+    await api.simStart({ numDrones, task, rateHz: 15, render: true });
+    setDataSource("sim");
+    setMainView("cameras");
+  };
+  const stop = async () => {
+    await api.simStop();
+  };
+
+  return (
+    <Panel title="Simulation" right={<Pill tone={running ? "ok" : "default"}>{running ? "Running" : "Stopped"}</Pill>}>
+      <Field label="Drones">
+        <input type="number" min={1} max={10} value={numDrones} onChange={(e) => setNumDrones(Number(e.target.value))} />
+      </Field>
+      <Field label="Task">
+        <select value={task} onChange={(e) => setTask(e.target.value)}>
+          {SIM_TASKS.map((t) => (
+            <option key={t} value={t}>{upper(t)}</option>
+          ))}
+        </select>
+      </Field>
+      <div className="button-row">
+        <Button variant="primary" onClick={start} disabled={running}>Start sim</Button>
+        <Button onClick={stop} disabled={!running}>Stop</Button>
+      </div>
+      <KeyValue
+        entries={[
+          { key: "Step", value: status?.step },
+          { key: "Drones", value: status?.numDrones },
+        ]}
+      />
+      <p className="note">Watch the swarm in the Cameras and Trajectories views (source: Sim).</p>
+    </Panel>
+  );
+}
+
+// --------------------------------------------------------------------------- //
 // Swarm / VLA (always visible)
 // --------------------------------------------------------------------------- //
 

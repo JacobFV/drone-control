@@ -3,6 +3,7 @@ import { useStation } from "../store/StationContext";
 import { absoluteServiceUrl } from "../api/client";
 import { Sim3D } from "./Sim3D";
 import { WorldModelView } from "./WorldModelView";
+import { CameraWall } from "./CameraWall";
 import type { RecordEntry } from "../api/types";
 
 function useAbsolute(path: string | undefined): string {
@@ -53,6 +54,7 @@ export function Viewport() {
     <main className="viewport">
       {mainView === "forward" && <CameraView label="Forward" />}
       {mainView === "downward" && <CameraView label="Downward" />}
+      {mainView === "cameras" && <CameraWall />}
       {mainView === "simulation" && <Sim3D />}
       {mainView === "world" && <WorldModelView />}
     </main>

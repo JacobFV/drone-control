@@ -24,7 +24,8 @@ import type {
 } from "../api/types";
 
 export type WorkflowStep = "connect" | "fly" | "record" | "reconstruct";
-export type MainView = "forward" | "downward" | "simulation" | "world";
+export type MainView = "forward" | "downward" | "simulation" | "world" | "cameras";
+export type DataSource = "sim" | "real";
 
 interface StationContextValue {
   // service
@@ -49,6 +50,7 @@ interface StationContextValue {
   // UI shell
   step: WorkflowStep;
   mainView: MainView;
+  dataSource: DataSource;
   settingsOpen: boolean;
   lhsCollapsed: boolean;
   rhsCollapsed: boolean;
@@ -56,6 +58,7 @@ interface StationContextValue {
   // setters
   setStep: (step: WorkflowStep) => void;
   setMainView: (view: MainView) => void;
+  setDataSource: (source: DataSource) => void;
   setSettingsOpen: (open: boolean) => void;
   setLhsCollapsed: (v: boolean) => void;
   setRhsCollapsed: (v: boolean) => void;
@@ -105,6 +108,7 @@ export function StationProvider({ children }: { children: ReactNode }) {
 
   const [step, setStep] = useState<WorkflowStep>("connect");
   const [mainView, setMainView] = useState<MainView>("forward");
+  const [dataSource, setDataSource] = useState<DataSource>("sim");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [lhsCollapsed, setLhsCollapsed] = useState(false);
   const [rhsCollapsed, setRhsCollapsed] = useState(false);
@@ -261,11 +265,13 @@ export function StationProvider({ children }: { children: ReactNode }) {
     runtimeStatus,
     step,
     mainView,
+    dataSource,
     settingsOpen,
     lhsCollapsed,
     rhsCollapsed,
     setStep,
     setMainView,
+    setDataSource,
     setSettingsOpen,
     setLhsCollapsed,
     setRhsCollapsed,

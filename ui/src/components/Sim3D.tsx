@@ -10,38 +10,47 @@ import {
   type OrbitView,
   type Vec3,
 } from "../lib/pose3d";
-import type { Pose, PoseStatus } from "../api/types";
+import type { Pose, TrajectoryDrone } from "../api/types";
 
 export function Sim3D() {
-  const { selectedFlightId } = useStation();
+  const { dataSource, selectedFlightId } = useStation();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const viewRef = useRef<OrbitView>({ ...DEFAULT_VIEW, target: [...DEFAULT_VIEW.target] });
-  const posesRef = useRef<Pose[]>([]);
-  const sinceRef = useRef(0);
-  const [status, setStatus] = useState<PoseStatus | null>(null);
-  const [, force] = useState(0);
+  const tracksRef = useRef<TrajectoryDrone[]>([]);
+  const [summary, setSummary] = useState({ drones: 0, points: 0, running: false });
 
-  // Reset accumulation when the flight changes.
+  // Poll trajectories from the selected source (sim live, or real runtime; if the
+  // real runtime has no pose track yet, fall back to the selected flight's track).
   useEffect(() => {
-    posesRef.current = [];
-    sinceRef.current = 0;
-    setStatus(null);
-  }, [selectedFlightId]);
-
-  // Poll the pose track.
-  useEffect(() => {
-    if (!selectedFlightId) return;
     let cancelled = false;
     const tick = async () => {
-      const result = await api.getPoseTrack(selectedFlightId, sinceRef.current);
-      if (cancelled || !result) return;
-      if (result.status) setStatus(result.status);
-      if (result.poses && result.poses.length) {
-        posesRef.current = posesRef.current.concat(result.poses);
-        const last = result.poses[result.poses.length - 1];
-        if (typeof last.frameIndex === "number") sinceRef.current = last.frameIndex;
-        force((n) => n + 1);
+      if (dataSource === "sim") {
+        const result = await api.getSimTrajectories();
+        if (cancelled || !result) return;
+        tracksRef.current = result.drones;
+        setSummary({
+          drones: result.drones.length,
+          points: result.drones.reduce((n, d) => n + d.poses.length, 0),
+          running: Boolean(result.running),
+        });
+        return;
       }
+      const runtime = await api.getRuntimeTrajectories();
+      let drones: TrajectoryDrone[] = runtime?.drones ?? [];
+      const hasPoses = drones.some((d) => d.poses.length > 0);
+      if (!hasPoses && selectedFlightId) {
+        const track = await api.getPoseTrack(selectedFlightId, 0);
+        if (track?.poses?.length) {
+          drones = [{ droneId: selectedFlightId, color: "#7fd1ff", goal: null, poses: track.poses }];
+        }
+      }
+      if (cancelled) return;
+      tracksRef.current = drones;
+      setSummary({
+        drones: drones.length,
+        points: drones.reduce((n, d) => n + d.poses.length, 0),
+        running: Boolean(runtime?.running),
+      });
     };
     void tick();
     const id = window.setInterval(tick, 500);
@@ -49,7 +58,7 @@ export function Sim3D() {
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [selectedFlightId]);
+  }, [dataSource, selectedFlightId]);
 
   // Draw loop.
   useEffect(() => {
@@ -57,7 +66,6 @@ export function Sim3D() {
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-
     let raf = 0;
     const render = () => {
       const rect = canvas.getBoundingClientRect();
@@ -69,23 +77,21 @@ export function Sim3D() {
         canvas.height = h * dpr;
       }
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      ctx.clearRect(0, 0, w, h);
       ctx.fillStyle = "#0b0e13";
       ctx.fillRect(0, 0, w, h);
-
       const view = computeViewMatrix(viewRef.current);
       const focal = Math.min(w, h) * 0.9;
-
       drawGrid(ctx, view, focal, w, h);
-      drawTrajectory(ctx, posesRef.current, view, focal, w, h);
-
+      for (const track of tracksRef.current) {
+        drawTrajectory(ctx, track, view, focal, w, h);
+      }
       raf = window.requestAnimationFrame(render);
     };
     raf = window.requestAnimationFrame(render);
     return () => window.cancelAnimationFrame(raf);
   }, []);
 
-  // Pointer interaction: drag to orbit, shift/right-drag to pan, wheel to zoom.
+  // Orbit / pan / zoom.
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -93,7 +99,6 @@ export function Sim3D() {
     let panning = false;
     let lastX = 0;
     let lastY = 0;
-
     const down = (e: PointerEvent) => {
       dragging = true;
       panning = e.shiftKey || e.button === 2;
@@ -108,9 +113,8 @@ export function Sim3D() {
       lastX = e.clientX;
       lastY = e.clientY;
       const view = viewRef.current;
-      if (panning) {
-        panView(view, dx, dy, Math.min(canvas.clientWidth, canvas.clientHeight));
-      } else {
+      if (panning) panView(view, dx, dy, Math.min(canvas.clientWidth, canvas.clientHeight));
+      else {
         view.yaw -= dx * 0.01;
         view.pitch = Math.max(-1.5, Math.min(1.5, view.pitch + dy * 0.01));
       }
@@ -130,7 +134,6 @@ export function Sim3D() {
       view.distance = Math.max(2, Math.min(500, view.distance * (1 + Math.sign(e.deltaY) * 0.1)));
     };
     const ctxMenu = (e: Event) => e.preventDefault();
-
     canvas.addEventListener("pointerdown", down);
     canvas.addEventListener("pointermove", move);
     canvas.addEventListener("pointerup", up);
@@ -148,12 +151,8 @@ export function Sim3D() {
   const resetView = () => {
     viewRef.current = { ...DEFAULT_VIEW, target: [...DEFAULT_VIEW.target] };
   };
-
   const recompute = async () => {
-    if (!selectedFlightId) return;
-    await api.computePoseTrack(selectedFlightId);
-    posesRef.current = [];
-    sinceRef.current = 0;
+    if (dataSource === "real" && selectedFlightId) await api.computePoseTrack(selectedFlightId);
   };
 
   return (
@@ -161,19 +160,25 @@ export function Sim3D() {
       <canvas ref={canvasRef} className="sim-canvas" />
       <div className="sim-overlay">
         <div className="sim-buttons">
-          <Button onClick={recompute}>Recompute</Button>
           <Button onClick={resetView}>Reset view</Button>
+          {dataSource === "real" && <Button onClick={recompute}>Recompute</Button>}
         </div>
         <KeyValue
           entries={[
-            { key: "State", value: status?.state ?? "—" },
-            { key: "FPS", value: status?.fps },
-            { key: "Keyframes", value: status?.keyframes },
-            { key: "Poses", value: posesRef.current.length },
-            { key: "Scale", value: status?.scaleLocked ? "metric" : "arbitrary" },
-            { key: "Intrinsics", value: status?.intrinsicsSource ?? "—" },
+            { key: "Source", value: dataSource === "sim" ? "simulation" : "real" },
+            { key: "Drones", value: summary.drones },
+            { key: "Track points", value: summary.points },
+            { key: "Live", value: summary.running ? "yes" : "no" },
           ]}
         />
+        <div className="traj-legend">
+          {tracksRef.current.map((t) => (
+            <span key={t.droneId} className="legend-item">
+              <span className="legend-dot" style={{ background: t.color }} />
+              {t.droneId}
+            </span>
+          ))}
+        </div>
       </div>
     </div>
   );
@@ -193,7 +198,6 @@ function drawGrid(
     line(ctx, [i, -span, 0], [i, span, 0], view, focal, w, h);
     line(ctx, [-span, i, 0], [span, i, 0], view, focal, w, h);
   }
-  // Axes
   ctx.lineWidth = 2;
   ctx.strokeStyle = "#e0524a";
   line(ctx, [0, 0, 0], [4, 0, 0], view, focal, w, h);
@@ -205,39 +209,48 @@ function drawGrid(
 
 function drawTrajectory(
   ctx: CanvasRenderingContext2D,
-  poses: Pose[],
+  track: TrajectoryDrone,
   view: ReturnType<typeof computeViewMatrix>,
   focal: number,
   w: number,
   h: number,
 ): void {
-  if (poses.length === 0) return;
-  ctx.strokeStyle = "#7fd1ff";
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  let started = false;
-  for (const pose of poses) {
-    const p = projectPoint([pose.x, pose.y, pose.z], view, focal, w, h);
-    if (!p) {
-      started = false;
-      continue;
+  const poses = track.poses;
+  if (poses.length) {
+    ctx.strokeStyle = track.color;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    let started = false;
+    for (const pose of poses) {
+      const p = projectPoint([pose.x, pose.y, pose.z], view, focal, w, h);
+      if (!p) {
+        started = false;
+        continue;
+      }
+      if (!started) {
+        ctx.moveTo(p[0], p[1]);
+        started = true;
+      } else ctx.lineTo(p[0], p[1]);
     }
-    if (!started) {
-      ctx.moveTo(p[0], p[1]);
-      started = true;
-    } else {
-      ctx.lineTo(p[0], p[1]);
+    ctx.stroke();
+
+    const last: Pose = poses[poses.length - 1];
+    const lp = projectPoint([last.x, last.y, last.z], view, focal, w, h);
+    if (lp) {
+      ctx.fillStyle = track.color;
+      ctx.beginPath();
+      ctx.arc(lp[0], lp[1], 4, 0, Math.PI * 2);
+      ctx.fill();
     }
   }
-  ctx.stroke();
 
-  const last = poses[poses.length - 1];
-  const lp = projectPoint([last.x, last.y, last.z], view, focal, w, h);
-  if (lp) {
-    ctx.fillStyle = "#ffd35a";
-    ctx.beginPath();
-    ctx.arc(lp[0], lp[1], 4, 0, Math.PI * 2);
-    ctx.fill();
+  if (track.goal) {
+    const g = projectPoint([track.goal[0], track.goal[1], track.goal[2]], view, focal, w, h);
+    if (g) {
+      ctx.strokeStyle = track.color;
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(g[0] - 5, g[1] - 5, 10, 10);
+    }
   }
 }
 

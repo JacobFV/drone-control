@@ -1,6 +1,6 @@
 import { SegmentedControl } from "./primitives";
 import { useStation, type WorkflowStep } from "../store/StationContext";
-import { ConnectPanel, FlyPanel, RecordPanel, ReconstructPanel, SwarmPanel } from "./panels";
+import { ConnectPanel, FlyPanel, RecordPanel, ReconstructPanel, SimPanel, SwarmPanel } from "./panels";
 
 const STEP_OPTIONS: { value: WorkflowStep; label: string }[] = [
   { value: "connect", label: "Connect" },
@@ -22,6 +22,7 @@ export function Inspector() {
         {step === "record" && <RecordPanel />}
         {step === "reconstruct" && <ReconstructPanel />}
         <SwarmPanel />
+        <SimPanel />
       </div>
     </aside>
   );

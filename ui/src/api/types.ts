@@ -254,3 +254,34 @@ export interface DiscoverResult {
   state?: StationState;
   discovered?: Array<{ ssid: string }>;
 }
+
+export interface SimDrone {
+  droneId: string;
+  color: string;
+  position: number[];
+  goal: number[];
+  distance: number;
+  hasFrame: boolean;
+}
+
+export interface SimStatus {
+  running?: boolean;
+  task?: string;
+  numDrones?: number;
+  rateHz?: number;
+  step?: number;
+  render?: boolean;
+  drones?: SimDrone[];
+}
+
+export interface TrajectoryDrone {
+  droneId: string;
+  color: string;
+  goal: number[] | null;
+  poses: Pose[];
+}
+
+export interface TrajectoriesResult {
+  running?: boolean;
+  drones: TrajectoryDrone[];
+}
