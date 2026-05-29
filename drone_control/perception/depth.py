@@ -72,7 +72,7 @@ def _colorize(depth_norm: np.ndarray) -> np.ndarray:
 @dataclass(slots=True)
 class _Cloud:
     voxel: float = 0.15
-    max_points: int = 80_000
+    max_points: int = 50_000
     _keys: set = None  # type: ignore
     xyz: list = None   # type: ignore
     rgb: list = None   # type: ignore

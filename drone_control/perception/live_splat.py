@@ -327,6 +327,18 @@ class LiveSplatEngine:
                 "lastLoss": self._last_loss,
             }
 
+    def bounds(self) -> dict[str, Any] | None:
+        """Centre + radius of the gaussian means, for framing a viewer camera."""
+        with self._lock:
+            if self._params is None:
+                return None
+            means = self._params["means"].detach().cpu().numpy()
+        if means.shape[0] == 0:
+            return None
+        center = means.mean(axis=0)
+        radius = float(np.linalg.norm(means - center, axis=1).max())
+        return {"center": [float(v) for v in center], "radius": max(0.5, radius)}
+
     def export_ply(self, path: Path) -> Path:
         with self._lock:
             if self._params is None:
@@ -359,11 +371,13 @@ class LiveSplatEngine:
         viewmat = np.linalg.inv(c2w_world)
         return torch.from_numpy(viewmat.astype(np.float32)).to(self.device)
 
-    def seed_from_points(self, xyz: np.ndarray, rgb: np.ndarray | None = None) -> int:
-        """Initialise the gaussian set from a (COLMAP) point cloud in the shared frame.
+    def seed_from_points(self, xyz: np.ndarray, rgb: np.ndarray | None = None, scale: float = 0.05) -> int:
+        """Initialise the gaussian set from a point cloud in the shared frame.
 
-        This replaces self-bootstrap with real geometry once cross-drone
-        co-registration has solved a sparse cloud. Returns the gaussian count.
+        ``rgb`` may be 0..1 or 0..255 (auto-normalised). ``scale`` is the initial
+        gaussian radius in world units — too small renders as invisible specks at
+        scene scale, so callers seeding a metric cloud should pass a visible size.
+        Returns the gaussian count.
         """
 
         xyz = np.asarray(xyz, dtype=np.float32)
@@ -372,11 +386,13 @@ class LiveSplatEngine:
         if rgb is None:
             rgb = np.full_like(xyz, 0.5)
         rgb = np.asarray(rgb, dtype=np.float32).reshape(-1, 3)
+        if float(rgb.max()) > 1.5:           # passed as 0..255
+            rgb = rgb / 255.0
         count = xyz.shape[0]
         with self._lock:
             means = torch.from_numpy(xyz).to(self.device)
             colors = torch.from_numpy(np.clip(rgb, 1e-3, 1 - 1e-3)).to(self.device)
-            scales_log = torch.full((count, 3), float(np.log(0.05)), device=self.device)
+            scales_log = torch.full((count, 3), float(np.log(max(1e-3, scale))), device=self.device)
             quats = torch.zeros((count, 4), device=self.device)
             quats[:, 0] = 1.0
             opacities_raw = torch.full((count,), -1.0, device=self.device)

@@ -102,7 +102,10 @@ class ControlStationHandler(BaseHTTPRequestHandler):
             self.wfile.write(data)
             return
         if parsed.path == "/api/session/splat/viewer":
-            body = splat_viewer_html("Live splat", "/api/session/splat/snapshot", fmt="ply").encode()
+            bounds = self.server.session_service.splat_bounds()
+            body = splat_viewer_html(
+                "Live splat", "/api/session/splat/snapshot", fmt="ply", bounds=bounds
+            ).encode()
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -1592,10 +1595,11 @@ def export_frame_dir(frame_dir: Path, export_root: Path, *, fmt: str, fps: float
     raise RuntimeError(f"unsupported export format: {fmt}")
 
 
-def splat_viewer_html(title: str, artifact_url: str, fmt: str | None = None) -> str:
+def splat_viewer_html(title: str, artifact_url: str, fmt: str | None = None, bounds: dict | None = None) -> str:
     escaped_title = html.escape(title)
     title_json = json.dumps(title)
     url_json = json.dumps(artifact_url)
+    bounds_json = json.dumps(bounds)
     # Choose the gsplat loader by artifact format. ``.ply`` (our live/INRIA
     # export) needs PLYLoader; ``.splat`` is the packed format; ``.spz`` is
     # compressed. Loader.LoadAsync (splat) on a .ply throws "byte length ...
@@ -1622,6 +1626,7 @@ def splat_viewer_html(title: str, artifact_url: str, fmt: str | None = None) -> 
       import * as SPLAT from "https://cdn.jsdelivr.net/npm/gsplat@latest/+esm";
       const label = {title_json};
       const fmt = {fmt_json};
+      const bounds = {bounds_json};
       const artifactUrl = new URL({url_json}, window.location.href).toString();
       const status = document.getElementById("status");
       const scene = new SPLAT.Scene();
@@ -1647,6 +1652,16 @@ def splat_viewer_html(title: str, artifact_url: str, fmt: str | None = None) -> 
           else throw first;
         }}
         status.textContent = label;
+        // Frame the camera on the splat (its world bounds), else gsplat's default
+        // camera may not point at the gaussians and the scene looks empty.
+        try {{
+          if (bounds && bounds.center) {{
+            const c = bounds.center, r = Math.max(0.5, bounds.radius || 1);
+            const dist = r * 2.6;
+            camera.position = new SPLAT.Vector3(c[0] + dist * 0.6, c[1] - dist * 0.8, c[2] + dist * 0.5);
+            if (controls.setCameraTarget) controls.setCameraTarget(new SPLAT.Vector3(c[0], c[1], c[2]));
+          }}
+        }} catch (e) {{ console.warn("framing failed", e); }}
         const frame = () => {{
           controls.update();
           renderer.render(scene, camera);

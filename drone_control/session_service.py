@@ -229,6 +229,12 @@ class SessionService:
     def point_cloud(self, max_points: int = 2500) -> dict[str, Any]:
         return {"points": self.depth.cloud_snapshot(max_points)}
 
+    def splat_bounds(self) -> dict[str, Any] | None:
+        """Centre + radius of the live splat, for framing the viewer camera."""
+        if self._splat is not None and hasattr(self._splat, "bounds"):
+            return self._splat.bounds()
+        return None
+
     def splat_snapshot(self) -> bytes | None:
         """Export the active splat to .ply bytes (sim engine or runtime world)."""
         env = self._env
@@ -379,7 +385,8 @@ class SessionService:
             xyz, rgb = self.depth.cloud_arrays()
             if xyz.shape[0]:
                 try:
-                    self._splat.seed_from_points(xyz, rgb)
+                    # Visible gaussian size at scene scale (~voxel size of the cloud).
+                    self._splat.seed_from_points(xyz, rgb, scale=0.18)
                     self._seeded = True
                 except Exception:
                     pass
