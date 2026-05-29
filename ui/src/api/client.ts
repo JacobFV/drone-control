@@ -68,9 +68,16 @@ export const api = {
   getConfig: () => request<ConfigStatus>("GET", "/api/config"),
   getNetwork: () => request<NetworkSummary>("GET", "/api/system/network"),
 
-  // ----- Environments -----
+  // ----- Scenes / environments -----
+  getScenes: () => request<{ scenes: { id: string; name: string; kind: string }[] }>("GET", "/api/scenes"),
   createEnvironment: (name: string, kind: string, config: Record<string, unknown> = {}) =>
     request<{ id: string }>("POST", "/api/environments", { name, kind, config }),
+
+  // ----- Records (review) -----
+  getRecordPoseTrack: (recordId: string) =>
+    request<{ poses: { x: number; y: number; z: number }[] }>("GET", `/api/records/${recordId}/pose-track`),
+  getRecordArtifact: <T = unknown>(recordId: string) =>
+    request<T>("GET", `/api/records/${recordId}/artifact`),
 
   // ----- Session (the single active flight session) -----
   getSessionStatus: () => request<SessionStatus>("GET", "/api/session/status"),

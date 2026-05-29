@@ -13,11 +13,11 @@ function classColor(cls: string): string {
 }
 
 /** Interactive 3D tile: fused world-space segmented objects in the splat frame. */
-export function WorldSegTile() {
+export function WorldSegTile({ objects: objectsProp }: { objects?: WorldObject[] } = {}) {
   const { snapshot } = useSession();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const { viewRef, reset } = useOrbit(canvasRef);
-  const objects = snapshot?.session.segmentation?.world ?? [];
+  const objects = objectsProp ?? snapshot?.session.segmentation?.world ?? [];
   const objRef = useRef<WorldObject[]>(objects);
   objRef.current = objects;
 

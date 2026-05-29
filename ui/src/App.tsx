@@ -1,9 +1,13 @@
+import { useEffect, useRef } from "react";
 import { TileGrid } from "./components/TileGrid";
+import { ReviewGrid } from "./components/ReviewGrid";
+import { SessionPicker } from "./components/SessionPicker";
+import { NewSessionModal } from "./components/NewSessionModal";
 import { FlightPanel } from "./components/panels/FlightPanel";
 import { ConnectionsPanel } from "./components/panels/ConnectionsPanel";
 import { ConfigPanel } from "./components/panels/ConfigPanel";
 import { useSession, type RhsTab } from "./store/SessionContext";
-import { ConfigIcon, ConnectionsIcon, FlightIcon, PanelIcon } from "./components/icons";
+import { ConfigIcon, ConnectionsIcon, FlightIcon, PanelIcon, PlusIcon } from "./components/icons";
 import type { ComponentType, SVGProps } from "react";
 
 const TABS: { id: RhsTab; label: string; Icon: ComponentType<SVGProps<SVGSVGElement> & { size?: number }> }[] = [
@@ -13,23 +17,53 @@ const TABS: { id: RhsTab; label: string; Icon: ComponentType<SVGProps<SVGSVGElem
 ];
 
 export function App() {
-  const { health, transport, snapshot, rhsTab, setRhsTab, rhsCollapsed, setRhsCollapsed } = useSession();
+  const {
+    health,
+    transport,
+    snapshot,
+    state,
+    rhsTab,
+    setRhsTab,
+    rhsCollapsed,
+    setRhsCollapsed,
+    reviewSessionId,
+    setNewSessionOpen,
+  } = useSession();
+
   const active = snapshot?.session.active;
+  const reviewed = reviewSessionId
+    ? state?.environments.flatMap((e) => e.sessions).find((s) => s.id === reviewSessionId) ?? null
+    : null;
+
+  // Surface the new-session modal once when the app opens idle (no live session,
+  // not reviewing) so there is a clear place to begin.
+  const autoShown = useRef(false);
+  useEffect(() => {
+    if (autoShown.current) return;
+    if (health === "ready" && snapshot && !active && !reviewSessionId) {
+      autoShown.current = true;
+      setNewSessionOpen(true);
+    }
+  }, [health, snapshot, active, reviewSessionId, setNewSessionOpen]);
 
   return (
     <div className={`shell${rhsCollapsed ? " rhs-collapsed" : ""}`}>
       <header className="topbar">
-        <div className="brand">
-          <span className="brand-mark">◆</span>
-          <span className="brand-name">Drone Control Station</span>
+        <div className="topbar-left">
+          <div className="brand">
+            <span className="brand-mark">◆</span>
+            <span className="brand-name">Drone Control Station</span>
+          </div>
+          <SessionPicker />
         </div>
         <div className="topbar-status">
+          <button type="button" className="new-session-btn" onClick={() => setNewSessionOpen(true)}>
+            <PlusIcon size={15} />
+            <span>New session</span>
+          </button>
           <span className={`status-dot status-${health}`} />
           <span className="status-text">
-            {health === "ready" ? "service ready" : health}
-            {" · "}
-            {transport}
-            {active ? " · live session" : " · idle"}
+            {health === "ready" ? "ready" : health} · {transport}
           </span>
           <button
             type="button"
@@ -45,7 +79,7 @@ export function App() {
 
       <div className="workspace">
         <main className="wall">
-          <TileGrid />
+          {reviewed ? <ReviewGrid session={reviewed} /> : <TileGrid />}
         </main>
 
         {!rhsCollapsed && (
@@ -71,6 +105,8 @@ export function App() {
           </aside>
         )}
       </div>
+
+      <NewSessionModal />
     </div>
   );
 }

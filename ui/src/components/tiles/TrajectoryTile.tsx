@@ -6,11 +6,11 @@ import { useOrbit } from "./orbit";
 import type { TrajectoryDrone } from "../../api/types";
 
 /** Interactive 3D tile: each drone's believed trajectory in the world frame. */
-export function TrajectoryTile() {
+export function TrajectoryTile({ tracks: tracksProp }: { tracks?: TrajectoryDrone[] } = {}) {
   const { snapshot } = useSession();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const { viewRef, reset } = useOrbit(canvasRef);
-  const tracks = snapshot?.session.trajectories ?? [];
+  const tracks = tracksProp ?? snapshot?.session.trajectories ?? [];
   const tracksRef = useRef<TrajectoryDrone[]>(tracks);
   tracksRef.current = tracks;
 

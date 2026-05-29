@@ -1,4 +1,6 @@
 import { useSession } from "../store/SessionContext";
+import { Button } from "./primitives";
+import { PlusIcon } from "./icons";
 import { CameraTile } from "./tiles/CameraTile";
 import { SegOverlayTile } from "./tiles/SegOverlayTile";
 import { TrajectoryTile } from "./tiles/TrajectoryTile";
@@ -11,7 +13,7 @@ import { SplatTile } from "./tiles/SplatTile";
  * independently via its header button (CSS-driven fullscreen overlay).
  */
 export function TileGrid() {
-  const { snapshot } = useSession();
+  const { snapshot, setNewSessionOpen } = useSession();
   const session = snapshot?.session;
   const drones = session?.drones ?? [];
   const tracks = session?.trajectories ?? [];
@@ -23,9 +25,12 @@ export function TileGrid() {
         <div className="wall-empty-card">
           <h2>No active flight session</h2>
           <p>
-            Start a session from the <strong>Flight</strong> tab — choose a simulated or real
-            environment and the drones will begin streaming here.
+            Start a session — choose a simulated (pick a scene) or real environment and the
+            drones will begin streaming here. Past sessions are in the top-left picker.
           </p>
+          <Button variant="primary" className="with-icon" onClick={() => setNewSessionOpen(true)}>
+            <PlusIcon size={15} /> New session
+          </Button>
         </div>
       </div>
     );

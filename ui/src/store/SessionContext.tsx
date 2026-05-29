@@ -34,6 +34,12 @@ interface SessionContextValue {
   setRhsCollapsed: (v: boolean) => void;
   maximizedTile: string | null;
   setMaximizedTile: (id: string | null) => void;
+  newSessionOpen: boolean;
+  setNewSessionOpen: (open: boolean) => void;
+  // When set (and no live session is active) the wall renders this past session
+  // for review instead of the live feed.
+  reviewSessionId: string | null;
+  setReviewSessionId: (id: string | null) => void;
 
   // realtime commands + refreshers
   send: (command: Record<string, unknown>) => void;
@@ -60,6 +66,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [rhsTab, setRhsTab] = useState<RhsTab>("flight");
   const [rhsCollapsed, setRhsCollapsed] = useState(false);
   const [maximizedTile, setMaximizedTile] = useState<string | null>(null);
+  const [newSessionOpen, setNewSessionOpen] = useState(false);
+  const [reviewSessionId, setReviewSessionId] = useState<string | null>(null);
 
   const { snapshot, transport, send } = useLiveSnapshot();
 
@@ -106,6 +114,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       setRhsCollapsed,
       maximizedTile,
       setMaximizedTile,
+      newSessionOpen,
+      setNewSessionOpen,
+      reviewSessionId,
+      setReviewSessionId,
       send,
       refreshState,
       refreshConfig,
@@ -113,7 +125,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     }),
     [
       health, serviceBase, transport, snapshot, state, config, network,
-      rhsTab, rhsCollapsed, maximizedTile, send, refreshState, refreshConfig, refreshNetwork,
+      rhsTab, rhsCollapsed, maximizedTile, newSessionOpen, reviewSessionId,
+      send, refreshState, refreshConfig, refreshNetwork,
     ],
   );
 
