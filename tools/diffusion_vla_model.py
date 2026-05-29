@@ -38,7 +38,10 @@ import torch.nn.functional as F
 
 ACTION_DIM = 4  # roll, pitch, throttle, yaw (continuous, [-1, 1])
 IMAGE_SIZE = 64
-PROPRIO_DIM = 12
+STYLE_DIM = 4   # guidance style-vector slots (low-freq VLM conditioning)
+# proprio = translation(3) + confidence + pose_conf + battery + last_axes(4)
+#           + link_onehot(6) + goal_rel(3) + style(STYLE_DIM)
+PROPRIO_DIM = 3 + 1 + 1 + 1 + 4 + 6 + 3 + STYLE_DIM
 
 
 # --------------------------------------------------------------------------- #
@@ -96,6 +99,17 @@ def encode_proprio(payload: dict[str, Any]) -> np.ndarray:
         (float(last.get("yaw", 128)) - 128.0) / 128.0,
     ]
 
+    # Goal-relative vector (target conditioning) and style vector — both injected
+    # by the low-frequency VLM guidance via the command bus. Zeros when absent.
+    goal_rel = payload.get("goalRel") or [0.0, 0.0, 0.0]
+    if not isinstance(goal_rel, (list, tuple)) or len(goal_rel) < 3:
+        goal_rel = [0.0, 0.0, 0.0]
+    style = payload.get("style") or []
+    if not isinstance(style, (list, tuple)):
+        style = []
+    style = [float(v) for v in style[:STYLE_DIM]]
+    style = style + [0.0] * (STYLE_DIM - len(style))
+
     vector = [
         float(translation[0]),
         float(translation[1]),
@@ -106,6 +120,8 @@ def encode_proprio(payload: dict[str, Any]) -> np.ndarray:
         *last_axes,
     ]
     vector.extend(link_onehot)
+    vector.extend(float(v) for v in goal_rel[:3])
+    vector.extend(style)
     arr = np.asarray(vector, dtype=np.float32)
     if arr.shape[0] < PROPRIO_DIM:
         arr = np.pad(arr, (0, PROPRIO_DIM - arr.shape[0]))
