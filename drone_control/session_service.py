@@ -325,6 +325,7 @@ class SessionService:
         # basis for depth/cloud, derive world objects from ground truth, and
         # build a splat by ingesting frames with exact extrinsics.
         positions = env.positions()
+        scene_objects = env.scene_objects()
         w, h = env.image_size()
         focal = (w / 2.0) / np.tan(np.deg2rad(env.fov_deg) / 2.0)
         cx, cy = w / 2.0, h / 2.0
@@ -340,12 +341,13 @@ class SessionService:
             if run_depth:
                 self.depth.process(drone_id, jpeg, pose, cam_rot=cam_rot)
 
-            # Ground-truth detections: the other drones, projected into this view.
+            # Ground-truth detections: other drones + scene landmarks, projected
+            # into this view (the sim knows exactly where everything is).
+            candidates = [("drone", p) for other, p in positions.items() if other != drone_id]
+            candidates += scene_objects
             dets: list[ScreenDetection] = []
             worlds: list[list[float]] = []
-            for other, p in positions.items():
-                if other == drone_id:
-                    continue
+            for label, p in candidates:
                 rel = np.array(p, dtype=float) - center
                 zc = float(rel @ cam_rot[:, 2])
                 if zc <= 0.3:
@@ -356,7 +358,7 @@ class SessionService:
                     continue
                 size = max(6.0, 240.0 / zc)
                 dets.append(
-                    ScreenDetection("drone", 0.99, [u - size / 2, v - size / 2, size, size], [u, v], [], w, h)
+                    ScreenDetection(label, 0.99, [u - size / 2, v - size / 2, size, size], [u, v], [], w, h)
                 )
                 worlds.append(list(p))
             self.segmenter.ingest_truth(drone_id, dets, worlds)

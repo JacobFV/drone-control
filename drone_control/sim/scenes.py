@@ -22,6 +22,7 @@ class Box:
     center: tuple[float, float, float]
     size: tuple[float, float, float]
     color: Color
+    label: str = "object"
 
 
 @dataclass(slots=True)
@@ -43,12 +44,12 @@ class Scene:
 # ---------------------------------------------------------------- builders
 
 
-def _row(n: int, start: tuple[float, float], step: tuple[float, float], size, color: Color, z: float) -> list[Box]:
+def _row(n: int, start: tuple[float, float], step: tuple[float, float], size, color: Color, z: float, label: str = "object") -> list[Box]:
     boxes = []
     for i in range(n):
         cx = start[0] + step[0] * i
         cy = start[1] + step[1] * i
-        boxes.append(Box((cx, cy, z + size[2] / 2), size, color))
+        boxes.append(Box((cx, cy, z + size[2] / 2), size, color, label))
     return boxes
 
 
@@ -57,13 +58,13 @@ def _warehouse() -> Scene:
     shelf = (1.2, 6.0, 3.4)
     for k, x in enumerate((-8, -3, 2, 7)):
         tint = 150 + (k % 2) * 30
-        boxes += _row(1, (x, 0), (0, 0), shelf, (tint, tint - 40, 70), 0.0)
+        boxes += _row(1, (x, 0), (0, 0), shelf, (tint, tint - 40, 70), 0.0, "shelf")
     # Pallets / crates scattered.
     for (x, y) in [(-5, -7), (4, -6), (-1, 6), (6, 5)]:
-        boxes.append(Box((x, y, 0.4), (1.0, 1.0, 0.8), (170, 120, 60)))
+        boxes.append(Box((x, y, 0.4), (1.0, 1.0, 0.8), (170, 120, 60), "crate"))
     # Perimeter walls (thin tall boxes).
-    boxes.append(Box((0, -12, 2.0), (26, 0.4, 4.0), (120, 124, 130)))
-    boxes.append(Box((0, 12, 2.0), (26, 0.4, 4.0), (120, 124, 130)))
+    boxes.append(Box((0, -12, 2.0), (26, 0.4, 4.0), (120, 124, 130), "wall"))
+    boxes.append(Box((0, 12, 2.0), (26, 0.4, 4.0), (120, 124, 130), "wall"))
     return Scene(
         id="warehouse", name="Warehouse", kind="indoor",
         sky_top=(54, 58, 66), sky_bottom=(72, 76, 84),
@@ -77,11 +78,11 @@ def _office() -> Scene:
     desk = (1.6, 0.9, 0.75)
     for x in (-6, -2, 2, 6):
         for y in (-3, 3):
-            boxes.append(Box((x, y, 0.38), desk, (180, 180, 188)))
-            boxes.append(Box((x, y, 0.95), (0.5, 0.4, 0.35), (40, 44, 52)))  # monitor
+            boxes.append(Box((x, y, 0.38), desk, (180, 180, 188), "desk"))
+            boxes.append(Box((x, y, 0.95), (0.5, 0.4, 0.35), (40, 44, 52), "monitor"))
     # Glass partitions (tinted teal).
     for y in (-6, 6):
-        boxes.append(Box((0, y, 1.2), (16, 0.2, 2.4), (90, 150, 160)))
+        boxes.append(Box((0, y, 1.2), (16, 0.2, 2.4), (90, 150, 160), "partition"))
     return Scene(
         id="office", name="Office", kind="indoor",
         sky_top=(60, 66, 74), sky_bottom=(82, 88, 96),
@@ -97,7 +98,7 @@ def _city() -> Scene:
     for k, (x, y) in enumerate(coords):
         h = 5.0 + (k * 2.3 % 9)
         w = 3.0 + (k % 3)
-        boxes.append(Box((x, y, h / 2), (w, w, h), palette[k % len(palette)]))
+        boxes.append(Box((x, y, h / 2), (w, w, h), palette[k % len(palette)], "building"))
     return Scene(
         id="city", name="City block (outdoor)", kind="outdoor",
         sky_top=(58, 92, 150), sky_bottom=(150, 178, 205),
@@ -110,10 +111,10 @@ def _park() -> Scene:
     boxes: list[Box] = []
     tree_coords = [(-7, -5), (-4, 4), (0, -6), (3, 6), (6, -3), (8, 4), (-8, 6), (5, 0)]
     for (x, y) in tree_coords:
-        boxes.append(Box((x, y, 0.8), (0.4, 0.4, 1.6), (96, 66, 40)))      # trunk
-        boxes.append(Box((x, y, 2.4), (2.4, 2.4, 2.2), (54, 132, 60)))     # canopy
+        boxes.append(Box((x, y, 0.8), (0.4, 0.4, 1.6), (96, 66, 40), "tree"))      # trunk
+        boxes.append(Box((x, y, 2.4), (2.4, 2.4, 2.2), (54, 132, 60), "tree"))     # canopy
     for (x, y) in [(-2, 0), (2, 2)]:
-        boxes.append(Box((x, y, 0.3), (1.6, 0.5, 0.5), (140, 100, 60)))    # bench
+        boxes.append(Box((x, y, 0.3), (1.6, 0.5, 0.5), (140, 100, 60), "bench"))
     return Scene(
         id="park", name="Park (outdoor)", kind="outdoor",
         sky_top=(70, 120, 175), sky_bottom=(168, 196, 214),
@@ -123,7 +124,7 @@ def _park() -> Scene:
 
 
 def _open_field() -> Scene:
-    boxes = [Box((x, y, 0.5), (1.0, 1.0, 1.0), (200, 90, 70)) for (x, y) in [(-6, 0), (6, 0), (0, 6), (0, -6)]]
+    boxes = [Box((x, y, 0.5), (1.0, 1.0, 1.0), (200, 90, 70), "marker") for (x, y) in [(-6, 0), (6, 0), (0, 6), (0, -6)]]
     return Scene(
         id="open_field", name="Open field (outdoor)", kind="outdoor",
         sky_top=(64, 104, 162), sky_bottom=(158, 186, 210),

@@ -74,6 +74,13 @@ class SimEnvironment:
             out[drone["droneId"]] = [float(v) for v in drone["position"]]
         return out
 
+    def scene_objects(self) -> list[tuple[str, list[float]]]:
+        """Ground-truth scene landmarks: (label, world-centre) per scene box."""
+        from drone_control.sim.scenes import build_scene
+
+        scene = build_scene(self.session.config.scene)
+        return [(box.label, list(box.center)) for box in scene.boxes]
+
     def camera_rot(self, drone_id: str) -> np.ndarray | None:
         """World directions of the camera axes (cols = right, down, forward).
 
