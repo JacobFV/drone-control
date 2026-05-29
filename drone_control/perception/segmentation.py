@@ -225,6 +225,7 @@ class Segmenter:
         detections: list[ScreenDetection],
         pose: dict[str, Any] | None,
         depth_map: "np.ndarray | None" = None,
+        cam_rot: "np.ndarray | None" = None,
     ) -> None:
         """Back-project detection centroids through the drone pose and fuse.
 
@@ -243,8 +244,25 @@ class Segmenter:
         with self._lock:
             for det in detections:
                 depth = self._sample_depth(det, depth_map)
-                world_pt = self._backproject_centroid(det, center, rotation, depth=depth)
+                world_pt = self._backproject_centroid(det, center, rotation, depth=depth, cam_rot=cam_rot)
                 self._fuse(drone_id, det.cls, world_pt, det.score, now)
+
+    def ingest_truth(
+        self,
+        drone_id: str,
+        detections: list[ScreenDetection],
+        world_points: list[Any],
+    ) -> None:
+        """Inject ground-truth detections + known world positions (simulator).
+
+        Bypasses the model and depth back-projection: the sim knows exactly where
+        objects are, so screen detections and world objects are exact.
+        """
+        now = time.time()
+        with self._lock:
+            self._screen[drone_id] = list(detections)
+            for det, world in zip(detections, world_points):
+                self._fuse(drone_id, det.cls, np.asarray(world, dtype=float), det.score, now)
             if len(self._objects) > self.max_objects:
                 self._objects.sort(key=lambda o: o.last_seen, reverse=True)
                 self._objects = self._objects[: self.max_objects]
@@ -259,7 +277,13 @@ class Segmenter:
         return depth if depth > 0 else self.default_depth
 
     def _backproject_centroid(
-        self, det: ScreenDetection, center: np.ndarray, rotation: np.ndarray, *, depth: float | None = None
+        self,
+        det: ScreenDetection,
+        center: np.ndarray,
+        rotation: np.ndarray,
+        *,
+        depth: float | None = None,
+        cam_rot: np.ndarray | None = None,
     ) -> np.ndarray:
         width, height = det.width, det.height
         focal = (width / 2.0) / np.tan(np.deg2rad(self.fov_deg) / 2.0)
@@ -270,7 +294,8 @@ class Segmenter:
             [(px - cx) / focal, (py - cy) / focal, 1.0], dtype=float
         )
         ray_cam = ray_cam / (np.linalg.norm(ray_cam) + 1e-9)
-        ray_world = rotation @ ray_cam
+        # cam_rot (cols = world right/down/forward) is exact; else body rotation.
+        ray_world = (cam_rot if cam_rot is not None else rotation) @ ray_cam
         return center + ray_world * (depth if depth is not None else self.default_depth)
 
     def _fuse(self, drone_id: str, cls: str, world_pt: np.ndarray, score: float, now: float) -> None:
@@ -357,3 +382,34 @@ def _pose_rotation(pose: dict[str, Any] | None) -> np.ndarray | None:
         ],
         dtype=float,
     )
+
+
+def rotmat_to_quat_xyzw(R: np.ndarray) -> list[float]:
+    """3x3 rotation matrix -> [qx, qy, qz, qw]."""
+    R = np.asarray(R, dtype=float)
+    t = float(np.trace(R))
+    if t > 0:
+        s = (t + 1.0) ** 0.5 * 2
+        qw = 0.25 * s
+        qx = (R[2, 1] - R[1, 2]) / s
+        qy = (R[0, 2] - R[2, 0]) / s
+        qz = (R[1, 0] - R[0, 1]) / s
+    elif R[0, 0] > R[1, 1] and R[0, 0] > R[2, 2]:
+        s = (1.0 + R[0, 0] - R[1, 1] - R[2, 2]) ** 0.5 * 2
+        qw = (R[2, 1] - R[1, 2]) / s
+        qx = 0.25 * s
+        qy = (R[0, 1] + R[1, 0]) / s
+        qz = (R[0, 2] + R[2, 0]) / s
+    elif R[1, 1] > R[2, 2]:
+        s = (1.0 + R[1, 1] - R[0, 0] - R[2, 2]) ** 0.5 * 2
+        qw = (R[0, 2] - R[2, 0]) / s
+        qx = (R[0, 1] + R[1, 0]) / s
+        qy = 0.25 * s
+        qz = (R[1, 2] + R[2, 1]) / s
+    else:
+        s = (1.0 + R[2, 2] - R[0, 0] - R[1, 1]) ** 0.5 * 2
+        qw = (R[1, 0] - R[0, 1]) / s
+        qx = (R[0, 2] + R[2, 0]) / s
+        qy = (R[1, 2] + R[2, 1]) / s
+        qz = 0.25 * s
+    return [float(qx), float(qy), float(qz), float(qw)]

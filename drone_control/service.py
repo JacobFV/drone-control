@@ -88,6 +88,27 @@ class ControlStationHandler(BaseHTTPRequestHandler):
             max_points = int(query.get("max", ["2500"])[0])
             self.send_json(self.server.session_service.point_cloud(max_points))
             return
+        if parsed.path == "/api/session/splat/snapshot":
+            data = self.server.session_service.splat_snapshot()
+            if not data:
+                self.send_json({"error": "no live splat"}, status=HTTPStatus.NOT_FOUND)
+                return
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "model/vnd.gaussian-splat")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        if parsed.path == "/api/session/splat/viewer":
+            body = splat_viewer_html("Live splat", "/api/session/splat/snapshot").encode()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if parsed.path == "/api/scenes":
             self.send_json({"scenes": list_scenes()})
             return

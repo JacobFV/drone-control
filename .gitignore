@@ -11,3 +11,8 @@ camera_captures/
 config/*.local.json
 ui/dist/
 runs/
+
+# Downloaded model weights
+*.pt
+yolo*.pt
+/models/

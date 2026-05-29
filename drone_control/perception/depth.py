@@ -155,7 +155,13 @@ class DepthEstimator:
 
     # -- per-frame ---------------------------------------------------------
 
-    def process(self, drone_id: str, jpeg: bytes, pose: dict[str, Any] | None) -> None:
+    def process(
+        self,
+        drone_id: str,
+        jpeg: bytes,
+        pose: dict[str, Any] | None,
+        cam_rot: np.ndarray | None = None,
+    ) -> None:
         depth_norm, frame_rgb = self._infer(jpeg)
         if depth_norm is None:
             return
@@ -166,7 +172,7 @@ class DepthEstimator:
             self._depth_jpeg[drone_id] = jpeg_out
             self._depth_map[drone_id] = metric
         if pose is not None:
-            xyz, rgb = self._backproject(metric, frame_rgb, pose)
+            xyz, rgb = self._backproject(metric, frame_rgb, pose, cam_rot)
             if xyz.shape[0]:
                 with self._lock:
                     self._cloud.add(xyz, rgb)
@@ -199,11 +205,19 @@ class DepthEstimator:
         depth_norm = (depth - dmin) / (dmax - dmin)  # 1 = nearest (DA: high = near)
         return depth_norm, frame
 
-    def _backproject(self, metric: np.ndarray, frame_rgb: np.ndarray, pose: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
+    def _backproject(
+        self,
+        metric: np.ndarray,
+        frame_rgb: np.ndarray,
+        pose: dict[str, Any],
+        cam_rot: np.ndarray | None = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
         from drone_control.perception.segmentation import _pose_center, _pose_rotation
 
         center = _pose_center(pose)
-        rotation = _pose_rotation(pose)
+        # cam_rot columns are world directions of camera (right, down, forward).
+        # Without it, fall back to the body rotation (z-forward assumption).
+        rotation = cam_rot if cam_rot is not None else _pose_rotation(pose)
         if center is None or rotation is None:
             return np.zeros((0, 3)), np.zeros((0, 3))
         h, w = metric.shape

@@ -25,10 +25,13 @@ import time
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from drone_control.environment.real_env import RealEnvironment
 from drone_control.environment.sim_env import SimEnvironment
+from drone_control.perception import live_splat
 from drone_control.perception.depth import DepthEstimator, write_ply
-from drone_control.perception.segmentation import Segmenter
+from drone_control.perception.segmentation import ScreenDetection, Segmenter, rotmat_to_quat_xyzw
 from drone_control.runtime.manager import RuntimeManager
 from drone_control.sim.session import SimSessionConfig
 from drone_control.store import ControlStationStore
@@ -63,6 +66,8 @@ class SessionService:
 
         self._lock = threading.RLock()
         self._env: SimEnvironment | RealEnvironment | None = None
+        self._splat: Any | None = None     # session-owned live splat (sim)
+        self._seeded = False               # seed the splat from the depth cloud once
         self._session_id: str | None = None
         self._environment_id: str | None = None
         self._recording = False
@@ -118,6 +123,16 @@ class SessionService:
 
             self.segmenter.reset()
             self.depth.reset()
+            self._seeded = False
+            # The sim owns its own splat engine (it has exact poses); the real
+            # runtime builds its splat through its own ingestion path.
+            self._splat = None
+            if isinstance(env, SimEnvironment) and live_splat.available():
+                try:
+                    self._splat = live_splat.LiveSplatEngine()
+                    self._splat.start()
+                except Exception:
+                    self._splat = None
             self._env = env
             self._environment_id = environment_id
             self._session_id = session["id"]
@@ -167,6 +182,12 @@ class SessionService:
         if recording and session_dir is not None:
             metrics.update(self._finalize_records(session_id, env, session_dir))
 
+        if self._splat is not None:
+            try:
+                self._splat.stop()
+            except Exception:
+                pass
+
         self.store.update_session(
             session_id,
             state="stopped",
@@ -186,6 +207,7 @@ class SessionService:
             self._environment_id = None
             self._recording = False
             self._session_dir = None
+            self._splat = None
             self._perception_thread = None
             self._recorder_thread = None
         return final
@@ -205,6 +227,24 @@ class SessionService:
 
     def point_cloud(self, max_points: int = 2500) -> dict[str, Any]:
         return {"points": self.depth.cloud_snapshot(max_points)}
+
+    def splat_snapshot(self) -> bytes | None:
+        """Export the active splat to .ply bytes (sim engine or runtime world)."""
+        env = self._env
+        if env is None:
+            return None
+        path = self.export_root / "world_model" / "live.ply"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if self._splat is not None:
+                self._splat.export_ply(path)
+            elif isinstance(env, RealEnvironment) and env.world_model_status().get("running"):
+                self.runtime.export_world_model(path)
+            else:
+                return None
+            return path.read_bytes()
+        except Exception:
+            return None
 
     def set_speed(self, mode: str) -> dict[str, Any]:
         env = self._env
@@ -229,7 +269,7 @@ class SessionService:
             "drones": drones,
             "frameCounts": dict(self._frame_counts),
             "trajectories": env.trajectories(),
-            "worldModel": env.world_model_status(),
+            "worldModel": self._splat.snapshot() if self._splat is not None else env.world_model_status(),
             "segmentation": {
                 "status": self.segmenter.status(),
                 "screen": self.segmenter.screen_summary(),
@@ -249,29 +289,94 @@ class SessionService:
             env = self._env
             if env is not None:
                 run_depth = self.depth.available() and tick % self._depth_every == 0
-                for drone_id in env.drone_ids():
-                    jpeg = env.latest_frame(drone_id)
-                    if not jpeg:
-                        continue
-                    pose = env.latest_pose(drone_id)
-                    try:
-                        if run_depth:
-                            self.depth.process(drone_id, jpeg, pose)
-                        dets = self.segmenter.segment_frame(drone_id, jpeg)
-                        # Ground world-space segmentation in estimated metric depth.
-                        self.segmenter.project_to_world(
-                            drone_id, dets, pose, depth_map=self.depth.latest_depth_map(drone_id)
-                        )
-                    except Exception:
-                        continue
-                # Seed the live splat from the estimated point cloud (real env).
-                if run_depth and isinstance(env, RealEnvironment) and env.world_model_status().get("running"):
-                    xyz, rgb = self.depth.cloud_arrays()
-                    if xyz.shape[0]:
-                        self.runtime.seed_world_points(xyz, rgb)
+                try:
+                    if isinstance(env, SimEnvironment):
+                        self._perceive_sim(env, run_depth)
+                    else:
+                        self._perceive_real(env, run_depth)
+                except Exception:
+                    pass
             tick += 1
             elapsed = time.monotonic() - started
             self._stop_event.wait(max(0.0, interval - elapsed))
+
+    def _perceive_real(self, env: RealEnvironment, run_depth: bool) -> None:
+        # Real cameras: segment with the model, depth with the z-forward
+        # convention, and seed the runtime's splat once from the cloud.
+        for drone_id in env.drone_ids():
+            jpeg = env.latest_frame(drone_id)
+            if not jpeg:
+                continue
+            pose = env.latest_pose(drone_id)
+            if run_depth:
+                self.depth.process(drone_id, jpeg, pose)
+            dets = self.segmenter.segment_frame(drone_id, jpeg)
+            self.segmenter.project_to_world(
+                drone_id, dets, pose, depth_map=self.depth.latest_depth_map(drone_id)
+            )
+        if run_depth and not self._seeded and env.world_model_status().get("running"):
+            xyz, rgb = self.depth.cloud_arrays()
+            if xyz.shape[0]:
+                self.runtime.seed_world_points(xyz, rgb)
+                self._seeded = True
+
+    def _perceive_sim(self, env: SimEnvironment, run_depth: bool) -> None:
+        # The sim has exact poses + object positions: use the correct camera
+        # basis for depth/cloud, derive world objects from ground truth, and
+        # build a splat by ingesting frames with exact extrinsics.
+        positions = env.positions()
+        w, h = env.image_size()
+        focal = (w / 2.0) / np.tan(np.deg2rad(env.fov_deg) / 2.0)
+        cx, cy = w / 2.0, h / 2.0
+        for drone_id in env.drone_ids():
+            jpeg = env.latest_frame(drone_id)
+            pose = env.latest_pose(drone_id)
+            if not jpeg or pose is None:
+                continue
+            cam_rot = env.camera_rot(drone_id)
+            if cam_rot is None:
+                continue
+            center = np.array([pose["x"], pose["y"], pose["z"]], dtype=float)
+            if run_depth:
+                self.depth.process(drone_id, jpeg, pose, cam_rot=cam_rot)
+
+            # Ground-truth detections: the other drones, projected into this view.
+            dets: list[ScreenDetection] = []
+            worlds: list[list[float]] = []
+            for other, p in positions.items():
+                if other == drone_id:
+                    continue
+                rel = np.array(p, dtype=float) - center
+                zc = float(rel @ cam_rot[:, 2])
+                if zc <= 0.3:
+                    continue
+                u = cx + focal * float(rel @ cam_rot[:, 0]) / zc
+                v = cy + focal * float(rel @ cam_rot[:, 1]) / zc
+                if not (0 <= u < w and 0 <= v < h):
+                    continue
+                size = max(6.0, 240.0 / zc)
+                dets.append(
+                    ScreenDetection("drone", 0.99, [u - size / 2, v - size / 2, size, size], [u, v], [], w, h)
+                )
+                worlds.append(list(p))
+            self.segmenter.ingest_truth(drone_id, dets, worlds)
+
+            # Splat keyframe with exact camera extrinsics.
+            if self._splat is not None:
+                quat = rotmat_to_quat_xyzw(cam_rot)
+                self._splat.ingest(
+                    drone_id, jpeg,
+                    {"x": float(center[0]), "y": float(center[1]), "z": float(center[2]), "rotation_xyzw": quat},
+                )
+        # Seed the sim splat once from the metric depth cloud for a dense init.
+        if run_depth and self._splat is not None and not self._seeded:
+            xyz, rgb = self.depth.cloud_arrays()
+            if xyz.shape[0]:
+                try:
+                    self._splat.seed_from_points(xyz, rgb)
+                    self._seeded = True
+                except Exception:
+                    pass
 
     def _recorder_loop(self) -> None:
         if not self._recording or self._session_dir is None:
@@ -358,17 +463,20 @@ class SessionService:
                 session_id, "control", "control", "Control signals", "application/jsonl", control_path,
             )
 
-        # Gaussian splat snapshot (real / world model).
+        # Gaussian splat snapshot (sim: session-owned engine; real: runtime).
         try:
-            if env.world_model_status().get("running"):
-                ply = self.export_root / "world_model" / f"{session_id}.ply"
-                ply.parent.mkdir(parents=True, exist_ok=True)
-                exported = env.world_model_status() and self.runtime.export_world_model(ply)
-                if exported:
-                    self.store.import_record(
-                        session_id, "splat", "gaussian-splat", "Live world splat",
-                        "model/vnd.gaussian-splat", Path(exported),
-                    )
+            ply = self.export_root / "world_model" / f"{session_id}.ply"
+            ply.parent.mkdir(parents=True, exist_ok=True)
+            exported = None
+            if self._splat is not None:
+                exported = str(self._splat.export_ply(ply))
+            elif env.world_model_status().get("running"):
+                exported = self.runtime.export_world_model(ply)
+            if exported:
+                self.store.import_record(
+                    session_id, "splat", "gaussian-splat", "Live world splat",
+                    "model/vnd.gaussian-splat", Path(exported),
+                )
         except Exception:
             pass
 
