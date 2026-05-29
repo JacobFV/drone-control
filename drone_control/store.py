@@ -17,19 +17,6 @@ from drone_control.identity import drone_identity_id
 SCHEMA_VERSION = 2
 
 
-# Map a legacy/record ``type`` onto the v2 ``source`` lane.
-def _infer_source(record_type: str) -> str:
-    return {
-        "frames": "camera",
-        "pose-track": "pose",
-        "gaussian-splat": "splat",
-        "reconstruction-dataset": "splat",
-        "seg-screen": "seg-screen",
-        "seg-world": "seg-world",
-        "control": "control",
-    }.get(record_type, "artifact")
-
-
 @dataclass(slots=True)
 class BlobRef:
     key: str
@@ -99,8 +86,6 @@ class ControlStationStore:
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.execute("PRAGMA journal_mode = WAL")
         self._init_schema()
-        self._migrate_if_needed()
-        self._create_indexes()
 
     def close(self) -> None:
         self.conn.close()
@@ -681,143 +666,11 @@ class ControlStationStore:
               metadata_json TEXT NOT NULL,
               created_at TEXT NOT NULL
             );
-            """
-        )
-        self.conn.commit()
 
-    def _create_indexes(self) -> None:
-        # Created after any migration, once the records table is guaranteed v2.
-        self.conn.executescript(
-            """
             CREATE INDEX IF NOT EXISTS idx_sessions_environment_id ON sessions(environment_id);
             CREATE INDEX IF NOT EXISTS idx_records_session_id ON records(session_id);
             """
         )
-        self.conn.commit()
-
-    def _migrate_if_needed(self) -> None:
-        """Migrate a v1 (drone → flights → records) database to v2.
-
-        Each legacy flight becomes a single-drone session inside one synthetic
-        ``real`` environment; its records are reparented with an inferred source.
-        """
-
-        with self.lock:
-            # If the legacy ``flights`` table is absent, there is nothing to do.
-            has_flights = self.conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='flights'"
-            ).fetchone()
-            if not has_flights:
-                self.conn.execute(
-                    "INSERT OR REPLACE INTO schema_meta(key, value) VALUES('schema_version', ?)",
-                    (str(SCHEMA_VERSION),),
-                )
-                self.conn.commit()
-                return
-
-            # The new ``records`` table was created by _init_schema with a
-            # session_id column; the legacy one used flight_id. Detect which we
-            # have. If a legacy records table coexists, it was created first and
-            # _init_schema's CREATE IF NOT EXISTS was a no-op, so columns are v1.
-            cols = {row["name"] for row in self.conn.execute("PRAGMA table_info(records)")}
-            if "flight_id" not in cols:
-                # records is already v2; flights is leftover — drop it.
-                self.conn.execute("DROP TABLE IF EXISTS flights")
-                self.conn.execute(
-                    "INSERT OR REPLACE INTO schema_meta(key, value) VALUES('schema_version', ?)",
-                    (str(SCHEMA_VERSION),),
-                )
-                self.conn.commit()
-                return
-
-            try:
-                self._run_v1_to_v2_migration()
-            except sqlite3.Error as exc:  # pragma: no cover - defensive
-                self.conn.rollback()
-                raise RuntimeError(f"v1->v2 migration failed: {exc}") from exc
-
-    def _run_v1_to_v2_migration(self) -> None:
-        now = current_timestamp()
-        legacy_env = "env-legacy-real"
-        self.conn.execute(
-            """
-            INSERT OR IGNORE INTO environments (id, name, kind, config_json, created_at)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (legacy_env, "Legacy real environment", "real", json.dumps({"migratedFrom": "v1"}), now),
-        )
-
-        # Rename the legacy records table aside, recreate the v2 records table.
-        self.conn.execute("ALTER TABLE records RENAME TO records_v1")
-        self.conn.execute(
-            """
-            CREATE TABLE records (
-              id TEXT PRIMARY KEY,
-              session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-              drone_id TEXT,
-              source TEXT NOT NULL,
-              type TEXT NOT NULL,
-              label TEXT NOT NULL,
-              mime TEXT NOT NULL,
-              blob_key TEXT,
-              byte_count INTEGER NOT NULL DEFAULT 0,
-              metadata_json TEXT NOT NULL,
-              created_at TEXT NOT NULL
-            )
-            """
-        )
-
-        for flight in self.conn.execute("SELECT * FROM flights").fetchall():
-            metadata = json_loads(flight["metadata_json"], {})
-            state = str(metadata.get("sessionStatus") or "stopped")
-            self.conn.execute(
-                """
-                INSERT INTO sessions
-                  (id, environment_id, name, state, drones_json, started_at, ended_at,
-                   duration, metadata_json, metrics_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    flight["id"],
-                    legacy_env,
-                    flight["name"],
-                    state if state in {"recording", "stopped", "error"} else "stopped",
-                    json.dumps([flight["drone_id"]]),
-                    flight["started_at"],
-                    flight["started_at"],
-                    flight["duration"],
-                    flight["metadata_json"],
-                    flight["metrics_json"],
-                    flight["created_at"],
-                ),
-            )
-            for record in self.conn.execute(
-                "SELECT * FROM records_v1 WHERE flight_id = ?", (flight["id"],)
-            ).fetchall():
-                self.conn.execute(
-                    """
-                    INSERT INTO records
-                      (id, session_id, drone_id, source, type, label, mime, blob_key,
-                       byte_count, metadata_json, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        record["id"],
-                        flight["id"],
-                        flight["drone_id"],
-                        _infer_source(record["type"]),
-                        record["type"],
-                        record["label"],
-                        record["mime"],
-                        record["blob_key"],
-                        record["byte_count"],
-                        record["metadata_json"],
-                        record["created_at"],
-                    ),
-                )
-
-        self.conn.execute("DROP TABLE records_v1")
-        self.conn.execute("DROP TABLE flights")
         self.conn.execute(
             "INSERT OR REPLACE INTO schema_meta(key, value) VALUES('schema_version', ?)",
             (str(SCHEMA_VERSION),),

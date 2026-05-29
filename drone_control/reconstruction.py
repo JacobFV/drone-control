@@ -25,7 +25,7 @@ SPLAT_EXTENSIONS = (".splat", ".ply", ".spz")
 @dataclass(slots=True)
 class ReconstructionJob:
     id: str
-    flight_id: str
+    session_id: str
     source_record_id: str
     pose_record_id: str | None
     work_dir: Path
@@ -56,7 +56,7 @@ class ReconstructionJob:
     def as_dict(self, *, log_tail: str = "") -> dict[str, object]:
         return {
             "id": self.id,
-            "flightId": self.flight_id,
+            "sessionId": self.session_id,
             "sourceRecordId": self.source_record_id,
             "poseRecordId": self.pose_record_id,
             "state": self.state,
@@ -91,7 +91,7 @@ class ReconstructionManager:
         self.work_root.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._jobs: dict[str, ReconstructionJob] = {}
-        self._latest_by_flight: dict[str, str] = {}
+        self._latest_by_session: dict[str, str] = {}
         self._processes: dict[str, subprocess.Popen[str]] = {}
         self._stop_events: dict[str, threading.Event] = {}
 
@@ -114,7 +114,7 @@ class ReconstructionManager:
     def start(
         self,
         *,
-        flight_id: str,
+        session_id: str,
         frame_record: dict[str, object],
         pose_record: dict[str, object] | None,
         max_images: int | None = None,
@@ -122,16 +122,16 @@ class ReconstructionManager:
         fps: float = 12.0,
     ) -> ReconstructionJob:
         with self._lock:
-            current_id = self._latest_by_flight.get(flight_id)
+            current_id = self._latest_by_session.get(session_id)
             current = self._jobs.get(current_id or "")
             if current and current.active:
-                raise RuntimeError("reconstruction already running for this flight")
+                raise RuntimeError("reconstruction already running for this session")
 
             job_id = f"recon-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
             work_dir = self.work_root / job_id
             job = ReconstructionJob(
                 id=job_id,
-                flight_id=flight_id,
+                session_id=session_id,
                 source_record_id=str(frame_record["id"]),
                 pose_record_id=str(pose_record["id"]) if pose_record else None,
                 work_dir=work_dir,
@@ -145,7 +145,7 @@ class ReconstructionManager:
                 fps=fps,
             )
             self._jobs[job_id] = job
-            self._latest_by_flight[flight_id] = job_id
+            self._latest_by_session[session_id] = job_id
             self._stop_events[job_id] = threading.Event()
 
         thread = threading.Thread(
@@ -157,17 +157,17 @@ class ReconstructionManager:
         thread.start()
         return job
 
-    def status(self, flight_id: str) -> dict[str, object] | None:
+    def status(self, session_id: str) -> dict[str, object] | None:
         with self._lock:
-            job_id = self._latest_by_flight.get(flight_id)
+            job_id = self._latest_by_session.get(session_id)
             job = self._jobs.get(job_id or "")
             if job is None:
                 return None
             return job.as_dict(log_tail=tail_text(job.log_path))
 
-    def stop(self, flight_id: str) -> dict[str, object] | None:
+    def stop(self, session_id: str) -> dict[str, object] | None:
         with self._lock:
-            job_id = self._latest_by_flight.get(flight_id)
+            job_id = self._latest_by_session.get(session_id)
             job = self._jobs.get(job_id or "")
             if job is None:
                 return None
@@ -184,9 +184,9 @@ class ReconstructionManager:
 
     def stop_all(self) -> None:
         with self._lock:
-            flights = list(self._latest_by_flight)
-        for flight_id in flights:
-            self.stop(flight_id)
+            sessions = list(self._latest_by_session)
+        for session_id in sessions:
+            self.stop(session_id)
 
     def _run(
         self,
@@ -200,7 +200,7 @@ class ReconstructionManager:
             self._set_job(job, state="running", stage="dataset")
             self._prepare_dataset(job, frame_record, pose_record, max_images=job.max_images, fps=job.fps)
             job.dataset_record_id = self.store.import_record(
-                job.flight_id,
+                job.session_id,
                 "splat",
                 "reconstruction-dataset",
                 f"Scene dataset {job.id}",
@@ -265,7 +265,7 @@ class ReconstructionManager:
             if splat is None:
                 raise RuntimeError("gaussian splat export produced no .ply, .splat, or .spz artifact")
             job.splat_record_id = self.store.import_record(
-                job.flight_id,
+                job.session_id,
                 "splat",
                 "gaussian-splat",
                 f"Gaussian splat {job.id}",
@@ -317,7 +317,7 @@ class ReconstructionManager:
             (job.dataset_dir / "transforms.json").write_text(json.dumps(transforms, indent=2))
 
         manifest = {
-            "flightId": job.flight_id,
+            "sessionId": job.session_id,
             "jobId": job.id,
             "sourceRecordId": frame_record["id"],
             "poseRecordId": pose_record["id"] if pose_record else None,

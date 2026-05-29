@@ -350,9 +350,9 @@ class ControlStationHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/world/splat/bootstrap":
             payload = self.read_json()
-            flight_drones = payload.get("flightIds") or payload.get("flights")
-            if flight_drones:
-                self.bootstrap_world_model(flight_drones)
+            session_map = payload.get("sessionIds") or payload.get("sessions")
+            if session_map:
+                self.bootstrap_world_model(session_map)
                 return
             transforms = payload.get("transforms") or {}
             applied = []
@@ -779,15 +779,15 @@ class ControlStationHandler(BaseHTTPRequestHandler):
         result = reveal_path(path)
         self.send_json({"path": str(path), **result})
 
-    def compute_pose_track(self, flight_id: str) -> None:
-        if not self.server.store.session_exists(flight_id):
-            self.send_json({"error": "flight not found"}, status=HTTPStatus.NOT_FOUND)
+    def compute_pose_track(self, session_id: str) -> None:
+        if not self.server.store.session_exists(session_id):
+            self.send_json({"error": "session not found"}, status=HTTPStatus.NOT_FOUND)
             return
         payload = self.read_json()
         record_id = optional_str(payload, "recordId")
         try:
             result = self.server.compute_pose_track_record(
-                flight_id,
+                session_id,
                 record_id=record_id,
                 fps=float(payload.get("fps") or 12),
             )
@@ -852,38 +852,38 @@ class ControlStationHandler(BaseHTTPRequestHandler):
             return
         self.send_json({"ingestion": self.server.runtime.ingestion_status()})
 
-    def bootstrap_world_model(self, flight_drones: Any) -> None:
-        """COLMAP-union cross-drone bootstrap from recorded flights.
+    def bootstrap_world_model(self, session_map: Any) -> None:
+        """COLMAP-union cross-drone bootstrap from recorded sessions.
 
-        ``flight_drones`` may be a list of flight ids (each treated as its own
-        drone, labelled by flight id) or a mapping ``{flightId: droneId}`` so the
+        ``session_map`` may be a list of session ids (each treated as its own
+        drone, labelled by session id) or a mapping ``{sessionId: droneId}`` so the
         resulting transforms apply to the matching live runtime drone.
         """
 
-        if isinstance(flight_drones, dict):
-            mapping = {str(k): str(v) for k, v in flight_drones.items()}
-        elif isinstance(flight_drones, list):
-            mapping = {str(f): str(f) for f in flight_drones}
+        if isinstance(session_map, dict):
+            mapping = {str(k): str(v) for k, v in session_map.items()}
+        elif isinstance(session_map, list):
+            mapping = {str(f): str(f) for f in session_map}
         else:
-            self.send_json({"error": "flightIds must be a list or {flightId: droneId} object"}, status=HTTPStatus.BAD_REQUEST)
+            self.send_json({"error": "sessionIds must be a list or {sessionId: droneId} object"}, status=HTTPStatus.BAD_REQUEST)
             return
 
         drone_frames: dict[str, list[str]] = {}
-        for flight_id, drone_id in mapping.items():
-            if not self.server.store.session_exists(flight_id):
-                self.send_json({"error": f"flight not found: {flight_id}"}, status=HTTPStatus.NOT_FOUND)
+        for session_id, drone_id in mapping.items():
+            if not self.server.store.session_exists(session_id):
+                self.send_json({"error": f"session not found: {session_id}"}, status=HTTPStatus.NOT_FOUND)
                 return
-            frame_record = self.server._latest_frame_record(flight_id)
+            frame_record = self.server._latest_frame_record(session_id)
             if frame_record is None:
-                self.send_json({"error": f"no frames record for flight: {flight_id}"}, status=HTTPStatus.NOT_FOUND)
+                self.send_json({"error": f"no frames record for session: {session_id}"}, status=HTTPStatus.NOT_FOUND)
                 return
             frame_dir = self.server.store.record_path(str(frame_record["id"]))
             if frame_dir is None or not frame_dir.is_dir():
-                self.send_json({"error": f"frame blob missing for flight: {flight_id}"}, status=HTTPStatus.NOT_FOUND)
+                self.send_json({"error": f"frame blob missing for session: {session_id}"}, status=HTTPStatus.NOT_FOUND)
                 return
             frames = [str(p) for p in sorted(frame_dir.glob("*.jpg"))]
             if not frames:
-                self.send_json({"error": f"no .jpg frames for flight: {flight_id}"}, status=HTTPStatus.NOT_FOUND)
+                self.send_json({"error": f"no .jpg frames for session: {session_id}"}, status=HTTPStatus.NOT_FOUND)
                 return
             drone_frames.setdefault(drone_id, []).extend(frames)
 
@@ -895,19 +895,19 @@ class ControlStationHandler(BaseHTTPRequestHandler):
             return
         self.send_json(result)
 
-    def start_reconstruction(self, flight_id: str) -> None:
-        if not self.server.store.session_exists(flight_id):
-            self.send_json({"error": "flight not found"}, status=HTTPStatus.NOT_FOUND)
+    def start_reconstruction(self, session_id: str) -> None:
+        if not self.server.store.session_exists(session_id):
+            self.send_json({"error": "session not found"}, status=HTTPStatus.NOT_FOUND)
             return
         payload = self.read_json()
-        frame_record = self.server._latest_frame_record(flight_id, record_id=optional_str(payload, "recordId"))
+        frame_record = self.server._latest_frame_record(session_id, record_id=optional_str(payload, "recordId"))
         if frame_record is None:
             self.send_json({"error": "no frames record available"}, status=HTTPStatus.NOT_FOUND)
             return
-        pose_record = self.server._latest_pose_record(flight_id)
+        pose_record = self.server._latest_pose_record(session_id)
         try:
             job = self.server.reconstructions.start(
-                flight_id=flight_id,
+                session_id=session_id,
                 frame_record=frame_record,
                 pose_record=pose_record,
                 max_images=optional_int(payload, "maxImages"),
@@ -917,14 +917,14 @@ class ControlStationHandler(BaseHTTPRequestHandler):
         except RuntimeError as exc:
             self.send_json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
             return
-        self.send_json(self.server.reconstruction_status(flight_id) | {"jobId": job.id})
+        self.send_json(self.server.reconstruction_status(session_id) | {"jobId": job.id})
 
-    def stop_reconstruction(self, flight_id: str) -> None:
-        status = self.server.reconstructions.stop(flight_id)
+    def stop_reconstruction(self, session_id: str) -> None:
+        status = self.server.reconstructions.stop(session_id)
         if status is None:
             self.send_json({"error": "no reconstruction job"}, status=HTTPStatus.NOT_FOUND)
             return
-        self.send_json(self.server.reconstruction_status(flight_id))
+        self.send_json(self.server.reconstruction_status(session_id))
 
     def export_record(self, record_id: str) -> None:
         payload = self.read_json()
@@ -942,7 +942,7 @@ class ControlStationHandler(BaseHTTPRequestHandler):
             exported = export_frame_dir(path, self.server.export_root, fmt=fmt, fps=fps)
             label = f"{info['label']} {fmt.upper()} export"
             mime = "video/mp4" if fmt == "mp4" else "multipart/x-mixed-replace"
-            new_id = self.server.store.import_record(str(info["flightId"]), fmt, label, mime, exported)
+            new_id = self.server.store.import_record(str(info["sessionId"]), fmt, label, mime, exported)
         except RuntimeError as exc:
             self.send_json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
             return
@@ -1119,12 +1119,12 @@ class ControlStationServer(ThreadingHTTPServer):
 
     def compute_pose_track_record(
         self,
-        flight_id: str,
+        session_id: str,
         *,
         record_id: str | None = None,
         fps: float = 12.0,
     ) -> dict[str, object]:
-        frames_record = self._latest_frame_record(flight_id, record_id=record_id)
+        frames_record = self._latest_frame_record(session_id, record_id=record_id)
         if frames_record is None:
             raise FileNotFoundError("no frames record available")
         frame_dir = self.store.record_path(str(frames_record["id"]))
@@ -1135,7 +1135,7 @@ class ControlStationServer(ThreadingHTTPServer):
         out_path.parent.mkdir(parents=True, exist_ok=True)
         status = replay_directory(frame_dir, out_path, fps=fps)
         pose_record_id = self.store.import_record(
-            flight_id,
+            session_id,
             "pose",
             "pose-track",
             f"Replay pose track {frames_record['id']}",
