@@ -272,7 +272,22 @@ class DiffusionVLAPolicy(nn.Module):
             x = coef_x0 * x0 + coef_xt * x + torch.sqrt(beta) * noise
         return x.clamp(-1.0, 1.0)
 
-    def training_loss(self, images: torch.Tensor, proprio: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
+    def training_loss(
+        self,
+        images: torch.Tensor,
+        proprio: torch.Tensor,
+        actions: torch.Tensor,
+        axis_weights: torch.Tensor | None = None,
+        sample_weights: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Weighted x0 DDPM loss.
+
+        ``axis_weights`` (len ACTION_DIM) lets training emphasise the axes that
+        matter — orientation (yaw) and directive-following (roll/pitch translate
+        toward the goal) over raw throttle. ``sample_weights`` (len B) emphasises
+        decisive maneuvers / swarm-interaction samples over passive hover frames.
+        Defaults reduce to plain MSE.
+        """
         device = images.device
         self.schedule.to(device)
         batch = images.shape[0]
@@ -282,7 +297,14 @@ class DiffusionVLAPolicy(nn.Module):
         noise = torch.randn_like(actions)
         noisy = torch.sqrt(alpha_cumprod) * actions + torch.sqrt(1 - alpha_cumprod) * noise
         predicted_x0 = self.denoiser(noisy, t, cond)
-        return F.mse_loss(predicted_x0, actions)
+        err = (predicted_x0 - actions) ** 2                      # [B, ACTION_DIM]
+        if axis_weights is not None:
+            err = err * axis_weights.to(device).view(1, -1)
+        per_sample = err.mean(dim=1)                             # [B]
+        if sample_weights is not None:
+            w = sample_weights.to(device)
+            return (per_sample * w).sum() / w.sum().clamp_min(1e-6)
+        return per_sample.mean()
 
 
 def build_batch_tensors(payloads: list[dict[str, Any]], device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:

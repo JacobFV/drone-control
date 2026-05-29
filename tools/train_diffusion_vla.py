@@ -73,12 +73,18 @@ class TransitionDataset(Dataset):
         )
 
 
+# Per-axis loss weights: orientation (yaw) and directive-following translation
+# (roll/pitch carry the drone toward the goal) matter more than raw throttle.
+AXIS_WEIGHTS = torch.tensor([1.2, 1.2, 0.8, 1.5])  # roll, pitch, throttle, yaw
+
+
 def train(paths: list[str], out: str, epochs: int, batch_size: int, lr: float, device_str: str) -> None:
     device = torch.device(device_str)
     dataset = TransitionDataset(paths)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=False)
     model = DiffusionVLAPolicy().to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    axis_weights = AXIS_WEIGHTS.to(device)
 
     print(f"training on {len(dataset)} transitions, device={device}", file=sys.stderr)
     model.train()
@@ -89,7 +95,10 @@ def train(paths: list[str], out: str, epochs: int, batch_size: int, lr: float, d
             images = images.to(device)
             proprio = proprio.to(device)
             actions = actions.to(device)
-            loss = model.training_loss(images, proprio, actions)
+            # Emphasise decisive maneuvers (large commanded deflection) over
+            # passive hover frames, so the policy learns to act + hold spacing.
+            sample_weights = 1.0 + 2.0 * actions.abs().mean(dim=1)
+            loss = model.training_loss(images, proprio, actions, axis_weights, sample_weights)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()

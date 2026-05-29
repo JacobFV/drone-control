@@ -55,6 +55,8 @@ def collect(
     render: bool,
     device: str,
     seed: int,
+    scene: str = "open_field",
+    append: bool = False,
 ) -> int:
     params = QuadParams()
     env = SwarmEnv(
@@ -62,7 +64,9 @@ def collect(
         params=params,
     )
     expert = ExpertController(params)
-    renderer = CameraRenderer(CameraConfig()) if render else None
+    # Render the actual scene (with moving objects) so the vision encoder learns
+    # from the same imagery the live stack produces, not a blank world.
+    renderer = CameraRenderer(CameraConfig(), scene=scene) if render else None
     k = env.k
 
     histories: list[deque] = [deque(maxlen=20) for _ in range(k)]
@@ -71,7 +75,7 @@ def collect(
     written = 0
 
     obs = env.reset()
-    with out_path.open("w", encoding="utf-8") as handle:
+    with out_path.open("a" if append else "w", encoding="utf-8") as handle:
         for step in range(steps):
             command_norm = expert.command(obs)
             command_bytes = norm_to_byte(command_norm)
@@ -83,6 +87,7 @@ def collect(
                         env.state.pos.cpu().numpy(),
                         env.state.quat.cpu().numpy(),
                         env.goals.cpu().numpy(),
+                        t=step * params.dt,
                     )
                 pos = env.state.pos.cpu()
                 goal_rel = obs.goal_rel.cpu()
@@ -121,12 +126,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Collect swarm-sim teacher demonstrations")
     parser.add_argument("--out", default="data/sim/goto.jsonl")
     parser.add_argument("--num-envs", type=int, default=48)
-    parser.add_argument("--num-drones", type=int, default=1)
+    parser.add_argument("--num-drones", type=int, default=6, help="drones per env (>1 captures swarm behaviour)")
     parser.add_argument("--steps", type=int, default=500)
     parser.add_argument("--log-every", type=int, default=4)
     parser.add_argument("--task", default="goto")
+    parser.add_argument("--scene", default="open_field")
+    parser.add_argument("--append", action="store_true", help="append to the output file instead of overwriting")
     parser.add_argument("--no-render", action="store_true", help="skip camera frames (proprio-only)")
-    parser.add_argument("--device", default="cpu")
+    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
     collect(
@@ -139,6 +146,8 @@ def main() -> None:
         not args.no_render,
         args.device,
         args.seed,
+        scene=args.scene,
+        append=args.append,
     )
 
 

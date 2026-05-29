@@ -9,6 +9,7 @@ import platform
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -981,7 +982,7 @@ class ControlStationServer(ThreadingHTTPServer):
                 enable_io=env_bool("DRONE_RUNTIME_ENABLE_IO", False),
                 local_vla_command=env_command("DRONE_LOCAL_VLA_COMMAND"),
                 local_vla_timeout_seconds=float(os.environ.get("DRONE_LOCAL_VLA_TIMEOUT", "0.25")),
-                batched_vla_command=env_command("DRONE_BATCHED_VLA_COMMAND"),
+                batched_vla_command=env_command("DRONE_BATCHED_VLA_COMMAND") or default_batched_vla_command(),
                 batched_vla_timeout_seconds=float(os.environ.get("DRONE_BATCHED_VLA_TIMEOUT", "0.25")),
                 batch_max_wait_seconds=float(os.environ.get("DRONE_BATCH_MAX_WAIT", "0.025")),
                 vla_log_path=os.environ.get("DRONE_VLA_LOG_PATH") or None,
@@ -1299,13 +1300,25 @@ def main() -> int:
     if server.ws_url:
         print(f"WS_READY {server.ws_url}", flush=True)
     print(f"SERVICE_READY http://{host}:{port}", flush=True)
+
+    # Electron kills this process with SIGTERM on quit. Without a handler the
+    # default action terminates immediately, skipping the finally block — so an
+    # active flight session is never finalized and its records are lost. Trip
+    # serve_forever() from a helper thread so the orderly shutdown below runs.
+    def _request_shutdown(_signum: int, _frame: object) -> None:
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    signal.signal(signal.SIGTERM, _request_shutdown)
+
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
-        store.close()
+        # server_close() finalizes the active session (writing records through
+        # the store), so it must run before the store connection is closed.
         server.server_close()
+        store.close()
     return 0
 
 
@@ -1479,6 +1492,22 @@ def save_llm_config(path: Path, cfg: LLMConfig) -> None:
             indent=2,
         )
     )
+
+
+def default_batched_vla_command() -> list[str] | None:
+    """Auto-use the trained diffusion VLA as the medium-frequency controller when
+    a checkpoint exists, so the VLA tier runs without manual env config."""
+    checkpoint = REPO_ROOT / "runs" / "vla.pt"
+    if not checkpoint.is_file():
+        return None
+    return [
+        sys.executable,
+        str(REPO_ROOT / "tools" / "diffusion_vla_policy.py"),
+        "--checkpoint",
+        str(checkpoint),
+        "--steps",
+        "8",
+    ]
 
 
 def env_command(name: str) -> list[str] | None:

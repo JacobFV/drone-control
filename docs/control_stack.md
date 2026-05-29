@@ -42,6 +42,16 @@ and nearby unexplored regions.
   one there is no medium tier (drones stay disabled rather than falling back to
   the bounded-autonomy heuristic).
 
+### Trained VLA
+A diffusion VLA (`tools/diffusion_vla_model.py`) is trained on simulator
+trajectories — swarm (multi-drone) demonstrations from the analytic expert
+across several scenes + tasks — with a loss weighted toward the axes that matter
+(orientation/yaw and directive-following roll/pitch over raw throttle) and
+sample-weighted toward decisive maneuvers. Retrain with `tools/train_vla.sh`;
+the checkpoint lands at `runs/vla.pt` and the runtime auto-loads it as the
+batched VLA controller. Closed-loop eval (the deploy path): untrained hovers
+(goal-distance improvement ~0.00); trained reaches goals (improvement ~0.89).
+
 ### Intended VLA input enrichment (next)
 In addition to the camera, feed each drone's VLA the **egocentric**:
 - immediate depth map (from `perception/depth.py`),
