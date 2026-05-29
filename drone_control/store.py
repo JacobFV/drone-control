@@ -14,7 +14,20 @@ from typing import Any
 from drone_control.identity import drone_identity_id
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+
+# Map a legacy/record ``type`` onto the v2 ``source`` lane.
+def _infer_source(record_type: str) -> str:
+    return {
+        "frames": "camera",
+        "pose-track": "pose",
+        "gaussian-splat": "splat",
+        "reconstruction-dataset": "splat",
+        "seg-screen": "seg-screen",
+        "seg-world": "seg-world",
+        "control": "control",
+    }.get(record_type, "artifact")
 
 
 @dataclass(slots=True)
@@ -67,6 +80,14 @@ class BlobStore:
 
 
 class ControlStationStore:
+    """SQLite-backed store for the session-centric model.
+
+    Hierarchy: ``environment`` (sim | real) → ``session`` (shared by all drones,
+    references the environment) → ``records`` (per-drone or shared inferences).
+    Drones live in their own table and are referenced by id from sessions and
+    per-drone records.
+    """
+
     def __init__(self, db_path: Path, blob_root: Path, repo_root: Path) -> None:
         self.db_path = db_path
         self.repo_root = repo_root
@@ -78,315 +99,260 @@ class ControlStationStore:
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.execute("PRAGMA journal_mode = WAL")
         self._init_schema()
+        self._migrate_if_needed()
+        self._create_indexes()
 
     def close(self) -> None:
         self.conn.close()
+
+    # ------------------------------------------------------------------ state
 
     def state(self) -> dict[str, Any]:
         with self.lock:
             return self._state()
 
     def _state(self) -> dict[str, Any]:
+        environments = []
+        for env in self.conn.execute("SELECT * FROM environments ORDER BY created_at DESC"):
+            env_dict = {
+                "id": env["id"],
+                "name": env["name"],
+                "kind": env["kind"],
+                "config": json_loads(env["config_json"], {}),
+                "createdAt": env["created_at"],
+                "sessions": [],
+            }
+            for session in self.conn.execute(
+                "SELECT * FROM sessions WHERE environment_id = ? ORDER BY created_at DESC",
+                (env["id"],),
+            ):
+                env_dict["sessions"].append(self._session_dict(session))
+            environments.append(env_dict)
+
         drones = []
         for drone in self.conn.execute("SELECT * FROM drones ORDER BY last_seen DESC, name"):
-            drone_dict = {
-                "id": drone["id"],
-                "name": drone["name"],
-                "model": drone["model"],
-                "status": drone["status"],
-                "lastSeen": drone["last_seen"],
-                "identity": json_loads(drone["identity_json"], {}),
-                "connection": json_loads(drone["connection_json"], {}),
-                "flights": [],
-            }
-            for flight in self.conn.execute(
-                "SELECT * FROM flights WHERE drone_id = ? ORDER BY created_at DESC",
-                (drone["id"],),
-            ):
-                flight_dict = {
-                    "id": flight["id"],
-                    "name": flight["name"],
-                    "startedAt": flight["started_at"],
-                    "duration": flight["duration"],
-                    "mode": flight["mode"],
-                    "policy": json_loads(flight["policy_json"], {}),
-                    "metadata": json_loads(flight["metadata_json"], {}),
-                    "metrics": json_loads(flight["metrics_json"], {}),
-                    "records": [],
+            drones.append(
+                {
+                    "id": drone["id"],
+                    "name": drone["name"],
+                    "model": drone["model"],
+                    "status": drone["status"],
+                    "lastSeen": drone["last_seen"],
+                    "identity": json_loads(drone["identity_json"], {}),
+                    "connection": json_loads(drone["connection_json"], {}),
                 }
-                for record in self.conn.execute(
-                    "SELECT * FROM records WHERE flight_id = ? ORDER BY created_at",
-                    (flight["id"],),
-                ):
-                    item = {
-                        "id": record["id"],
-                        "type": record["type"],
-                        "label": record["label"],
-                        "mime": record["mime"],
-                        "byteCount": record["byte_count"],
-                        "metadata": json_loads(record["metadata_json"], {}),
-                    }
-                    if record["blob_key"]:
-                        item["blobKey"] = record["blob_key"]
-                        item["path"] = str(self.blobs.resolve(record["blob_key"]))
-                    if record["type"] == "frames":
-                        item["streamUrl"] = f"/api/records/{record['id']}/mjpeg"
-                    if record["type"] == "pose-track":
-                        item["poseUrl"] = f"/api/flights/{flight['id']}/pose/track"
-                    flight_dict["records"].append(item)
-                drone_dict["flights"].append(flight_dict)
-            drones.append(drone_dict)
-        return {"drones": drones}
+            )
+        return {"environments": environments, "drones": drones}
 
-    def create_flight(
+    def _session_dict(self, session: sqlite3.Row) -> dict[str, Any]:
+        out = {
+            "id": session["id"],
+            "environmentId": session["environment_id"],
+            "name": session["name"],
+            "state": session["state"],
+            "drones": json_loads(session["drones_json"], []),
+            "startedAt": session["started_at"],
+            "endedAt": session["ended_at"],
+            "duration": session["duration"],
+            "metadata": json_loads(session["metadata_json"], {}),
+            "metrics": json_loads(session["metrics_json"], {}),
+            "records": [],
+        }
+        for record in self.conn.execute(
+            "SELECT * FROM records WHERE session_id = ? ORDER BY created_at",
+            (session["id"],),
+        ):
+            out["records"].append(self._record_dict(record))
+        return out
+
+    def _record_dict(self, record: sqlite3.Row) -> dict[str, Any]:
+        item = {
+            "id": record["id"],
+            "sessionId": record["session_id"],
+            "droneId": record["drone_id"],
+            "source": record["source"],
+            "type": record["type"],
+            "label": record["label"],
+            "mime": record["mime"],
+            "byteCount": record["byte_count"],
+            "metadata": json_loads(record["metadata_json"], {}),
+        }
+        if record["blob_key"]:
+            item["blobKey"] = record["blob_key"]
+            item["path"] = str(self.blobs.resolve(record["blob_key"]))
+        if record["source"] == "camera":
+            item["streamUrl"] = f"/api/records/{record['id']}/mjpeg"
+        if record["source"] == "pose":
+            item["poseUrl"] = f"/api/records/{record['id']}/pose-track"
+        return item
+
+    # ------------------------------------------------------------ environments
+
+    def create_environment(
         self,
-        drone_id: str,
         name: str,
-        mode: str = "manual",
-        policy: dict[str, Any] | None = None,
+        kind: str,
+        config: dict[str, Any] | None = None,
+        *,
+        environment_id: str | None = None,
+    ) -> dict[str, Any]:
+        with self.lock:
+            env_id = environment_id or f"env-{uuid.uuid4().hex[:12]}"
+            now = current_timestamp()
+            self.conn.execute(
+                """
+                INSERT INTO environments (id, name, kind, config_json, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                  name = excluded.name, kind = excluded.kind, config_json = excluded.config_json
+                """,
+                (env_id, name, kind, json.dumps(config or {}), now),
+            )
+            self.conn.commit()
+            return {"id": env_id, "name": name, "kind": kind, "config": config or {}}
+
+    def environment_exists(self, environment_id: str) -> bool:
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT 1 FROM environments WHERE id = ?", (environment_id,)
+            ).fetchone()
+            return row is not None
+
+    # ----------------------------------------------------------------- sessions
+
+    def create_session(
+        self,
+        environment_id: str,
+        name: str,
+        drones: list[str] | None = None,
+        *,
+        session_id: str | None = None,
+        state: str = "recording",
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         with self.lock:
-            flight_id = f"flight-{uuid.uuid4().hex[:12]}"
+            sid = session_id or f"session-{uuid.uuid4().hex[:12]}"
             now = current_timestamp()
-            policy_data = policy or {"name": "Manual bench test", "version": 1}
-            metadata_data = metadata or {"status": "draft", "notes": "No drone IO is armed yet."}
             self.conn.execute(
                 """
-                INSERT INTO flights
-                  (id, drone_id, name, started_at, duration, mode, policy_json, metadata_json, metrics_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO sessions
+                  (id, environment_id, name, state, drones_json, started_at, ended_at,
+                   duration, metadata_json, metrics_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    flight_id,
-                    drone_id,
+                    sid,
+                    environment_id,
                     name,
-                    "not started",
+                    state,
+                    json.dumps(drones or []),
+                    now,
+                    None,
                     "00:00:00",
-                    mode,
-                    json.dumps(policy_data),
-                    json.dumps(metadata_data),
-                    json.dumps({"frames": 0, "packets": 0, "bytes": 0, "resolution": "pending"}),
+                    json.dumps(metadata or {}),
+                    json.dumps({}),
                     now,
                 ),
             )
             self.conn.commit()
-            return {"id": flight_id}
+            return {"id": sid, "environmentId": environment_id, "name": name, "state": state}
 
-    def flight_exists(self, flight_id: str) -> bool:
+    def session_exists(self, session_id: str) -> bool:
         with self.lock:
-            row = self.conn.execute("SELECT 1 FROM flights WHERE id = ?", (flight_id,)).fetchone()
+            row = self.conn.execute("SELECT 1 FROM sessions WHERE id = ?", (session_id,)).fetchone()
             return row is not None
 
-    def update_flight(
+    def get_session(self, session_id: str) -> dict[str, Any] | None:
+        with self.lock:
+            row = self.conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
+            return self._session_dict(row) if row is not None else None
+
+    def update_session(
         self,
-        flight_id: str,
+        session_id: str,
         *,
         name: str | None = None,
-        mode: str | None = None,
+        state: str | None = None,
+        drones: list[str] | None = None,
+        ended_at: str | None = None,
         duration: str | None = None,
-        policy: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
         metrics: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         with self.lock:
-            row = self.conn.execute("SELECT * FROM flights WHERE id = ?", (flight_id,)).fetchone()
+            row = self.conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
             if row is None:
                 return None
-
-            current_policy = json_loads(row["policy_json"], {})
             current_metadata = json_loads(row["metadata_json"], {})
             current_metrics = json_loads(row["metrics_json"], {})
-            if policy:
-                current_policy.update(policy)
             if metadata:
                 current_metadata.update(metadata)
             if metrics:
                 current_metrics.update(metrics)
-
             self.conn.execute(
                 """
-                UPDATE flights
-                SET name = ?, mode = ?, duration = ?, policy_json = ?, metadata_json = ?, metrics_json = ?
+                UPDATE sessions
+                SET name = ?, state = ?, drones_json = ?, ended_at = ?, duration = ?,
+                    metadata_json = ?, metrics_json = ?
                 WHERE id = ?
                 """,
                 (
                     name if name is not None else row["name"],
-                    mode if mode is not None else row["mode"],
+                    state if state is not None else row["state"],
+                    json.dumps(drones) if drones is not None else row["drones_json"],
+                    ended_at if ended_at is not None else row["ended_at"],
                     duration if duration is not None else row["duration"],
-                    json.dumps(current_policy),
                     json.dumps(current_metadata),
                     json.dumps(current_metrics),
-                    flight_id,
+                    session_id,
                 ),
             )
             self.conn.commit()
-            return {
-                "id": flight_id,
-                "name": name if name is not None else row["name"],
-                "mode": mode if mode is not None else row["mode"],
-                "duration": duration if duration is not None else row["duration"],
-                "policy": current_policy,
-                "metadata": current_metadata,
-                "metrics": current_metrics,
-            }
+            return self.get_session(session_id)
 
-    def seed_if_empty(self) -> None:
-        with self.lock:
-            count = self.conn.execute("SELECT COUNT(*) FROM drones").fetchone()[0]
-            if count:
-                return
+    # ------------------------------------------------------------------ records
 
-            now = current_timestamp()
-            self.conn.execute(
-            """
-            INSERT INTO drones
-              (id, name, model, status, last_seen, identity_json, connection_json, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                drone_identity_id("WIFI_8K-0c5b90", None, "ack-4802000000-rtsp-webcam"),
-                "WIFI_8K-0c5b90",
-                "WIFI_8K",
-                "available",
-                "2026-05-12 15:09",
-                json.dumps(
-                    {
-                        "ssid": "WIFI_8K-0c5b90",
-                        "bssid": None,
-                        "controlAck": "48 02 00 00 00",
-                        "rtspPath": "rtsp://192.168.1.1:7070/webcam",
-                    }
-                ),
-                json.dumps(
-                    {
-                        "ssid": "WIFI_8K-0c5b90",
-                        "iface": "wlP9s9",
-                        "ip": "192.168.1.1",
-                        "control": "UDP 7099",
-                        "camera": "RTSP 7070",
-                    }
-                ),
-                now,
-                now,
-            ),
-        )
-
-            self.conn.execute(
-            """
-            INSERT INTO drones
-              (id, name, model, status, last_seen, identity_json, connection_json, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                "wifi8k-second-unfingerprinted",
-                "Second WIFI_8K drone",
-                "WIFI_8K",
-                "offline",
-                "2026-05-12 12:51",
-                json.dumps({"ssid": None, "bssid": None, "fingerprint": "pending"}),
-                json.dumps({"ssid": "unknown", "iface": "wlP9s9", "ip": "192.168.1.1", "control": "UDP 7099", "camera": "RTSP 7070"}),
-                now,
-                now,
-            ),
-        )
-
-            self._seed_flight(
-            drone_id=drone_identity_id("WIFI_8K-0c5b90", None, "ack-4802000000-rtsp-webcam"),
-            flight_id="flight-20260512-150951",
-            name="Camera capture 15:09",
-            started_at="2026-05-12 15:09:51",
-            duration="00:00:06",
-            mode="review",
-            policy={"name": "Manual camera capture", "version": 1},
-            metadata={"battery": "fresh test battery", "location": "bench", "notes": "Autonomous RTSP camera startup verified."},
-            metrics={"packets": 1635, "bytes": 2235749, "frames": 126, "resolution": "640 x 384", "temporalMae": 3.012, "smoothedTemporalMae": 2.145},
-            records=[
-                ("frames", "Decoded forward JPEG frames", "image/jpeg-sequence", "camera_captures/frames_20260512_150951"),
-                ("raw", "Raw UDP payloads", "application/octet-stream", "camera_captures/camera_udp_20260512_150951.bin"),
-                ("log", "Camera session log", "text/plain", "logs/drone_camera_session_20260512_150950.log"),
-            ],
-        )
-            self._seed_flight(
-            drone_id=drone_identity_id("WIFI_8K-0c5b90", None, "ack-4802000000-rtsp-webcam"),
-            flight_id="flight-20260512-145202",
-            name="Phone camera sniff 14:52",
-            started_at="2026-05-12 14:52:02",
-            duration="00:01:00",
-            mode="review",
-            policy={"name": "Passive monitor capture", "version": 1},
-            metadata={"source": "monitor pcap", "notes": "RTSP negotiation was discovered from this capture."},
-            metrics={"packets": 4114, "bytes": 5420000, "frames": 326, "resolution": "640 x 384", "temporalMae": 10.922, "smoothedTemporalMae": 7.463},
-            records=[
-                ("pcap", "Monitor capture", "application/vnd.tcpdump.pcap", "captures/drone_monitor_20260512_145202_ch1.pcap"),
-                ("frames", "Decoded forward JPEG frames", "image/jpeg-sequence", "camera_captures/pcap_20260512_145202_jpeg_test"),
-                ("frames", "Smoothed forward JPEG frames", "image/jpeg-sequence", "camera_captures/pcap_20260512_145202_smooth_fast_test"),
-            ],
-        )
-            self.conn.commit()
-
-    def _seed_flight(
+    def import_record(
         self,
+        session_id: str,
+        source: str,
+        record_type: str,
+        label: str,
+        mime: str,
+        source_path: Path,
         *,
-        drone_id: str,
-        flight_id: str,
-        name: str,
-        started_at: str,
-        duration: str,
-        mode: str,
-        policy: dict[str, Any],
-        metadata: dict[str, Any],
-        metrics: dict[str, Any],
-        records: list[tuple[str, str, str, str]],
-    ) -> None:
-        now = current_timestamp()
-        self.conn.execute(
-            """
-            INSERT INTO flights
-              (id, drone_id, name, started_at, duration, mode, policy_json, metadata_json, metrics_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                flight_id,
-                drone_id,
-                name,
-                started_at,
-                duration,
-                mode,
-                json.dumps(policy),
-                json.dumps(metadata),
-                json.dumps(metrics),
-                now,
-            ),
-        )
-        for record_type, label, mime, relative_path in records:
-            self.import_record(flight_id, record_type, label, mime, self.repo_root / relative_path)
-
-    def import_record(self, flight_id: str, record_type: str, label: str, mime: str, source: Path) -> str:
+        drone_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
         with self.lock:
             record_id = f"record-{uuid.uuid4().hex[:12]}"
-            blob = self.blobs.import_path(source)
-            metadata = {"missingPath": str(source)}
-            if source.exists():
+            blob = self.blobs.import_path(source_path)
+            meta = dict(metadata or {})
+            if source_path.exists():
                 try:
-                    metadata = {"originalPath": str(source.relative_to(self.repo_root))}
+                    meta["originalPath"] = str(source_path.relative_to(self.repo_root))
                 except ValueError:
-                    metadata = {"originalPath": str(source)}
+                    meta["originalPath"] = str(source_path)
+            else:
+                meta["missingPath"] = str(source_path)
             self.conn.execute(
                 """
                 INSERT INTO records
-                  (id, flight_id, type, label, mime, blob_key, byte_count, metadata_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  (id, session_id, drone_id, source, type, label, mime, blob_key,
+                   byte_count, metadata_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record_id,
-                    flight_id,
+                    session_id,
+                    drone_id,
+                    source,
                     record_type,
                     label,
                     mime,
                     blob.key if blob else None,
                     blob.byte_count if blob else 0,
-                    json.dumps(metadata),
+                    json.dumps(meta),
                     current_timestamp(),
                 ),
             )
@@ -401,7 +367,9 @@ class ControlStationStore:
             path = self.blobs.resolve(record["blob_key"]) if record["blob_key"] else None
             return {
                 "id": record["id"],
-                "flightId": record["flight_id"],
+                "sessionId": record["session_id"],
+                "droneId": record["drone_id"],
+                "source": record["source"],
                 "type": record["type"],
                 "label": record["label"],
                 "mime": record["mime"],
@@ -417,6 +385,38 @@ class ControlStationStore:
             if not record or not record["blob_key"]:
                 return None
             return self.blobs.resolve(record["blob_key"])
+
+    def latest_record(
+        self,
+        session_id: str,
+        *,
+        source: str | None = None,
+        record_type: str | None = None,
+        drone_id: str | None = None,
+        record_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Most-recent record in a session matching the given filters."""
+
+        with self.lock:
+            clauses = ["session_id = ?"]
+            params: list[Any] = [session_id]
+            if source is not None:
+                clauses.append("source = ?")
+                params.append(source)
+            if record_type is not None:
+                clauses.append("type = ?")
+                params.append(record_type)
+            if drone_id is not None:
+                clauses.append("drone_id = ?")
+                params.append(drone_id)
+            if record_id is not None:
+                clauses.append("id = ?")
+                params.append(record_id)
+            query = "SELECT * FROM records WHERE " + " AND ".join(clauses) + " ORDER BY created_at DESC LIMIT 1"
+            row = self.conn.execute(query, tuple(params)).fetchone()
+            return self._record_dict(row) if row is not None else None
+
+    # ------------------------------------------------------------------- drones
 
     def upsert_discovered_drone(
         self,
@@ -472,6 +472,160 @@ class ControlStationStore:
             self.conn.commit()
             return drone_id
 
+    def _insert_drone(
+        self,
+        *,
+        drone_id: str,
+        name: str,
+        model: str,
+        status: str,
+        last_seen: str,
+        identity: dict[str, Any],
+        connection: dict[str, Any],
+    ) -> None:
+        now = current_timestamp()
+        self.conn.execute(
+            """
+            INSERT OR IGNORE INTO drones
+              (id, name, model, status, last_seen, identity_json, connection_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (drone_id, name, model, status, last_seen, json.dumps(identity), json.dumps(connection), now, now),
+        )
+
+    # -------------------------------------------------------------------- seed
+
+    def seed_if_empty(self) -> None:
+        with self.lock:
+            env_count = self.conn.execute("SELECT COUNT(*) FROM environments").fetchone()[0]
+            drone_count = self.conn.execute("SELECT COUNT(*) FROM drones").fetchone()[0]
+            if env_count and drone_count:
+                return
+
+            primary_drone = drone_identity_id("WIFI_8K-0c5b90", None, "ack-4802000000-rtsp-webcam")
+            self._insert_drone(
+                drone_id=primary_drone,
+                name="WIFI_8K-0c5b90",
+                model="WIFI_8K",
+                status="available",
+                last_seen="2026-05-12 15:09",
+                identity={
+                    "ssid": "WIFI_8K-0c5b90",
+                    "bssid": None,
+                    "controlAck": "48 02 00 00 00",
+                    "rtspPath": "rtsp://192.168.1.1:7070/webcam",
+                },
+                connection={
+                    "ssid": "WIFI_8K-0c5b90",
+                    "iface": "wlP9s9",
+                    "ip": "192.168.1.1",
+                    "control": "UDP 7099",
+                    "camera": "RTSP 7070",
+                },
+            )
+            self._insert_drone(
+                drone_id="wifi8k-second-unfingerprinted",
+                name="Second WIFI_8K drone",
+                model="WIFI_8K",
+                status="offline",
+                last_seen="2026-05-12 12:51",
+                identity={"ssid": None, "bssid": None, "fingerprint": "pending"},
+                connection={"ssid": "unknown", "iface": "wlP9s9", "ip": "192.168.1.1", "control": "UDP 7099", "camera": "RTSP 7070"},
+            )
+
+            if not env_count:
+                self.create_environment(
+                    "Live (real drones)",
+                    "real",
+                    {"description": "Physical WIFI_8K drones over Wi-Fi."},
+                    environment_id="env-real-default",
+                )
+                self.create_environment(
+                    "Swarm simulator",
+                    "sim",
+                    {"description": "Analytic-expert swarm sim with synthetic cameras."},
+                    environment_id="env-sim-default",
+                )
+                self._seed_session(
+                    environment_id="env-real-default",
+                    session_id="session-20260512-150951",
+                    name="Camera capture 15:09",
+                    drone_id=primary_drone,
+                    started_at="2026-05-12 15:09:51",
+                    duration="00:00:06",
+                    metadata={"battery": "fresh test battery", "location": "bench", "notes": "Autonomous RTSP camera startup verified."},
+                    metrics={"packets": 1635, "bytes": 2235749, "frames": 126, "resolution": "640 x 384"},
+                    records=[
+                        ("camera", "frames", "Decoded forward JPEG frames", "image/jpeg-sequence", "camera_captures/frames_20260512_150951"),
+                        ("artifact", "raw", "Raw UDP payloads", "application/octet-stream", "camera_captures/camera_udp_20260512_150951.bin"),
+                        ("artifact", "log", "Camera session log", "text/plain", "logs/drone_camera_session_20260512_150950.log"),
+                    ],
+                )
+                self._seed_session(
+                    environment_id="env-real-default",
+                    session_id="session-20260512-145202",
+                    name="Phone camera sniff 14:52",
+                    drone_id=primary_drone,
+                    started_at="2026-05-12 14:52:02",
+                    duration="00:01:00",
+                    metadata={"source": "monitor pcap", "notes": "RTSP negotiation was discovered from this capture."},
+                    metrics={"packets": 4114, "bytes": 5420000, "frames": 326, "resolution": "640 x 384"},
+                    records=[
+                        ("artifact", "pcap", "Monitor capture", "application/vnd.tcpdump.pcap", "captures/drone_monitor_20260512_145202_ch1.pcap"),
+                        ("camera", "frames", "Decoded forward JPEG frames", "image/jpeg-sequence", "camera_captures/pcap_20260512_145202_jpeg_test"),
+                        ("camera", "frames", "Smoothed forward JPEG frames", "image/jpeg-sequence", "camera_captures/pcap_20260512_145202_smooth_fast_test"),
+                    ],
+                )
+            self.conn.commit()
+
+    def _seed_session(
+        self,
+        *,
+        environment_id: str,
+        session_id: str,
+        name: str,
+        drone_id: str,
+        started_at: str,
+        duration: str,
+        metadata: dict[str, Any],
+        metrics: dict[str, Any],
+        records: list[tuple[str, str, str, str, str]],
+    ) -> None:
+        now = current_timestamp()
+        self.conn.execute(
+            """
+            INSERT INTO sessions
+              (id, environment_id, name, state, drones_json, started_at, ended_at,
+               duration, metadata_json, metrics_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                session_id,
+                environment_id,
+                name,
+                "stopped",
+                json.dumps([drone_id]),
+                started_at,
+                started_at,
+                duration,
+                json.dumps(metadata),
+                json.dumps(metrics),
+                now,
+            ),
+        )
+        for source, record_type, label, mime, relative_path in records:
+            self.import_record(
+                session_id,
+                source,
+                record_type,
+                label,
+                mime,
+                self.repo_root / relative_path,
+                drone_id=drone_id,
+            )
+
+    # ------------------------------------------------------------------ schema
+
     def _init_schema(self) -> None:
         self.conn.executescript(
             """
@@ -492,14 +646,23 @@ class ControlStationStore:
               updated_at TEXT NOT NULL
             );
 
-            CREATE TABLE IF NOT EXISTS flights (
+            CREATE TABLE IF NOT EXISTS environments (
               id TEXT PRIMARY KEY,
-              drone_id TEXT NOT NULL REFERENCES drones(id) ON DELETE CASCADE,
               name TEXT NOT NULL,
+              kind TEXT NOT NULL,
+              config_json TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS sessions (
+              id TEXT PRIMARY KEY,
+              environment_id TEXT NOT NULL REFERENCES environments(id) ON DELETE CASCADE,
+              name TEXT NOT NULL,
+              state TEXT NOT NULL,
+              drones_json TEXT NOT NULL,
               started_at TEXT NOT NULL,
+              ended_at TEXT,
               duration TEXT NOT NULL,
-              mode TEXT NOT NULL,
-              policy_json TEXT NOT NULL,
               metadata_json TEXT NOT NULL,
               metrics_json TEXT NOT NULL,
               created_at TEXT NOT NULL
@@ -507,7 +670,9 @@ class ControlStationStore:
 
             CREATE TABLE IF NOT EXISTS records (
               id TEXT PRIMARY KEY,
-              flight_id TEXT NOT NULL REFERENCES flights(id) ON DELETE CASCADE,
+              session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+              drone_id TEXT,
+              source TEXT NOT NULL,
               type TEXT NOT NULL,
               label TEXT NOT NULL,
               mime TEXT NOT NULL,
@@ -516,11 +681,143 @@ class ControlStationStore:
               metadata_json TEXT NOT NULL,
               created_at TEXT NOT NULL
             );
-
-            CREATE INDEX IF NOT EXISTS idx_flights_drone_id ON flights(drone_id);
-            CREATE INDEX IF NOT EXISTS idx_records_flight_id ON records(flight_id);
             """
         )
+        self.conn.commit()
+
+    def _create_indexes(self) -> None:
+        # Created after any migration, once the records table is guaranteed v2.
+        self.conn.executescript(
+            """
+            CREATE INDEX IF NOT EXISTS idx_sessions_environment_id ON sessions(environment_id);
+            CREATE INDEX IF NOT EXISTS idx_records_session_id ON records(session_id);
+            """
+        )
+        self.conn.commit()
+
+    def _migrate_if_needed(self) -> None:
+        """Migrate a v1 (drone → flights → records) database to v2.
+
+        Each legacy flight becomes a single-drone session inside one synthetic
+        ``real`` environment; its records are reparented with an inferred source.
+        """
+
+        with self.lock:
+            # If the legacy ``flights`` table is absent, there is nothing to do.
+            has_flights = self.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='flights'"
+            ).fetchone()
+            if not has_flights:
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO schema_meta(key, value) VALUES('schema_version', ?)",
+                    (str(SCHEMA_VERSION),),
+                )
+                self.conn.commit()
+                return
+
+            # The new ``records`` table was created by _init_schema with a
+            # session_id column; the legacy one used flight_id. Detect which we
+            # have. If a legacy records table coexists, it was created first and
+            # _init_schema's CREATE IF NOT EXISTS was a no-op, so columns are v1.
+            cols = {row["name"] for row in self.conn.execute("PRAGMA table_info(records)")}
+            if "flight_id" not in cols:
+                # records is already v2; flights is leftover — drop it.
+                self.conn.execute("DROP TABLE IF EXISTS flights")
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO schema_meta(key, value) VALUES('schema_version', ?)",
+                    (str(SCHEMA_VERSION),),
+                )
+                self.conn.commit()
+                return
+
+            try:
+                self._run_v1_to_v2_migration()
+            except sqlite3.Error as exc:  # pragma: no cover - defensive
+                self.conn.rollback()
+                raise RuntimeError(f"v1->v2 migration failed: {exc}") from exc
+
+    def _run_v1_to_v2_migration(self) -> None:
+        now = current_timestamp()
+        legacy_env = "env-legacy-real"
+        self.conn.execute(
+            """
+            INSERT OR IGNORE INTO environments (id, name, kind, config_json, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (legacy_env, "Legacy real environment", "real", json.dumps({"migratedFrom": "v1"}), now),
+        )
+
+        # Rename the legacy records table aside, recreate the v2 records table.
+        self.conn.execute("ALTER TABLE records RENAME TO records_v1")
+        self.conn.execute(
+            """
+            CREATE TABLE records (
+              id TEXT PRIMARY KEY,
+              session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+              drone_id TEXT,
+              source TEXT NOT NULL,
+              type TEXT NOT NULL,
+              label TEXT NOT NULL,
+              mime TEXT NOT NULL,
+              blob_key TEXT,
+              byte_count INTEGER NOT NULL DEFAULT 0,
+              metadata_json TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            )
+            """
+        )
+
+        for flight in self.conn.execute("SELECT * FROM flights").fetchall():
+            metadata = json_loads(flight["metadata_json"], {})
+            state = str(metadata.get("sessionStatus") or "stopped")
+            self.conn.execute(
+                """
+                INSERT INTO sessions
+                  (id, environment_id, name, state, drones_json, started_at, ended_at,
+                   duration, metadata_json, metrics_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    flight["id"],
+                    legacy_env,
+                    flight["name"],
+                    state if state in {"recording", "stopped", "error"} else "stopped",
+                    json.dumps([flight["drone_id"]]),
+                    flight["started_at"],
+                    flight["started_at"],
+                    flight["duration"],
+                    flight["metadata_json"],
+                    flight["metrics_json"],
+                    flight["created_at"],
+                ),
+            )
+            for record in self.conn.execute(
+                "SELECT * FROM records_v1 WHERE flight_id = ?", (flight["id"],)
+            ).fetchall():
+                self.conn.execute(
+                    """
+                    INSERT INTO records
+                      (id, session_id, drone_id, source, type, label, mime, blob_key,
+                       byte_count, metadata_json, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        record["id"],
+                        flight["id"],
+                        flight["drone_id"],
+                        _infer_source(record["type"]),
+                        record["type"],
+                        record["label"],
+                        record["mime"],
+                        record["blob_key"],
+                        record["byte_count"],
+                        record["metadata_json"],
+                        record["created_at"],
+                    ),
+                )
+
+        self.conn.execute("DROP TABLE records_v1")
+        self.conn.execute("DROP TABLE flights")
         self.conn.execute(
             "INSERT OR REPLACE INTO schema_meta(key, value) VALUES('schema_version', ?)",
             (str(SCHEMA_VERSION),),
