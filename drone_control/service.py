@@ -63,6 +63,12 @@ class ControlStationHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/reconstruction/tools":
             self.send_json(self.server.reconstructions.tools_status())
             return
+        if parsed.path == "/api/world/splat/status":
+            self.send_json(self.server.runtime.world_model_status())
+            return
+        if parsed.path == "/api/world/splat/snapshot":
+            self.serve_world_snapshot()
+            return
         if parsed.path == "/api/wifi/capabilities":
             self.send_json(wifi_capabilities())
             return
@@ -249,6 +255,36 @@ class ControlStationHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/runtime/stop":
             self.server.runtime.stop_all()
+            self.send_json(self.server.runtime_status())
+            return
+
+        if parsed.path == "/api/world/splat/start":
+            self.send_json(self.server.runtime.start_world_model())
+            return
+        if parsed.path == "/api/world/splat/stop":
+            self.send_json(self.server.runtime.stop_world_model())
+            return
+        if parsed.path == "/api/world/splat/bootstrap":
+            payload = self.read_json()
+            transforms = payload.get("transforms") or {}
+            applied = []
+            for drone_id, transform in transforms.items():
+                try:
+                    self.server.runtime.set_world_transform(str(drone_id), transform)
+                    applied.append(str(drone_id))
+                except Exception as exc:
+                    self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                    return
+            self.send_json({"applied": applied} | self.server.runtime.world_model_status())
+            return
+
+        if parsed.path == "/api/runtime/controller":
+            payload = self.read_json()
+            try:
+                self.server.runtime.set_all_controllers(str(payload.get("mode") or "disabled"))
+            except (KeyError, ValueError) as exc:
+                self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
             self.send_json(self.server.runtime_status())
             return
 
@@ -476,6 +512,25 @@ class ControlStationHandler(BaseHTTPRequestHandler):
             return
         except FileNotFoundError:
             return
+
+    def serve_world_snapshot(self) -> None:
+        export_dir = self.server.reconstruction_root / "world_model"
+        export_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            path = self.server.runtime.export_world_model(export_dir / "world.ply")
+        except Exception as exc:
+            self.send_json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
+            return
+        if path is None:
+            self.send_json({"error": "world model not running"}, status=HTTPStatus.NOT_FOUND)
+            return
+        data = Path(path).read_bytes()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "model/vnd.gaussian-splat")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(data)
 
     def send_blob_file(self, key: str, relative: str) -> None:
         root = self.server.store.blobs.resolve(key)
@@ -780,6 +835,10 @@ class ControlStationServer(ThreadingHTTPServer):
                 enable_io=env_bool("DRONE_RUNTIME_ENABLE_IO", False),
                 local_vla_command=env_command("DRONE_LOCAL_VLA_COMMAND"),
                 local_vla_timeout_seconds=float(os.environ.get("DRONE_LOCAL_VLA_TIMEOUT", "0.25")),
+                batched_vla_command=env_command("DRONE_BATCHED_VLA_COMMAND"),
+                batched_vla_timeout_seconds=float(os.environ.get("DRONE_BATCHED_VLA_TIMEOUT", "0.25")),
+                batch_max_wait_seconds=float(os.environ.get("DRONE_BATCH_MAX_WAIT", "0.025")),
+                vla_log_path=os.environ.get("DRONE_VLA_LOG_PATH") or None,
             )
         )
         self.runtime.configure_drones(load_runtime_configs())
@@ -1019,6 +1078,8 @@ class ControlStationServer(ThreadingHTTPServer):
         self.autonomy_loop_running = False
         self.autonomy_thread.join(timeout=1.0)
         self.runtime.stop_all()
+        self.runtime.stop_world_model()
+        self.runtime.close_vla()
         self.reconstructions.stop_all()
         self.sessions.stop_all()
         self.manual_transport.close()

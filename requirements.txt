@@ -3,3 +3,6 @@ numpy>=1.26
 opencv-python>=4.8
 nerfstudio>=1.1
 pymeshlab>=2025.7
+# Live cross-drone Gaussian-splat world model (drone_control/perception/live_splat.py).
+# Compiles CUDA kernels JIT on first use; needs nvcc + a torch build matching the GPU arch.
+gsplat>=1.5

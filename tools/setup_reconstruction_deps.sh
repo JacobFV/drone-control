@@ -133,6 +133,27 @@ build_open3d_from_source() {
   cmake --build "$OPEN3D_BUILD" --target install-pip-package -j "$JOBS"
 }
 
+verify_live_splat() {
+  # gsplat JIT-compiles CUDA kernels on first use. Verify import + a 1-gaussian
+  # rasterize so the live splat engine is known-good; degrade gracefully if not.
+  CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}" "$VENV_DIR/bin/python" - <<'PY' || echo "WARN: gsplat live-splat engine unavailable; offline reconstruction still works." >&2
+import torch
+import gsplat
+
+dev = "cuda"
+means = torch.tensor([[0.0, 0.0, 2.0]], device=dev)
+quats = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=dev)
+scales = torch.tensor([[0.2, 0.2, 0.2]], device=dev)
+opac = torch.tensor([1.0], device=dev)
+colors = torch.tensor([[1.0, 0.5, 0.2]], device=dev)
+K = torch.tensor([[[50.0, 0, 32], [0, 50.0, 32], [0, 0, 1]]], device=dev)
+viewmat = torch.eye(4, device=dev)[None]
+out, alpha, _ = gsplat.rasterization(means, quats, scales, opac, colors, viewmat, K, 64, 64)
+assert out.shape == (1, 64, 64, 3)
+print(f"gsplat live-splat ready ({gsplat.__version__})")
+PY
+}
+
 verify_reconstruction_tools() {
   export PATH="$VENV_DIR/bin:$PATH"
   "$VENV_DIR/bin/python" - <<'PY'
@@ -166,3 +187,4 @@ if ! open3d_imports; then
 fi
 
 verify_reconstruction_tools
+verify_live_splat

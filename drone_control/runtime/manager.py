@@ -1,22 +1,26 @@
 from __future__ import annotations
 
 import itertools
+import json
 import queue
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from drone_control.config import DroneConfig
 from drone_control.controllers.autonomy import BoundedAutonomyController
 from drone_control.controllers.base import DisabledController, SafetyConstraints
-from drone_control.controllers.local_vla import LocalVLAClient, LocalVLAConfig
+from drone_control.controllers.batched_vla import BatchedVLAController, BatchedVLAHub
+from drone_control.controllers.local_vla import BatchLocalVLAClient, LocalVLAClient, LocalVLAConfig
 from drone_control.controllers.manual import ManualController
 from drone_control.controllers.scripted import scripted_controller
 from drone_control.controllers.text_command import TextCommandController
 from drone_control.controllers.vla import VLAController
 from drone_control.coordinator.tasks import Assignment, MissionProgress
+from drone_control.perception.frame_registry import LiveFrameRegistry
 from drone_control.protocols import make_protocol
 from drone_control.transport import make_drone_link
 
@@ -32,6 +36,10 @@ class RuntimeManagerConfig:
     enable_io: bool = False
     local_vla_command: list[str] | None = None
     local_vla_timeout_seconds: float = 0.25
+    batched_vla_command: list[str] | None = None
+    batched_vla_timeout_seconds: float = 0.25
+    batch_max_wait_seconds: float = 0.025
+    vla_log_path: str | None = None
 
 
 class RuntimeManager:
@@ -42,6 +50,11 @@ class RuntimeManager:
         self._events: deque[dict[str, Any]] = deque(maxlen=1000)
         self._seq = itertools.count(1)
         self._lock = threading.RLock()
+        self.frame_registry = LiveFrameRegistry()
+        self._vla_hub: BatchedVLAHub | None = None
+        self._vla_client: BatchLocalVLAClient | None = None
+        self._vla_log_lock = threading.Lock()
+        self._world_model: Any | None = None
 
     def configure_drones(self, configs: list[DroneConfig]) -> None:
         with self._lock:
@@ -102,6 +115,18 @@ class RuntimeManager:
                 )
             )
             runtime.set_controller(VLAController(model_step=client.step))
+            return
+        if key in {"batched_vla", "batched-vla", "batch_vla"}:
+            hub = self._ensure_vla_hub()
+            wait = self.config.batched_vla_timeout_seconds + 0.05
+            runtime.set_controller(
+                BatchedVLAController(
+                    hub=hub,
+                    drone_id=drone_id,
+                    registry=self.frame_registry,
+                    wait_seconds=wait,
+                )
+            )
             return
         if key in {"disabled", "off"}:
             runtime.set_controller(DisabledController())
@@ -175,6 +200,136 @@ class RuntimeManager:
             )
         )
 
+    def _ensure_vla_hub(self) -> BatchedVLAHub:
+        with self._lock:
+            if self._vla_hub is None:
+                self._vla_hub = BatchedVLAHub(
+                    self._batch_model,
+                    max_wait_seconds=self.config.batch_max_wait_seconds,
+                )
+            return self._vla_hub
+
+    def _batch_model(self, payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if self.config.batched_vla_command:
+            if self._vla_client is None:
+                self._vla_client = BatchLocalVLAClient(
+                    LocalVLAConfig(
+                        command=self.config.batched_vla_command,
+                        timeout_seconds=self.config.batched_vla_timeout_seconds,
+                    )
+                )
+            results = self._vla_client.step_batch(payloads)
+        else:
+            results = _neutral_batch(payloads)
+        self._log_transitions(payloads, results)
+        return results
+
+    def _log_transitions(self, payloads: list[dict[str, Any]], results: list[dict[str, Any]]) -> None:
+        if not self.config.vla_log_path:
+            return
+        results_by_id = {r.get("droneId"): r for r in results if isinstance(r, dict)}
+        lines = []
+        for index, payload in enumerate(payloads):
+            result = results_by_id.get(payload.get("droneId"))
+            if result is None and index < len(results) and isinstance(results[index], dict):
+                result = results[index]
+            action = result.get("action") if isinstance(result, dict) else None
+            if not isinstance(action, dict):
+                continue
+            lines.append(
+                json.dumps(
+                    {
+                        "droneId": payload.get("droneId"),
+                        "observation": payload.get("observation"),
+                        "frameJpegB64": payload.get("frameJpegB64"),
+                        "recentActions": payload.get("recentActions"),
+                        "action": action,
+                    },
+                    separators=(",", ":"),
+                )
+            )
+        if not lines:
+            return
+        with self._vla_log_lock:
+            path = Path(self.config.vla_log_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write("\n".join(lines) + "\n")
+
+    # ------------------------------------------------------------------ #
+    # Live cross-drone Gaussian-splat world model
+    # ------------------------------------------------------------------ #
+
+    def ingest_frame(self, drone_id: str, jpeg: bytes, pose: dict[str, Any] | None = None) -> None:
+        """Publish a camera frame for both the batched VLA hub and the world model.
+
+        Any live-video producer should call this; a single decode feeds both the
+        diffusion policy (via the frame registry) and the splat engine.
+        """
+
+        self.frame_registry.publish(drone_id, jpeg)
+        with self._lock:
+            world = self._world_model
+        if world is not None:
+            try:
+                world.ingest(drone_id, jpeg, pose)
+            except Exception:
+                pass
+
+    def start_world_model(self) -> dict[str, Any]:
+        from drone_control.perception import live_splat
+
+        if not live_splat.available():
+            return {"available": False, "reason": live_splat.unavailable_reason()}
+        with self._lock:
+            if self._world_model is None:
+                self._world_model = live_splat.LiveSplatEngine()
+            self._world_model.start()
+            return self._world_model.snapshot()
+
+    def stop_world_model(self) -> dict[str, Any]:
+        with self._lock:
+            world = self._world_model
+        if world is None:
+            return {"available": False, "running": False}
+        world.stop()
+        return world.snapshot()
+
+    def world_model_status(self) -> dict[str, Any]:
+        from drone_control.perception import live_splat
+
+        with self._lock:
+            world = self._world_model
+        if world is None:
+            return {"available": live_splat.available(), "running": False, "reason": live_splat.unavailable_reason()}
+        return world.snapshot()
+
+    def export_world_model(self, path: str | Path) -> str | None:
+        with self._lock:
+            world = self._world_model
+        if world is None:
+            return None
+        return str(world.export_ply(Path(path)))
+
+    def set_world_transform(self, drone_id: str, transform: list[list[float]]) -> None:
+        import numpy as np
+
+        with self._lock:
+            world = self._world_model
+        if world is not None:
+            world.set_drone_transform(drone_id, np.asarray(transform, dtype=float))
+
+    def close_vla(self) -> None:
+        with self._lock:
+            hub = self._vla_hub
+            client = self._vla_client
+            self._vla_hub = None
+            self._vla_client = None
+        if hub is not None:
+            hub.close()
+        if client is not None:
+            client.close()
+
     def snapshots(self) -> dict[str, Any]:
         self._collect_events()
         drones = [snapshot.as_dict() for snapshot in self.snapshot_objects()]
@@ -183,8 +338,20 @@ class RuntimeManager:
             "dryRun": self.config.dry_run or not self.config.enable_io,
             "enableIo": self.config.enable_io,
             "localVlaConfigured": bool(self.config.local_vla_command),
+            "batchedVlaConfigured": bool(self.config.batched_vla_command),
+            "batchedVla": self._batched_vla_status(),
             "drones": drones,
             "events": list(self._events)[-50:],
+        }
+
+    def _batched_vla_status(self) -> dict[str, Any]:
+        hub = self._vla_hub
+        return {
+            "active": hub is not None,
+            "command": self.config.batched_vla_command,
+            "batches": hub.batches if hub else 0,
+            "lastBatchSize": hub.last_batch_size if hub else 0,
+            "maxWaitSeconds": self.config.batch_max_wait_seconds,
         }
 
     def snapshot_objects(self) -> list[DroneRuntimeSnapshot]:
@@ -215,6 +382,26 @@ class RuntimeManager:
         if runtime is None:
             raise KeyError(f"unknown drone runtime: {drone_id}")
         return runtime
+
+
+def _neutral_batch(payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """In-process fallback when no batched VLA command is configured.
+
+    Emits a neutral, low-confidence action per drone so the batched loop still
+    runs end-to-end (and the safety wrapper still clamps it). Point
+    ``batched_vla_command`` at ``tools/diffusion_vla_policy.py`` for the real
+    reverse-diffusion model.
+    """
+
+    return [
+        {
+            "droneId": payload.get("droneId"),
+            "action": {"roll": 128, "pitch": 128, "throttle": 128, "yaw": 128},
+            "confidence": 0.02,
+            "reason": "batched_vla_neutral_fallback",
+        }
+        for payload in payloads
+    ]
 
 
 def _optional_number(value: object) -> int | float | None:
