@@ -91,7 +91,37 @@ Cross-drone co-registration, live ingestion, and UI (added):
   `ui/dist` when built (falls back to `app/`); the `.ply` snapshot uses a
   `fetchBinary` IPC bridge. Build: `cd ui && npm install && npm run build`.
 
+Simulator + multi-level swarm control stack (added):
+
+- lightweight batched torch quadrotor simulator in `drone_control/sim/`
+  (no Isaac/MuJoCo dependency): `dynamics.py` (vectorised 6-DOF over envs*drones,
+  RC-style control via an inertia-normalised inner attitude/rate PD loop, accepts
+  the DroneAction byte space), `tasks.py` (hover/goto/formation), `env.py`
+  (gym-like batched `SwarmEnv`), `expert.py` (PD teacher), `render.py` (headless
+  pinhole forward-camera -> JPEG with horizon/grid/goal/peer cues),
+  `rollout.py` (closed-loop deploy-path rollout). Tested in
+  `tools/test_sim_{dynamics,env,render}.py`.
+- data + training: `tools/collect_sim_data.py` runs the env under the expert and
+  logs transitions (observation/frame/recentActions/goalRel/style/action-bytes)
+  in the diffusion-VLA JSONL format; `tools/diffusion_vla_model.py` is now
+  goal-conditioned (proprio carries goalRel + a style vector). Verified
+  end-to-end: a sim-trained policy cuts mean goal distance 7.1m -> 0.85m (88%)
+  from camera+goal input vs 0% untrained (`tools/test_sim_policy.py`, gated on CUDA).
+- three-level stack: (L1) per-drone policy + safety wrapper; (L2) the batched VLA
+  obs->action loop; (L3) low-frequency VLM that steers via the guidance bus
+  (`coordinator/guidance.py`). The VLM emits `set_target` / `set_trajectory` /
+  `set_style` / `select_policy` tool calls (GUIDANCE_TOOLS) that the hi-frequency
+  `BatchedVLAController` folds into each tick as goalRel + style + policyId
+  conditioning. Targets/trajectories/styles keep the swarm in one batched pass;
+  `select_policy` groups the batch per policy (the documented cost). Wired through
+  the mission loop and `POST /api/guidance/{status,tools,drones/<id>}`;
+  `DRONE_POLICY_COMMANDS` configures per-policy models. Tested in
+  `tools/test_guidance.py`.
+
 Still external hardware/model bring-up:
+
+- the sim is a transfer/bootstrap aid, not a validated sim-to-real bridge; expect a
+  reality gap. Use sim data to pretrain, then fine-tune on logged real transitions.
 
 - live tracking/loop-closure/drift correction for the world model are not solved;
   reconstruction quality depends on upstream VO and frame overlap. COLMAP

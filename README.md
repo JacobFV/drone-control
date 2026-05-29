@@ -143,6 +143,10 @@ Example ESP serial entry:
 - `electron/`: Electron main process and preload bridge.
 - `drone_control/`: Python service, protocols, transports, camera, pose,
   reconstruction, batched VLA, live splat, and cross-drone co-registration code.
+- `drone_control/sim/`: lightweight batched torch quadrotor swarm simulator
+  (dynamics, gym-like env, tasks, expert teacher, synthetic camera, rollout).
+- `drone_control/coordinator/guidance.py`: the guidance bus carrying low-frequency
+  VLM targets/trajectories/styles/policies into the high-frequency batched control.
 - `firmware/esp32_drone_link/`: PlatformIO ESP32-S3 bridge firmware.
 - `tools/`: capture, scan, probe, conversion, and verification utilities.
 - `config/`: tracked example configs. Local configs are ignored.
@@ -182,6 +186,21 @@ python3 -m unittest tools.test_transport tools.test_service_manual_ack
 python3 tools/test_smooth_camera_frames.py
 npm run check
 python3 -m drone_control.swarm --config config/drones.example.json --dry-run --seconds 0.2
+
+# Full test suite (sim, batched VLA, live splat, guidance; CUDA tests auto-skip)
+python3 -m unittest discover -s tools -p 'test_*.py'
+```
+
+Simulate, collect data, and train a goal-conditioned policy:
+
+```bash
+# Collect teacher demonstrations from the batched swarm sim (with synthetic camera)
+python3 tools/collect_sim_data.py --out data/sim/goto.jsonl --num-envs 48 --steps 600 --task goto
+# Train the reverse-diffusion image->action policy on them
+python3 tools/train_diffusion_vla.py data/sim/goto.jsonl --out runs/vla_goto.pt --epochs 40
+# Deploy: point the batched VLA at the trained policy, then steer via guidance
+export DRONE_BATCHED_VLA_COMMAND="$(pwd)/.venv/bin/python tools/diffusion_vla_policy.py --checkpoint runs/vla_goto.pt"
+# Low-frequency guidance (operator or VLM): POST /api/guidance/drones/<id> {"target":[x,y,z]}
 ```
 
 Build firmware:
