@@ -4,7 +4,7 @@ from typing import Any
 
 import numpy as np
 
-from drone_control.perception.segmentation import _pose_rotation
+from drone_control.perception.segmentation import _pose_rotation, rotmat_to_quat_xyzw
 from drone_control.sim.session import SimSession, SimSessionConfig
 
 
@@ -54,71 +54,32 @@ class SimEnvironment:
         return self.session.trajectories().get("drones", [])
 
     def world_model_status(self) -> dict[str, Any]:
-        # The session builds the sim splat from these frames; status is reported
-        # by the SessionService (which owns the engine), not the environment.
+        # The session owns the splat engine and feeds it the SAME (frame, pose)
+        # any real environment would — never sim ground truth.
         return {"available": False, "running": False, "reason": "splat owned by session"}
 
-    # -- ground-truth helpers (the sim knows everything exactly) -----------
+    def camera_pose(self, drone_id: str) -> dict[str, Any] | None:
+        """Calibrated camera-to-world pose (standard convention) for perception.
 
-    def image_size(self) -> tuple[int, int]:
-        size = self.session.config.image_size
-        return size, int(size * 0.75)
-
-    @property
-    def fov_deg(self) -> float:
-        return 75.0
-
-    def positions(self) -> dict[str, list[float]]:
-        out: dict[str, list[float]] = {}
-        for drone in self.session.status().get("drones", []):
-            out[drone["droneId"]] = [float(v) for v in drone["position"]]
-        return out
-
-    def scene_objects(self) -> list[tuple[str, list[float]]]:
-        """Ground-truth scene landmarks: (label, world-centre) per scene box,
-        including moving objects at the current simulated time."""
-        from drone_control.sim.scenes import build_scene, dynamic_objects
-
-        scene = build_scene(self.session.config.scene)
-        objs = [(box.label, list(box.center)) for box in scene.boxes]
-        objs += [(b.label, list(b.center)) for b in dynamic_objects(scene, self.session.sim_time())]
-        return objs
-
-    def raycast_cloud(self, drone_id: str):
-        """Ground-truth depth for one drone: ray-cast the scene (ground + boxes,
-        static + moving). Returns (world[K,3], rgb[K,3], depth_jpeg) or None."""
-        import io
-
-        from PIL import Image
-
-        from drone_control.sim.depth_truth import colorize_depth, raycast
-        from drone_control.sim.scenes import build_scene, dynamic_objects
-
-        pose = self.latest_pose(drone_id)
-        cam_rot = self.camera_rot(drone_id)
-        if pose is None or cam_rot is None:
-            return None
-        center = np.array([pose["x"], pose["y"], pose["z"]], dtype=float)
-        scene = build_scene(self.session.config.scene)
-        dyn = dynamic_objects(scene, self.session.sim_time())
-        w, h = self.image_size()
-        world, colors, grid = raycast(scene, dyn, center, cam_rot, self.fov_deg, w, h, stride=3, far=40.0)
-        colored = colorize_depth(grid, near=0.3, far=30.0)
-        buf = io.BytesIO()
-        Image.fromarray(colored, mode="RGB").resize((w, h), Image.NEAREST).save(buf, "JPEG", quality=82)
-        return world, colors, buf.getvalue()
-
-    def camera_rot(self, drone_id: str) -> np.ndarray | None:
-        """World directions of the camera axes (cols = right, down, forward).
-
-        Sim camera: forward = body +x, right = body +y, up = body +z, so image
-        +y (down) = body -z.
+        This is pure camera *calibration* — the only sim-specific knowledge
+        perception is allowed: the sim's forward camera is mounted at body +x
+        (right = body +y, up = body +z, so image +y/down = body -z). We convert
+        that mounting into the standard rotation so depth/cloud/splat treat sim
+        frames identically to a real camera's. NOTHING here exposes scene
+        geometry — see the rule in session_service._perceive.
         """
-        pose = self.latest_pose(drone_id)
+        idx = _index(drone_id)
+        pose = self.session.latest_pose(idx) if idx is not None else None
         if pose is None:
             return None
         r = _pose_rotation(pose)  # body -> world (columns = body x, y, z in world)
-        return np.column_stack([r[:, 1], -r[:, 2], r[:, 0]])
+        cam_rot = np.column_stack([r[:, 1], -r[:, 2], r[:, 0]])  # cols: right, down, forward
+        return {
+            "x": float(pose["x"]),
+            "y": float(pose["y"]),
+            "z": float(pose["z"]),
+            "rotation_xyzw": rotmat_to_quat_xyzw(cam_rot),
+        }
 
     def set_speed(self, mode: str) -> None:
         self.session.set_max_speed(mode == "max")

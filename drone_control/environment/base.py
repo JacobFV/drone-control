@@ -27,6 +27,20 @@ class Environment(Protocol):
         ...
 
     def latest_pose(self, drone_id: str) -> dict[str, Any] | None:
+        """Body pose for trajectory display: {x,y,z,qw,qx,qy,qz}."""
+        ...
+
+    def camera_pose(self, drone_id: str) -> dict[str, Any] | None:
+        """Calibrated camera-to-world pose for perception, in the STANDARD
+        convention (camera +x right, +y down, +z forward), as
+        ``{x, y, z, rotation_xyzw}``.
+
+        This is the ONLY environment-specific thing perception consumes — it is
+        camera *calibration*, exactly what a real drone's mounting also provides.
+        Perception (depth / point cloud / splat / segmentation) must treat sim
+        and real identically given a frame + this pose. NEVER hand perception the
+        environment's ground-truth geometry — see the rule in session_service.
+        """
         ...
 
     def trajectories(self) -> list[dict[str, Any]]:

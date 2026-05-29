@@ -177,19 +177,10 @@ class DepthEstimator:
     def available(self) -> bool:
         return available()
 
-    def add_points(self, world: np.ndarray, colors: np.ndarray) -> None:
-        """Add externally-computed points (e.g. sim ground-truth raycast)."""
-        with self._lock:
-            self._cloud.add(np.asarray(world, dtype=np.float64), np.asarray(colors))
-
-    def set_depth_jpeg(self, drone_id: str, jpeg: bytes) -> None:
-        with self._lock:
-            self._depth_jpeg[drone_id] = jpeg
-
     def status(self) -> dict[str, Any]:
         with self._lock:
             return {
-                "available": available() or bool(self._depth_jpeg),
+                "available": available(),
                 "reason": unavailable_reason(),
                 "model": self.model_name,
                 "points": self._cloud.total,
@@ -198,20 +189,20 @@ class DepthEstimator:
 
     # -- per-frame ---------------------------------------------------------
 
-    def process(
-        self,
-        drone_id: str,
-        jpeg: bytes,
-        pose: dict[str, Any] | None,
-        cam_rot: np.ndarray | None = None,
-    ) -> None:
+    def process(self, drone_id: str, jpeg: bytes, pose: dict[str, Any] | None) -> None:
+        """Estimate depth for one camera frame and accumulate the cloud.
+
+        ENVIRONMENT-AGNOSTIC: input is a JPEG frame + the calibrated camera pose,
+        nothing else. The same monocular model runs for sim and real — there is
+        no privileged ground-truth path (do not add one).
+        """
         depth_norm, frame_rgb = self._infer(jpeg)
         if depth_norm is None:
             return
         metric = self.far - depth_norm * (self.far - self.near)  # near where depth_norm high
-        # Temporal EMA per drone: noisy (OV2640-style) frames make monocular depth
-        # jitter frame-to-frame, which scatters the back-projected cloud. Blending
-        # with the previous frame's depth stabilises the geometry.
+        # Temporal EMA per drone: noisy frames make monocular depth jitter
+        # frame-to-frame, which scatters the back-projected cloud. Blending with
+        # the previous frame's depth stabilises the geometry.
         with self._lock:
             prev = self._depth_map.get(drone_id)
             if prev is not None and prev.shape == metric.shape:
@@ -220,7 +211,7 @@ class DepthEstimator:
             self._depth_jpeg[drone_id] = _encode_jpeg(_colorize(colorized_src))
             self._depth_map[drone_id] = metric
         if pose is not None:
-            xyz, rgb = self._backproject(metric, frame_rgb, pose, cam_rot)
+            xyz, rgb = self._backproject(metric, frame_rgb, pose)
             if xyz.shape[0]:
                 with self._lock:
                     self._cloud.add(xyz, rgb)
@@ -258,14 +249,13 @@ class DepthEstimator:
         metric: np.ndarray,
         frame_rgb: np.ndarray,
         pose: dict[str, Any],
-        cam_rot: np.ndarray | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         from drone_control.perception.segmentation import _pose_center, _pose_rotation
 
         center = _pose_center(pose)
-        # cam_rot columns are world directions of camera (right, down, forward).
-        # Without it, fall back to the body rotation (z-forward assumption).
-        rotation = cam_rot if cam_rot is not None else _pose_rotation(pose)
+        # The calibrated camera pose's rotation maps camera (right, down, forward)
+        # rays into the world — same for sim and real.
+        rotation = _pose_rotation(pose)
         if center is None or rotation is None:
             return np.zeros((0, 3)), np.zeros((0, 3))
         h, w = metric.shape

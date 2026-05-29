@@ -135,7 +135,6 @@ class Segmenter:
         self._lock = threading.RLock()
         self._screen: dict[str, list[ScreenDetection]] = {}
         self._objects: list[WorldObject] = []          # proximity-fused (model)
-        self._truth: dict[str, WorldObject] = {}       # stable-keyed (sim ground truth)
         self._next_object_id = 1
 
     # -- availability ------------------------------------------------------
@@ -226,13 +225,12 @@ class Segmenter:
         detections: list[ScreenDetection],
         pose: dict[str, Any] | None,
         depth_map: "np.ndarray | None" = None,
-        cam_rot: "np.ndarray | None" = None,
     ) -> None:
-        """Back-project detection centroids through the drone pose and fuse.
-
-        When a metric ``depth_map`` (estimated, [H,W] in metres) is supplied the
-        centroid depth is sampled from it; otherwise the fixed ``default_depth``
-        assumption is used.
+        """Back-project detection centroids through the calibrated camera pose and
+        fuse. ``pose`` is the standard camera-to-world pose (``rotation_xyzw``);
+        when a metric ``depth_map`` is supplied the centroid depth is sampled from
+        it, else the fixed ``default_depth`` is used. Environment-agnostic — this
+        runs identically for sim and real; it never sees scene ground truth.
         """
 
         if pose is None or not detections:
@@ -245,45 +243,8 @@ class Segmenter:
         with self._lock:
             for det in detections:
                 depth = self._sample_depth(det, depth_map)
-                world_pt = self._backproject_centroid(det, center, rotation, depth=depth, cam_rot=cam_rot)
+                world_pt = self._backproject_centroid(det, center, rotation, depth=depth)
                 self._fuse(drone_id, det.cls, world_pt, det.score, now)
-
-    def ingest_truth(
-        self,
-        drone_id: str,
-        detections: list[ScreenDetection],
-        world_points: list[Any],
-        keys: list[str],
-    ) -> None:
-        """Inject ground-truth detections + known world positions (simulator).
-
-        Each object carries a stable ``key`` (e.g. ``scene:3`` / ``drone:sim-1``)
-        so its id and identity persist across frames — no proximity fusion, no
-        id churn. Screen detections and world positions are exact.
-        """
-        now = time.time()
-        with self._lock:
-            self._screen[drone_id] = list(detections)
-            for det, world, key in zip(detections, world_points, keys):
-                obj = self._truth.get(key)
-                if obj is None:
-                    self._truth[key] = WorldObject(
-                        object_id=self._next_object_id,
-                        cls=det.cls,
-                        centroid=np.asarray(world, dtype=float),
-                        drones={drone_id},
-                        score=det.score,
-                        last_seen=now,
-                    )
-                    self._next_object_id += 1
-                else:
-                    obj.centroid = np.asarray(world, dtype=float)  # exact, no drift
-                    obj.count += 1
-                    obj.drones.add(drone_id)
-                    obj.last_seen = now
-            if len(self._objects) > self.max_objects:
-                self._objects.sort(key=lambda o: o.last_seen, reverse=True)
-                self._objects = self._objects[: self.max_objects]
 
     def _sample_depth(self, det: ScreenDetection, depth_map: "np.ndarray | None") -> float:
         if depth_map is None:
@@ -301,7 +262,6 @@ class Segmenter:
         rotation: np.ndarray,
         *,
         depth: float | None = None,
-        cam_rot: np.ndarray | None = None,
     ) -> np.ndarray:
         width, height = det.width, det.height
         focal = (width / 2.0) / np.tan(np.deg2rad(self.fov_deg) / 2.0)
@@ -312,8 +272,9 @@ class Segmenter:
             [(px - cx) / focal, (py - cy) / focal, 1.0], dtype=float
         )
         ray_cam = ray_cam / (np.linalg.norm(ray_cam) + 1e-9)
-        # cam_rot (cols = world right/down/forward) is exact; else body rotation.
-        ray_world = (cam_rot if cam_rot is not None else rotation) @ ray_cam
+        # ``rotation`` is the camera-to-world rotation (cols = world right/down/
+        # forward) from the calibrated camera pose — identical for sim and real.
+        ray_world = rotation @ ray_cam
         return center + ray_world * (depth if depth is not None else self.default_depth)
 
     def _fuse(self, drone_id: str, cls: str, world_pt: np.ndarray, score: float, now: float) -> None:
@@ -341,13 +302,12 @@ class Segmenter:
 
     def world_objects(self) -> list[dict[str, Any]]:
         with self._lock:
-            return [obj.as_dict() for obj in self._objects] + [obj.as_dict() for obj in self._truth.values()]
+            return [obj.as_dict() for obj in self._objects]
 
     def reset(self) -> None:
         with self._lock:
             self._screen.clear()
             self._objects.clear()
-            self._truth.clear()
             self._next_object_id = 1
 
 

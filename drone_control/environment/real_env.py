@@ -14,20 +14,15 @@ class RealEnvironment:
 
     kind = "real"
 
-    def __init__(self, runtime: RuntimeManager, *, world_model: bool = True) -> None:
+    def __init__(self, runtime: RuntimeManager) -> None:
         self.runtime = runtime
-        self._world_model = world_model
 
     # -- lifecycle ---------------------------------------------------------
 
     def start(self) -> None:
+        # The splat is owned + fed by the SessionService perception loop (same as
+        # sim), so we do NOT also spin up the runtime's own world model here.
         self.runtime.start_all()
-        if self._world_model:
-            try:
-                self.runtime.start_world_model()
-            except Exception:
-                # World model is best-effort (needs torch/gsplat/CUDA).
-                pass
 
     def stop(self) -> None:
         self.runtime.stop_all()
@@ -47,11 +42,17 @@ class RealEnvironment:
                 return dict(traj["poses"][-1])
         return None
 
+    def camera_pose(self, drone_id: str) -> dict[str, Any] | None:
+        # The visual-odometry pose estimate is already a camera-frame pose; pass
+        # it straight through (translation + whatever rotation it carries). The
+        # perception stack treats this exactly like the sim's calibrated pose.
+        return self.latest_pose(drone_id)
+
     def trajectories(self) -> list[dict[str, Any]]:
         return self.runtime.trajectories()
 
     def world_model_status(self) -> dict[str, Any]:
-        return self.runtime.world_model_status()
+        return {"available": False, "running": False, "reason": "splat owned by session"}
 
     def set_speed(self, mode: str) -> None:
         # Real hardware runs at wall-clock speed; nothing to do.

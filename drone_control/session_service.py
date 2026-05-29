@@ -31,7 +31,7 @@ from drone_control.environment.real_env import RealEnvironment
 from drone_control.environment.sim_env import SimEnvironment
 from drone_control.perception import live_splat
 from drone_control.perception.depth import DepthEstimator, write_ply
-from drone_control.perception.segmentation import ScreenDetection, Segmenter, rotmat_to_quat_xyzw
+from drone_control.perception.segmentation import Segmenter
 from drone_control.runtime.manager import RuntimeManager
 from drone_control.sim.session import SimSessionConfig
 from drone_control.store import ControlStationStore
@@ -127,10 +127,10 @@ class SessionService:
             cloud_dir.mkdir(parents=True, exist_ok=True)
             self.depth.reset(stream_path=cloud_dir / f"{session['id']}.bin")
             self._seeded = False
-            # The sim owns its own splat engine (it has exact poses); the real
-            # runtime builds its splat through its own ingestion path.
+            # ONE splat engine, fed identically for sim and real from (frame,
+            # camera_pose). It must never know which kind of environment it is in.
             self._splat = None
-            if isinstance(env, SimEnvironment) and live_splat.available():
+            if live_splat.available():
                 try:
                     self._splat = live_splat.LiveSplatEngine()
                     self._splat.start()
@@ -299,106 +299,51 @@ class SessionService:
             if env is not None:
                 run_depth = self.depth.available() and tick % self._depth_every == 0
                 try:
-                    if isinstance(env, SimEnvironment):
-                        self._perceive_sim(env, run_depth)
-                    else:
-                        self._perceive_real(env, run_depth)
+                    self._perceive(env, run_depth)
                 except Exception:
                     pass
             tick += 1
             elapsed = time.monotonic() - started
             self._stop_event.wait(max(0.0, interval - elapsed))
 
-    def _perceive_real(self, env: RealEnvironment, run_depth: bool) -> None:
-        # Real cameras: segment with the model, depth with the z-forward
-        # convention, and seed the runtime's splat once from the cloud.
+    def _perceive(self, env: Any, run_depth: bool) -> None:
+        # ── THE RULE ───────────────────────────────────────────────────────
+        # Perception is environment-AGNOSTIC. For every drone it sees exactly a
+        # camera frame + a calibrated camera pose, and runs the SAME monocular
+        # depth + segmentation models and the SAME splat ingestion, whether the
+        # environment is the simulator or real hardware. Do NOT branch on
+        # isinstance(env, SimEnvironment), and NEVER feed it the environment's
+        # ground-truth geometry/positions — that privilege made the splat "know"
+        # it was a sim and is exactly the shit-code we removed. Keep it out.
+        # ───────────────────────────────────────────────────────────────────
         for drone_id in env.drone_ids():
-            jpeg = env.latest_frame(drone_id)
-            if not jpeg:
+            frame = env.latest_frame(drone_id)
+            if not frame:
                 continue
-            pose = env.latest_pose(drone_id)
+            pose = env.camera_pose(drone_id)        # calibration only — never scene truth
             if run_depth:
-                self.depth.process(drone_id, jpeg, pose)
-            dets = self.segmenter.segment_frame(drone_id, jpeg)
+                self.depth.process(drone_id, frame, pose)
+            dets = self.segmenter.segment_frame(drone_id, frame)
             self.segmenter.project_to_world(
                 drone_id, dets, pose, depth_map=self.depth.latest_depth_map(drone_id)
             )
-        if run_depth and not self._seeded and env.world_model_status().get("running"):
+            if self._splat is not None and pose is not None:
+                self._splat.ingest(drone_id, frame, pose)   # photometric keyframe
+
+        # Seed the splat once from the estimated depth cloud (a metric init), then
+        # let the photometric optimizer + densification converge against the
+        # ingested keyframes — same for sim and real.
+        if run_depth and self._splat is not None and not self._seeded:
             xyz, rgb = self.depth.cloud_arrays()
-            if xyz.shape[0]:
-                self.runtime.seed_world_points(xyz, rgb)
-                self._seeded = True
-
-    def _perceive_sim(self, env: SimEnvironment, run_depth: bool) -> None:
-        # The sim has exact poses + object positions: use the correct camera
-        # basis for depth/cloud, derive world objects from ground truth, and
-        # build a splat by ingesting frames with exact extrinsics.
-        positions = env.positions()
-        scene_objects = env.scene_objects()
-        w, h = env.image_size()
-        focal = (w / 2.0) / np.tan(np.deg2rad(env.fov_deg) / 2.0)
-        cx, cy = w / 2.0, h / 2.0
-        for drone_id in env.drone_ids():
-            jpeg = env.latest_frame(drone_id)
-            pose = env.latest_pose(drone_id)
-            if not jpeg or pose is None:
-                continue
-            cam_rot = env.camera_rot(drone_id)
-            if cam_rot is None:
-                continue
-            center = np.array([pose["x"], pose["y"], pose["z"]], dtype=float)
-            if run_depth:
-                # True depth from the scene (the monocular model hallucinates on
-                # abstract sim frames). Yields a correct cloud + splat seed.
-                rc = env.raycast_cloud(drone_id)
-                if rc is not None:
-                    world, colors, depth_jpeg = rc
-                    if world.shape[0]:
-                        self.depth.add_points(world, colors)
-                    self.depth.set_depth_jpeg(drone_id, depth_jpeg)
-
-            # Ground-truth detections: other drones + scene landmarks, projected
-            # into this view (the sim knows exactly where everything is). Each
-            # carries a stable key so its world-object id persists across frames.
-            candidates = [(f"drone:{other}", "drone", p) for other, p in positions.items() if other != drone_id]
-            candidates += [(f"scene:{i}", label, p) for i, (label, p) in enumerate(scene_objects)]
-            dets: list[ScreenDetection] = []
-            worlds: list[list[float]] = []
-            keys: list[str] = []
-            for key, label, p in candidates:
-                rel = np.array(p, dtype=float) - center
-                zc = float(rel @ cam_rot[:, 2])
-                if zc <= 0.3:
-                    continue
-                u = cx + focal * float(rel @ cam_rot[:, 0]) / zc
-                v = cy + focal * float(rel @ cam_rot[:, 1]) / zc
-                if not (0 <= u < w and 0 <= v < h):
-                    continue
-                size = max(6.0, 240.0 / zc)
-                dets.append(
-                    ScreenDetection(label, 0.99, [u - size / 2, v - size / 2, size, size], [u, v], [], w, h)
-                )
-                worlds.append(list(p))
-                keys.append(key)
-            self.segmenter.ingest_truth(drone_id, dets, worlds, keys)
-
-        # The sim world is KNOWN, so the splat is the true coloured cloud rendered
-        # as gaussians — not a photometric reconstruction of the abstract frames
-        # (which corrupts the geometry into blobs). We do NOT ingest camera
-        # keyframes (so the optimizer stays idle) and instead re-seed from the
-        # growing true cloud, capped + solid, every few seconds as coverage grows.
-        if run_depth and self._splat is not None:
-            self._sim_reseed = getattr(self, "_sim_reseed", 0) + 1
-            if self._sim_reseed % 4 == 1:   # ~ every 4 depth ticks
-                xyz, rgb = self.depth.cloud_arrays()
-                if xyz.shape[0] >= 4000:
-                    if xyz.shape[0] > 200_000:
-                        idx = np.linspace(0, xyz.shape[0] - 1, 200_000).astype(int)
-                        xyz, rgb = xyz[idx], rgb[idx]
-                    try:
-                        self._splat.seed_from_points(xyz, rgb, scale=0.10, opacity=0.9)
-                    except Exception:
-                        pass
+            if xyz.shape[0] >= 4000:
+                if xyz.shape[0] > 80_000:
+                    idx = np.linspace(0, xyz.shape[0] - 1, 80_000).astype(int)
+                    xyz, rgb = xyz[idx], rgb[idx]
+                try:
+                    self._splat.seed_from_points(xyz, rgb, scale=0.12)
+                    self._seeded = True
+                except Exception:
+                    pass
 
     def _recorder_loop(self) -> None:
         if not self._recording or self._session_dir is None:
