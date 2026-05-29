@@ -201,6 +201,7 @@ class ReconstructionManager:
             self._prepare_dataset(job, frame_record, pose_record, max_images=job.max_images, fps=job.fps)
             job.dataset_record_id = self.store.import_record(
                 job.flight_id,
+                "splat",
                 "reconstruction-dataset",
                 f"Scene dataset {job.id}",
                 "application/vnd.nerfstudio.dataset",
@@ -265,6 +266,7 @@ class ReconstructionManager:
                 raise RuntimeError("gaussian splat export produced no .ply, .splat, or .spz artifact")
             job.splat_record_id = self.store.import_record(
                 job.flight_id,
+                "splat",
                 "gaussian-splat",
                 f"Gaussian splat {job.id}",
                 "model/vnd.gaussian-splat",

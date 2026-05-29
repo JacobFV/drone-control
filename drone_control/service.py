@@ -24,7 +24,6 @@ from drone_control.discovery import current_wifi_connection as platform_current_
 from drone_control.discovery import default_wifi_interface, platform_network_summary
 from drone_control.discovery import reconnect_wifi as platform_reconnect_wifi
 from drone_control.discovery import scan_access_points, wifi_interfaces
-from drone_control.flight_session import FlightSession, FlightSessionManager
 from drone_control.intrinsics import load_intrinsics
 from drone_control.live_video import DirectoryFrameSource, LiveDroneFrameSource, LiveDroneFrameSourceConfig, mjpeg_chunks
 from drone_control.manual_control import ManualControlConfig, ManualControlSession
@@ -37,8 +36,10 @@ from drone_control.coordinator.scheduler import CoordinatorScheduler
 from drone_control.coordinator.tasks import Mission, MissionProgress
 from drone_control.coordinator.vlm import VLMCoordinator
 from drone_control.runtime.manager import RuntimeManager, RuntimeManagerConfig
+from drone_control.session_service import SessionService
 from drone_control.sim.session import SimSession, SimSessionConfig
 from drone_control.store import ControlStationStore
+from drone_control.ws import WebSocketHub
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -69,6 +70,13 @@ class ControlStationHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/guidance/status":
             self.send_json({"guidance": self.server.runtime.guidance_status()})
+            return
+        if parsed.path == "/api/session/status":
+            self.send_json(self.server.session_service.status())
+            return
+        match = re.fullmatch(r"/api/session/drones/([^/]+)/frame", parsed.path)
+        if match:
+            self.send_jpeg(self.server.session_service.frame(match.group(1)))
             return
         if parsed.path == "/api/sim/status":
             self.send_json(self.server.sim.status())
@@ -129,27 +137,23 @@ class ControlStationHandler(BaseHTTPRequestHandler):
             self.send_json(self.server.mission_progress())
             return
 
-        match = re.fullmatch(r"/api/flights/([^/]+)/session", parsed.path)
-        if match:
-            status = self.server.sessions.status(match.group(1))
-            self.send_json(status.as_dict() if status else {"running": False, "flightId": match.group(1)})
-            return
-
-        match = re.fullmatch(r"/api/flights/([^/]+)/pose/status", parsed.path)
-        if match:
-            self.send_json(self.server.pose_status(match.group(1)))
-            return
-
-        match = re.fullmatch(r"/api/flights/([^/]+)/pose/track", parsed.path)
+        match = re.fullmatch(r"/api/sessions/([^/]+)/pose/track", parsed.path)
         if match:
             query = parse_qs(parsed.query)
             since = int(query.get("since", ["-1"])[0])
             self.send_json(self.server.pose_track(match.group(1), since=since))
             return
 
-        match = re.fullmatch(r"/api/flights/([^/]+)/reconstruction/status", parsed.path)
+        match = re.fullmatch(r"/api/sessions/([^/]+)/reconstruction/status", parsed.path)
         if match:
             self.send_json(self.server.reconstruction_status(match.group(1)))
+            return
+
+        match = re.fullmatch(r"/api/records/([^/]+)/pose-track", parsed.path)
+        if match:
+            query = parse_qs(parsed.query)
+            since = int(query.get("since", ["-1"])[0])
+            self.send_json(self.server.pose_track_record(match.group(1), since=since))
             return
 
         match = re.fullmatch(r"/api/records/([^/]+)/mjpeg", parsed.path)
@@ -180,25 +184,47 @@ class ControlStationHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
-        if parsed.path == "/api/flights":
+        if parsed.path == "/api/environments":
             payload = self.read_json()
-            drone_id = str(payload.get("droneId") or "")
-            name = str(payload.get("name") or f"Draft flight {time.strftime('%H:%M:%S')}")
-            if not drone_id:
-                self.send_json({"error": "droneId is required"}, status=HTTPStatus.BAD_REQUEST)
+            kind = str(payload.get("kind") or "sim")
+            if kind not in {"sim", "real"}:
+                self.send_json({"error": "kind must be 'sim' or 'real'"}, status=HTTPStatus.BAD_REQUEST)
                 return
             self.send_json(
-                self.server.store.create_flight(
-                    drone_id,
-                    name,
-                    mode=str(payload.get("mode") or "manual"),
-                    policy=dict(payload.get("policy") or {}),
-                    metadata=dict(payload.get("metadata") or {}),
+                self.server.store.create_environment(
+                    str(payload.get("name") or f"{kind} environment"),
+                    kind,
+                    dict(payload.get("config") or {}),
                 )
             )
             return
 
-        match = re.fullmatch(r"/api/flights/([^/]+)/records", parsed.path)
+        if parsed.path == "/api/session/start":
+            payload = self.read_json()
+            kind = str(payload.get("kind") or "sim")
+            name = str(payload.get("name") or "")
+            options = dict(payload.get("options") or {})
+            if "environmentId" in payload:
+                options.setdefault("environmentId", payload["environmentId"])
+            try:
+                self.send_json(self.server.session_service.start(kind, name, options))
+            except (RuntimeError, ValueError) as exc:
+                self.send_json({"error": str(exc), **self.server.session_service.status()}, status=HTTPStatus.CONFLICT)
+            return
+
+        if parsed.path == "/api/session/stop":
+            self.send_json(self.server.session_service.stop())
+            return
+
+        if parsed.path == "/api/session/speed":
+            payload = self.read_json()
+            try:
+                self.send_json(self.server.session_service.set_speed(str(payload.get("mode") or "realtime")))
+            except RuntimeError as exc:
+                self.send_json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
+            return
+
+        match = re.fullmatch(r"/api/sessions/([^/]+)/records", parsed.path)
         if match:
             payload = self.read_json()
             source = resolve_repo_path(str(payload.get("source") or ""))
@@ -207,10 +233,12 @@ class ControlStationHandler(BaseHTTPRequestHandler):
                 return
             record_id = self.server.store.import_record(
                 match.group(1),
+                str(payload.get("lane") or "artifact"),
                 str(payload.get("type") or "artifact"),
                 str(payload.get("label") or source.name),
                 str(payload.get("mime") or "application/octet-stream"),
                 source,
+                drone_id=optional_str(payload, "droneId"),
             )
             self.send_json({"id": record_id})
             return
@@ -432,27 +460,17 @@ class ControlStationHandler(BaseHTTPRequestHandler):
             self.send_json(self.server.mission_progress())
             return
 
-        match = re.fullmatch(r"/api/flights/([^/]+)/session/start", parsed.path)
-        if match:
-            self.start_flight_session(match.group(1))
-            return
-
-        match = re.fullmatch(r"/api/flights/([^/]+)/session/stop", parsed.path)
-        if match:
-            self.stop_flight_session(match.group(1))
-            return
-
-        match = re.fullmatch(r"/api/flights/([^/]+)/pose/compute", parsed.path)
+        match = re.fullmatch(r"/api/sessions/([^/]+)/pose/compute", parsed.path)
         if match:
             self.compute_pose_track(match.group(1))
             return
 
-        match = re.fullmatch(r"/api/flights/([^/]+)/reconstruction/start", parsed.path)
+        match = re.fullmatch(r"/api/sessions/([^/]+)/reconstruction/start", parsed.path)
         if match:
             self.start_reconstruction(match.group(1))
             return
 
-        match = re.fullmatch(r"/api/flights/([^/]+)/reconstruction/stop", parsed.path)
+        match = re.fullmatch(r"/api/sessions/([^/]+)/reconstruction/stop", parsed.path)
         if match:
             self.stop_reconstruction(match.group(1))
             return
@@ -483,20 +501,18 @@ class ControlStationHandler(BaseHTTPRequestHandler):
 
     def do_PATCH(self) -> None:
         parsed = urlparse(self.path)
-        match = re.fullmatch(r"/api/flights/([^/]+)", parsed.path)
+        match = re.fullmatch(r"/api/sessions/([^/]+)", parsed.path)
         if match:
             payload = self.read_json()
-            result = self.server.store.update_flight(
+            result = self.server.store.update_session(
                 match.group(1),
                 name=optional_str(payload, "name"),
-                mode=optional_str(payload, "mode"),
-                duration=optional_str(payload, "duration"),
-                policy=optional_dict(payload, "policy"),
+                state=optional_str(payload, "state"),
                 metadata=optional_dict(payload, "metadata"),
                 metrics=optional_dict(payload, "metrics"),
             )
             if result is None:
-                self.send_json({"error": "flight not found"}, status=HTTPStatus.NOT_FOUND)
+                self.send_json({"error": "session not found"}, status=HTTPStatus.NOT_FOUND)
                 return
             self.send_json(result)
             return
@@ -668,92 +684,6 @@ class ControlStationHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: object) -> None:
         sys.stderr.write(f"service: {self.address_string()} {fmt % args}\n")
 
-    def start_flight_session(self, flight_id: str) -> None:
-        if not self.server.store.flight_exists(flight_id):
-            self.send_json({"error": "flight not found"}, status=HTTPStatus.NOT_FOUND)
-            return
-
-        payload = self.read_json()
-        source_name = str(payload.get("source") or "live")
-        max_frames = optional_int(payload, "maxFrames")
-        try:
-            frame_source = make_frame_source(source_name, payload)
-            session = FlightSession(
-                flight_id=flight_id,
-                source_name=source_name,
-                frame_source=frame_source,
-                work_root=self.server.session_work_root,
-                max_frames=max_frames,
-                intrinsics=load_intrinsics("forward"),
-                enable_pose_estimation=optional_bool(payload, "estimatePose") is not False,
-            )
-            status = self.server.sessions.start(session)
-        except (OSError, RuntimeError, ValueError) as exc:
-            self.send_json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
-            return
-
-        self.server.store.update_flight(
-            flight_id,
-            mode="manual",
-            metadata={"sessionStatus": "recording", "sessionId": status.session_id, "sessionSource": source_name},
-        )
-        self.send_json(status.as_dict())
-
-    def stop_flight_session(self, flight_id: str) -> None:
-        status = self.server.sessions.stop(flight_id)
-        if status is None:
-            self.send_json({"error": "no active session"}, status=HTTPStatus.NOT_FOUND)
-            return
-
-        record_id = status.record_id
-        session_obj = self.server.sessions.get(flight_id)
-        if status.frames > 0 and record_id is None:
-            record_id = self.server.store.import_record(
-                flight_id,
-                "frames",
-                f"Session frames {status.session_id}",
-                "image/jpeg-sequence",
-                Path(status.frame_dir),
-            )
-            if session_obj is not None:
-                session_obj.set_record_id(record_id)
-
-        pose_record_id = status.pose_record_id
-        if (
-            pose_record_id is None
-            and status.pose_path
-            and Path(status.pose_path).is_file()
-            and Path(status.pose_path).stat().st_size > 0
-        ):
-            pose_record_id = self.server.store.import_record(
-                flight_id,
-                "pose-track",
-                f"Session pose track {status.session_id}",
-                "application/jsonl",
-                Path(status.pose_path),
-            )
-            if session_obj is not None:
-                session_obj.set_pose_record_id(pose_record_id)
-
-        metrics = {
-            "frames": status.frames,
-            "bytes": status.bytes,
-            "duration": format_duration(status.duration_seconds),
-        }
-        self.server.store.update_flight(
-            flight_id,
-            duration=format_duration(status.duration_seconds),
-            metadata={
-                "sessionStatus": "stopped" if not status.error else "error",
-                "sessionId": status.session_id,
-                "sessionSource": status.source,
-                "sessionError": status.error or "",
-            },
-            metrics=metrics,
-        )
-        refreshed = self.server.sessions.status(flight_id)
-        self.send_json((refreshed or status).as_dict() | {"recordId": record_id})
-
     def connect_wifi(self) -> None:
         payload = self.read_json()
         iface = str(payload.get("iface") or "")
@@ -816,7 +746,7 @@ class ControlStationHandler(BaseHTTPRequestHandler):
         self.send_json({"path": str(path), **result})
 
     def compute_pose_track(self, flight_id: str) -> None:
-        if not self.server.store.flight_exists(flight_id):
+        if not self.server.store.session_exists(flight_id):
             self.send_json({"error": "flight not found"}, status=HTTPStatus.NOT_FOUND)
             return
         payload = self.read_json()
@@ -906,7 +836,7 @@ class ControlStationHandler(BaseHTTPRequestHandler):
 
         drone_frames: dict[str, list[str]] = {}
         for flight_id, drone_id in mapping.items():
-            if not self.server.store.flight_exists(flight_id):
+            if not self.server.store.session_exists(flight_id):
                 self.send_json({"error": f"flight not found: {flight_id}"}, status=HTTPStatus.NOT_FOUND)
                 return
             frame_record = self.server._latest_frame_record(flight_id)
@@ -932,7 +862,7 @@ class ControlStationHandler(BaseHTTPRequestHandler):
         self.send_json(result)
 
     def start_reconstruction(self, flight_id: str) -> None:
-        if not self.server.store.flight_exists(flight_id):
+        if not self.server.store.session_exists(flight_id):
             self.send_json({"error": "flight not found"}, status=HTTPStatus.NOT_FOUND)
             return
         payload = self.read_json()
@@ -996,7 +926,6 @@ class ControlStationServer(ThreadingHTTPServer):
         self.export_root = store.db_path.parent / "exports"
         self.reconstruction_root = store.db_path.parent / "reconstructions"
         self.export_root.mkdir(parents=True, exist_ok=True)
-        self.sessions = FlightSessionManager(self.session_work_root)
         self.reconstructions = ReconstructionManager(store=store, work_root=self.reconstruction_root)
         self.runtime = RuntimeManager(
             config=RuntimeManagerConfig(
@@ -1014,9 +943,22 @@ class ControlStationServer(ThreadingHTTPServer):
         )
         self.runtime.configure_drones(load_runtime_configs())
         self.sim = SimSession()
+        self.session_service = SessionService(
+            store,
+            self.runtime,
+            work_root=self.session_work_root,
+            export_root=self.export_root,
+        )
         self.coordinator = CoordinatorScheduler(tick_hz=float(os.environ.get("DRONE_COORDINATOR_HZ", "1")))
         self.vlm = make_vlm_coordinator()
         self.wifi_previous: dict[str, str] = {}
+        self.ws_hub = WebSocketHub(
+            self.server_address[0],
+            status_provider=self.ws_status,
+            command_handler=self.ws_command,
+            hz=float(os.environ.get("DRONE_WS_HZ", "20")),
+        )
+        self.ws_url = self.ws_hub.start() or ""
         self.manual_loop_running = True
         self.manual_thread = threading.Thread(target=self._manual_loop, name="manual-control-loop", daemon=True)
         self.manual_thread.start()
@@ -1079,6 +1021,37 @@ class ControlStationServer(ThreadingHTTPServer):
         status["mission"] = self.mission_progress()
         return status
 
+    def ws_status(self) -> dict[str, object]:
+        """Live snapshot pushed over the WebSocket at the broadcast rate."""
+        return {
+            "session": self.session_service.status(),
+            "runtime": self.runtime.snapshots(),
+            "manual": self.manual_status(),
+        }
+
+    def ws_command(self, message: dict[str, object]) -> dict[str, object]:
+        """Handle a realtime client command. Mutations also exist over HTTP."""
+        action = str(message.get("action") or "")
+        if action == "ping":
+            return {"ok": True, "pong": True}
+        if action == "set_speed":
+            try:
+                self.session_service.set_speed(str(message.get("mode") or "realtime"))
+                return {"ok": True}
+            except RuntimeError as exc:
+                return {"ok": False, "error": str(exc)}
+        if action == "set_target":
+            drone_id = str(message.get("droneId") or "")
+            target = message.get("target")
+            if not drone_id:
+                return {"ok": False, "error": "droneId required"}
+            if target is None:
+                self.runtime.set_target(drone_id, None)
+            else:
+                self.runtime.set_target(drone_id, (float(target[0]), float(target[1]), float(target[2])))
+            return {"ok": True}
+        return {"ok": False, "error": f"unknown action: {action}"}
+
     def mission_progress(self) -> dict[str, object]:
         return self._advance_mission().as_dict()
 
@@ -1129,10 +1102,12 @@ class ControlStationServer(ThreadingHTTPServer):
         status = replay_directory(frame_dir, out_path, fps=fps)
         pose_record_id = self.store.import_record(
             flight_id,
+            "pose",
             "pose-track",
             f"Replay pose track {frames_record['id']}",
             "application/jsonl",
             out_path,
+            drone_id=frames_record.get("droneId"),
         )
         return {
             "id": pose_record_id,
@@ -1140,59 +1115,39 @@ class ControlStationServer(ThreadingHTTPServer):
             "sourceRecordId": frames_record["id"],
         }
 
-    def pose_status(self, flight_id: str) -> dict[str, object]:
-        session = self.sessions.get(flight_id)
-        if session is not None and session.estimator is not None:
-            return {
-                "flightId": flight_id,
-                "live": True,
-                "status": session.estimator.status().as_dict(),
-            }
-        record = self._latest_pose_record(flight_id)
+    def pose_track(self, session_id: str, *, since: int = -1) -> dict[str, object]:
+        record = self._latest_pose_record(session_id)
         if record is None:
-            return {"flightId": flight_id, "live": False, "status": self._missing_pose_status(flight_id)}
-        return {
-            "flightId": flight_id,
-            "live": False,
-            "status": {"state": "stored", "recordId": record["id"]},
-        }
+            return {
+                "sessionId": session_id,
+                "poses": [],
+                "status": self._missing_pose_status(session_id),
+            }
+        return self.pose_track_record(record["id"], since=since) | {"sessionId": session_id}
 
-    def pose_track(self, flight_id: str, *, since: int = -1) -> dict[str, object]:
-        session = self.sessions.get(flight_id)
-        if session is not None and session.estimator is not None:
-            poses = session.estimator_poses(since)
-            return {
-                "flightId": flight_id,
-                "live": True,
-                "poses": poses,
-                "status": session.estimator.status().as_dict(),
-            }
-        record = self._latest_pose_record(flight_id)
-        if record is None:
-            return {"flightId": flight_id, "live": False, "poses": [], "status": self._missing_pose_status(flight_id)}
-        path = self.store.record_path(record["id"])
+    def pose_track_record(self, record_id: str, *, since: int = -1) -> dict[str, object]:
+        path = self.store.record_path(record_id)
         poses = load_pose_track(path) if path else []
         if since >= 0:
             poses = [p for p in poses if int(p.get("frameIndex", -1)) > since]
         return {
-            "flightId": flight_id,
-            "live": False,
+            "recordId": record_id,
             "poses": poses,
             "status": {"state": "stored", "framesProcessed": len(poses)},
         }
 
-    def reconstruction_status(self, flight_id: str) -> dict[str, object]:
-        status = self.reconstructions.status(flight_id)
-        latest_splat = self._latest_splat_record(flight_id)
+    def reconstruction_status(self, session_id: str) -> dict[str, object]:
+        status = self.reconstructions.status(session_id)
+        latest_splat = self._latest_splat_record(session_id)
         return {
-            "flightId": flight_id,
+            "sessionId": session_id,
             "job": status,
             "tools": self.reconstructions.tools_status(),
             "latestSplatRecord": latest_splat,
         }
 
-    def _missing_pose_status(self, flight_id: str) -> dict[str, object]:
-        frame_record = self._latest_frame_record(flight_id)
+    def _missing_pose_status(self, session_id: str) -> dict[str, object]:
+        frame_record = self._latest_frame_record(session_id)
         if frame_record is None:
             return {"state": "no_estimator", "estimatorAvailable": estimator_available()}
         if not estimator_available():
@@ -1210,54 +1165,30 @@ class ControlStationServer(ThreadingHTTPServer):
             "sourceRecordId": frame_record["id"],
         }
 
-    def _latest_frame_record(self, flight_id: str, *, record_id: str | None = None) -> dict[str, object] | None:
-        state = self.store.state()
-        for drone in state.get("drones", []):
-            for flight in drone.get("flights", []):
-                if flight.get("id") != flight_id:
-                    continue
-                frame_records = [r for r in flight.get("records", []) if r.get("type") == "frames"]
-                if record_id:
-                    return next((r for r in frame_records if r.get("id") == record_id), None)
-                if frame_records:
-                    return frame_records[-1]
-        return None
+    def _latest_frame_record(self, session_id: str, *, record_id: str | None = None) -> dict[str, object] | None:
+        return self.store.latest_record(session_id, source="camera", record_id=record_id)
 
-    def _latest_pose_record(self, flight_id: str) -> dict[str, object] | None:
-        state = self.store.state()
-        for drone in state.get("drones", []):
-            for flight in drone.get("flights", []):
-                if flight.get("id") != flight_id:
-                    continue
-                pose_records = [r for r in flight.get("records", []) if r.get("type") == "pose-track"]
-                if not pose_records:
-                    return None
-                return pose_records[-1]
-        return None
+    def _latest_pose_record(self, session_id: str) -> dict[str, object] | None:
+        return self.store.latest_record(session_id, source="pose")
 
-    def _latest_splat_record(self, flight_id: str) -> dict[str, object] | None:
-        state = self.store.state()
-        for drone in state.get("drones", []):
-            for flight in drone.get("flights", []):
-                if flight.get("id") != flight_id:
-                    continue
-                records = [r for r in flight.get("records", []) if r.get("type") == "gaussian-splat"]
-                if not records:
-                    return None
-                return records[-1]
-        return None
+    def _latest_splat_record(self, session_id: str) -> dict[str, object] | None:
+        return self.store.latest_record(session_id, source="splat", record_type="gaussian-splat")
 
     def server_close(self) -> None:
         self.manual_loop_running = False
         self.manual_thread.join(timeout=1.0)
         self.autonomy_loop_running = False
         self.autonomy_thread.join(timeout=1.0)
+        try:
+            self.session_service.stop()
+        except Exception:
+            pass
+        self.ws_hub.stop()
         self.sim.stop()
         self.runtime.stop_all()
         self.runtime.stop_world_model()
         self.runtime.close_vla()
         self.reconstructions.stop_all()
-        self.sessions.stop_all()
         self.manual_transport.close()
         super().server_close()
 
@@ -1292,6 +1223,8 @@ def main() -> int:
     store.seed_if_empty()
     server = ControlStationServer((args.host, args.port), store)
     host, port = server.server_address
+    if server.ws_url:
+        print(f"WS_READY {server.ws_url}", flush=True)
     print(f"SERVICE_READY http://{host}:{port}", flush=True)
     try:
         server.serve_forever()
