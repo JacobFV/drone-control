@@ -1,11 +1,14 @@
 import { bridge } from "./bridge";
 import type {
+  AccessPoint,
   ConfigStatus,
   DiscoverResult,
   ManualStatus,
   NetworkSummary,
+  SerialBridge,
   SessionStatus,
   StationState,
+  WifiInterface,
 } from "./types";
 
 let serviceUrlCache = "";
@@ -107,7 +110,13 @@ export const api = {
     request<{ ok?: boolean }>("POST", "/api/wifi/connect", { iface, ssid, password, confirmDisconnect: true }),
   reconnectWifi: (iface: string, password: string) =>
     request<{ ok?: boolean }>("POST", "/api/wifi/reconnect", { iface, password }),
-  getWifiInterfaces: () => request("GET", "/api/wifi/interfaces"),
+  getWifiInterfaces: () => request<{ interfaces: WifiInterface[] }>("GET", "/api/wifi/interfaces"),
+  getAccessPoints: (iface: string, rescan = false) =>
+    request<{ accessPoints: AccessPoint[] }>(
+      "GET",
+      `/api/wifi/access-points?iface=${encodeURIComponent(iface)}&rescan=${rescan ? "1" : "0"}`,
+    ),
+  getSerialBridges: () => request<{ bridges: SerialBridge[]; platform?: string }>("GET", "/api/serial/bridges"),
 
   // ----- Manual control -----
   getManualStatus: () => request<ManualStatus>("GET", "/api/manual/status"),
@@ -135,7 +144,29 @@ export const api = {
   missionStart: (objective: string) =>
     request("POST", "/api/mission/start", { objective, controllerMode: "batched_vla" }),
   missionStop: () => request("POST", "/api/mission/stop", {}),
+
+  // ----- VLA model registry -----
+  getModels: () => request<ModelsResult>("GET", "/api/models"),
+  downloadModel: (id: string) => request<ModelsResult>("POST", `/api/models/${id}/download`, {}),
+  selectModel: (id: string | null) => request<ModelsResult>("POST", "/api/models/select", { id }),
 };
+
+export interface ModelEntry {
+  id: string;
+  name: string;
+  kind: string;
+  description: string;
+  hfRepo: string;
+  ghUrl: string;
+  params: string;
+  downloaded: boolean;
+  sizeBytes: number;
+  active: boolean;
+}
+export interface ModelsResult {
+  models: ModelEntry[];
+  active: string | null;
+}
 
 export interface CoordinatorConfigResult {
   config: {

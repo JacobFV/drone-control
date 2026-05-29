@@ -96,6 +96,26 @@ export const MoonIcon = (p: IconProps) => (
   </svg>
 );
 
+export const CloudDownloadIcon = (p: IconProps) => (
+  <svg {...base(p)}>
+    <path d="M7 17a4 4 0 0 1-.5-7.97A5.5 5.5 0 0 1 17 8.5a3.5 3.5 0 0 1 .5 6.96" />
+    <path d="M12 11v7m0 0-3-3m3 3 3-3" />
+  </svg>
+);
+
+export const ModelIcon = (p: IconProps) => (
+  <svg {...base(p)}>
+    <path d="M12 2 3 7l9 5 9-5-9-5Z" />
+    <path d="M3 12l9 5 9-5M3 17l9 5 9-5" />
+  </svg>
+);
+
+export const CheckIcon = (p: IconProps) => (
+  <svg {...base(p)}>
+    <path d="M5 12l5 5L20 6" />
+  </svg>
+);
+
 export const BrainIcon = (p: IconProps) => (
   <svg {...base(p)}>
     <path d="M9 3a3 3 0 0 0-3 3 3 3 0 0 0-1 5.8A3 3 0 0 0 7 17a3 3 0 0 0 5 2 3 3 0 0 0 5-2 3 3 0 0 0 2-5.2A3 3 0 0 0 18 6a3 3 0 0 0-3-3 3 3 0 0 0-3 1.5A3 3 0 0 0 9 3Z" />

@@ -29,6 +29,10 @@
   --tile-body-bg: #05070a;
   --tile-scrim: linear-gradient(to bottom, rgba(0, 0, 0, 0.45), rgba(0, 0, 0, 0));
 
+  /* Render native controls (incl. the <option> popup) dark, so the OS does not
+     paint a blue-on-white selected row that is unreadable in dark mode. */
+  color-scheme: dark;
+
   font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
@@ -56,6 +60,7 @@
   --field-bg: rgba(255, 255, 255, 0.7);
   --tile-body-bg: #ced5dd;
   --tile-scrim: linear-gradient(to bottom, rgba(255, 255, 255, 0.6), rgba(255, 255, 255, 0));
+  color-scheme: light;
 }
 
 * { box-sizing: border-box; }
@@ -63,6 +68,7 @@ html, body, #root { height: 100%; margin: 0; }
 body { background: var(--bg); color: var(--ink); overflow: hidden; transition: background-color 0.25s ease, color 0.25s ease; }
 button { font-family: inherit; cursor: pointer; }
 input, select { font-family: inherit; }
+select option { background: var(--menu-bg); color: var(--ink); }
 
 .shell { display: flex; flex-direction: column; height: 100vh; }
 
@@ -112,6 +118,8 @@ input, select { font-family: inherit; }
 }
 .new-session-btn:hover { filter: brightness(1.08); }
 .with-icon { display: inline-flex; align-items: center; gap: 6px; }
+.session-empty { display: flex; flex-direction: column; align-items: flex-start; gap: 16px; padding-bottom: 10px; }
+.session-empty .muted { margin: 4px 0 0; }
 
 /* modal */
 .modal-overlay {
@@ -138,16 +146,16 @@ input, select { font-family: inherit; }
 .status-dot.status-error { background: var(--danger); }
 .status-dot.status-starting { background: #ffd35a; }
 .rhs-toggle {
-  background: var(--panel-2); color: var(--ink-dim); border: 1px solid var(--line);
-  border-radius: 2px; padding: 5px; display: inline-flex; align-items: center;
+  background: transparent; color: var(--ink-dim); border: none;
+  padding: 5px; display: inline-flex; align-items: center; cursor: pointer;
 }
-.rhs-toggle:hover { color: var(--ink); border-color: var(--accent); }
+.rhs-toggle:hover { color: var(--ink); }
 .rhs-toggle.is-collapsed { color: var(--accent); }
 .theme-toggle {
-  background: var(--panel-2); color: var(--ink-dim); border: 1px solid var(--line);
-  border-radius: 2px; padding: 5px; display: inline-flex; align-items: center;
+  background: transparent; color: var(--ink-dim); border: none;
+  padding: 5px; display: inline-flex; align-items: center; cursor: pointer;
 }
-.theme-toggle:hover { color: var(--accent); border-color: var(--accent); }
+.theme-toggle:hover { color: var(--accent); }
 
 .workspace { flex: 1 1 auto; display: flex; min-height: 0; }
 .wall { flex: 1 1 auto; min-width: 0; overflow: auto; padding: 0; }
@@ -192,6 +200,9 @@ input, select { font-family: inherit; }
   border-radius: 0;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
 }
+/* Maximize fills the wall only — keep the RHS panel visible (the user can still
+   toggle it). When the RHS is collapsed the tile spans the full width. */
+.shell:not(.rhs-collapsed) .tile.is-max { right: 360px; }
 
 /* Header floats over the content as a hover-reveal overlay: the raw icons fade
    in on tile hover and otherwise disappear so the live feed reads uncluttered. */
@@ -302,3 +313,47 @@ input, select { font-family: inherit; }
   background: rgba(127, 209, 255, 0.12); padding: 1px 6px; border-radius: 4px; flex: 0 0 auto;
 }
 .record-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* connections — one container per radio */
+.radio-scan-head { display: flex; align-items: center; justify-content: space-between; margin: 12px 0 8px; }
+.ap-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.ap-item {
+  padding: 6px 8px; background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--hairline); border-radius: 2px;
+}
+.ap-item.is-drone { border-color: rgba(255, 211, 90, 0.4); }
+.ap-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.ap-name { color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ap-signal { color: var(--ink-dim); margin-left: auto; font-variant-numeric: tabular-nums; }
+.ap-row .btn { padding: 3px 10px; }
+.ap-connect { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--hairline); }
+.ap-connect .btn-row { margin-top: 8px; }
+
+.esp-help {
+  background: rgba(255, 255, 255, 0.03); border: 1px solid var(--hairline);
+  border-radius: var(--radius); padding: 10px 12px;
+}
+.esp-help > summary {
+  cursor: pointer; font-size: 12px; color: var(--ink-dim); list-style: none;
+  display: flex; align-items: center; gap: 6px;
+}
+.esp-help > summary::before { content: "▸"; color: var(--accent); font-size: 10px; }
+.esp-help[open] > summary { color: var(--ink); margin-bottom: 10px; }
+.esp-help[open] > summary::before { content: "▾"; }
+.esp-help > summary::-webkit-details-marker { display: none; }
+.esp-steps { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 10px; }
+.esp-steps li { font-size: 12px; line-height: 1.5; color: var(--ink-dim); }
+.esp-steps strong { color: var(--ink); font-weight: 600; }
+.esp-steps code { font-family: ui-monospace, monospace; font-size: 11px; background: var(--field-bg); padding: 1px 5px; border-radius: 3px; color: var(--ink); }
+.esp-code {
+  margin: 6px 0 0; padding: 8px 10px; background: var(--tile-body-bg); color: var(--ink);
+  border: 1px solid var(--hairline); border-radius: var(--radius);
+  font-family: ui-monospace, monospace; font-size: 11px; line-height: 1.5;
+  white-space: pre-wrap; word-break: break-word; overflow-x: auto;
+}
+.esp-help .btn-row { margin-top: 12px; }
+
+/* models panel */
+.model-meta { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 8px 0 2px; font-size: 11px; color: var(--ink-dim); }
+.link-btn { background: transparent; border: none; color: var(--accent); font-size: 11px; padding: 0; cursor: pointer; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; max-width: 180px; }
+.link-btn:hover { text-decoration: underline; }
