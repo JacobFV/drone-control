@@ -35,7 +35,72 @@ Implemented:
   schema validation, VLM assignment validation, IMU extraction, perception
   aggregation, and replay loading
 
+Batched VLA + live world model (added):
+
+- batched VLA loop in `drone_control/controllers/batched_vla.py`: a coalescing
+  `BatchedVLAHub` turns N per-drone control ticks into one model call per window
+  (early-flush when all registered drones submit, else `batch_max_wait_seconds`),
+  with per-drone `BatchedVLAController` proxies. Failures/timeouts → `motor_stop`,
+  still clamped by the safety wrapper. Mode `batched_vla` in `RuntimeManager`;
+  swarm-wide via `/api/runtime/controller`.
+- batched JSON-lines protocol + `BatchLocalVLAClient` in
+  `controllers/local_vla.py`: stdin `{"batch":[...]}` → stdout `{"results":[...]}`,
+  one round-trip per window, with a startup-grace window for model cold start.
+- reverse-diffusion image→action reference policy in `tools/diffusion_vla_model.py`
+  (x0-parameterised conditional DDPM; vision CNN + proprio MLP; zero-init head ⇒
+  untrained output is a safe neutral action), served by `tools/diffusion_vla_policy.py`
+  and trained from logged transitions by `tools/train_diffusion_vla.py`
+  (`DRONE_VLA_LOG_PATH` enables the runtime transition logger).
+- live cross-drone Gaussian-splat world model in
+  `drone_control/perception/live_splat.py`: one persistent CUDA gaussian set in a
+  shared world frame, fed by `ingest(drone_id, jpeg, pose)` from all drones; a
+  background gsplat optimiser with light densify/prune; self-bootstraps by
+  back-projecting the first keyframe. Exposed via `RuntimeManager`
+  (`start_world_model`/`ingest_frame`/`export_world_model`) and
+  `/api/world/splat/{status,snapshot,start,stop,bootstrap}`. `gsplat` verified on
+  the GB10 (Blackwell sm_121, cu130).
+- shared `LiveFrameRegistry` (`perception/frame_registry.py`) carries real JPEG
+  bytes once to both the diffusion policy and the splat engine.
+- tests: `tools/test_batched_vla.py` (coalescing, routing, timeout/error/invalid →
+  stop, end-to-end through the diffusion subprocess) and `tools/test_live_splat.py`
+  (gsplat-gated cross-drone fusion, loss decrease, PLY export, manager wiring).
+
+Cross-drone co-registration, live ingestion, and UI (added):
+
+- automatic COLMAP-union co-registration in `drone_control/perception/cross_drone.py`:
+  the union of all drones' frames is fed into one COLMAP SfM run
+  (`feature_extractor` → `exhaustive_matcher` → `mapper`, driven via the `colmap`
+  CLI), jointly solving every camera into one shared frame. The sparse cloud
+  seeds `LiveSplatEngine.seed_from_points`; per-drone `world_T_drone` similarity
+  transforms are recovered by Umeyama alignment of VO camera centres to COLMAP
+  centres. Exposed via `RuntimeManager.bootstrap_world_model` and
+  `POST /api/world/splat/bootstrap {"flightIds": [...]}`. COLMAP binary parsers
+  and Umeyama are unit-tested; the CLI driver is exercised in
+  `tools/test_cross_drone.py`.
+- live frame ingestion in `drone_control/perception/ingestion.py`: a
+  `FrameIngestor` pumps any `live_video.FrameSource` (live RTP/JPEG camera or a
+  `DirectoryFrameSource` replay) into `RuntimeManager.ingest_frame`, which
+  publishes to the `LiveFrameRegistry` (batched VLA) and the splat engine in one
+  decode. Pose defaults to the drone's latest runtime observation. Exposed via
+  `POST /api/runtime/drones/<id>/camera/{start,stop}` (`{"framesDir": ...}` for
+  replay or live camera config). Tested in `tools/test_ingestion.py`.
+- React + Vite control-station UI under `ui/` replacing the flat-sidebar vanilla
+  renderer: workflow-organised inspector (Connect → Fly → Record → Reconstruct)
+  with a persistent Swarm · Batched VLA panel, a separate Settings drawer, and a
+  main viewport with Forward / Down / 3D-Sim / World Model views. Electron loads
+  `ui/dist` when built (falls back to `app/`); the `.ply` snapshot uses a
+  `fetchBinary` IPC bridge. Build: `cd ui && npm install && npm run build`.
+
 Still external hardware/model bring-up:
+
+- live tracking/loop-closure/drift correction for the world model are not solved;
+  reconstruction quality depends on upstream VO and frame overlap. COLMAP
+  bootstrap needs real overlapping frames to register.
+- train the diffusion policy on real transitions before relying on it to fly;
+  untrained weights emit neutral actions only (`DRONE_VLA_LOG_PATH` logs
+  transitions; `tools/train_diffusion_vla.py` trains; pass `--checkpoint`).
+- point `DRONE_BATCHED_VLA_COMMAND` at `tools/diffusion_vla_policy.py` to use the
+  real model; otherwise an in-process neutral fallback keeps the loop running.
 
 - record one-ESP and two-ESP runtime bring-up in `DRONE_RUNBOOK.md`
 - replace fixture replay records with representative real flight traces when

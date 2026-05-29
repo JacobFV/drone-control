@@ -27,7 +27,12 @@ function createWindow() {
     },
   });
 
-  window.loadFile(path.join(rootDir, "app", "index.html"));
+  // Prefer the built React UI (ui/dist) when present; fall back to the legacy
+  // vanilla app/ so the window still loads if the UI has not been built.
+  const builtUi = path.join(rootDir, "ui", "dist", "index.html");
+  const legacyUi = path.join(rootDir, "app", "index.html");
+  const indexFile = require("fs").existsSync(builtUi) ? builtUi : legacyUi;
+  window.loadFile(indexFile);
 }
 
 app.whenReady().then(async () => {
@@ -36,6 +41,7 @@ app.whenReady().then(async () => {
   ipcMain.handle("app:request", async (_event, request) => serviceRequest(request));
   ipcMain.handle("app:serviceUrl", () => serviceUrl);
   ipcMain.handle("app:openExternal", async (_event, url) => shell.openExternal(url));
+  ipcMain.handle("app:fetchBinary", async (_event, servicePath) => serviceFetchBinary(servicePath));
   createWindow();
 
   app.on("activate", () => {
@@ -109,4 +115,21 @@ async function serviceRequest(request) {
     throw new Error(`Service request failed: ${response.status} ${response.statusText}`);
   }
   return response.json();
+}
+
+async function serviceFetchBinary(servicePath) {
+  try {
+    const response = await fetch(new URL(servicePath, serviceUrl), { method: "GET" });
+    if (!response.ok) {
+      return { ok: false, error: `${response.status} ${response.statusText}` };
+    }
+    const buffer = Buffer.from(await response.arrayBuffer());
+    return {
+      ok: true,
+      data: buffer.toString("base64"),
+      mime: response.headers.get("content-type") || "application/octet-stream",
+    };
+  } catch (error) {
+    return { ok: false, error: String(error) };
+  }
 }

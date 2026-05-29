@@ -63,6 +63,12 @@ class ControlStationHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/reconstruction/tools":
             self.send_json(self.server.reconstructions.tools_status())
             return
+        if parsed.path == "/api/world/splat/status":
+            self.send_json(self.server.runtime.world_model_status())
+            return
+        if parsed.path == "/api/world/splat/snapshot":
+            self.serve_world_snapshot()
+            return
         if parsed.path == "/api/wifi/capabilities":
             self.send_json(wifi_capabilities())
             return
@@ -252,6 +258,40 @@ class ControlStationHandler(BaseHTTPRequestHandler):
             self.send_json(self.server.runtime_status())
             return
 
+        if parsed.path == "/api/world/splat/start":
+            self.send_json(self.server.runtime.start_world_model())
+            return
+        if parsed.path == "/api/world/splat/stop":
+            self.send_json(self.server.runtime.stop_world_model())
+            return
+        if parsed.path == "/api/world/splat/bootstrap":
+            payload = self.read_json()
+            flight_drones = payload.get("flightIds") or payload.get("flights")
+            if flight_drones:
+                self.bootstrap_world_model(flight_drones)
+                return
+            transforms = payload.get("transforms") or {}
+            applied = []
+            for drone_id, transform in transforms.items():
+                try:
+                    self.server.runtime.set_world_transform(str(drone_id), transform)
+                    applied.append(str(drone_id))
+                except Exception as exc:
+                    self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                    return
+            self.send_json({"applied": applied} | self.server.runtime.world_model_status())
+            return
+
+        if parsed.path == "/api/runtime/controller":
+            payload = self.read_json()
+            try:
+                self.server.runtime.set_all_controllers(str(payload.get("mode") or "disabled"))
+            except (KeyError, ValueError) as exc:
+                self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            self.send_json(self.server.runtime_status())
+            return
+
         match = re.fullmatch(r"/api/runtime/drones/([^/]+)/controller", parsed.path)
         if match:
             payload = self.read_json()
@@ -315,6 +355,15 @@ class ControlStationHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": str(exc)}, status=HTTPStatus.NOT_FOUND)
                 return
             self.send_json(self.server.runtime_status())
+            return
+        match = re.fullmatch(r"/api/runtime/drones/([^/]+)/camera/start", parsed.path)
+        if match:
+            self.start_drone_camera(match.group(1))
+            return
+        match = re.fullmatch(r"/api/runtime/drones/([^/]+)/camera/stop", parsed.path)
+        if match:
+            self.server.runtime.detach_frame_source(match.group(1))
+            self.send_json({"ingestion": self.server.runtime.ingestion_status()})
             return
 
         if parsed.path == "/api/mission/start":
@@ -476,6 +525,25 @@ class ControlStationHandler(BaseHTTPRequestHandler):
             return
         except FileNotFoundError:
             return
+
+    def serve_world_snapshot(self) -> None:
+        export_dir = self.server.reconstruction_root / "world_model"
+        export_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            path = self.server.runtime.export_world_model(export_dir / "world.ply")
+        except Exception as exc:
+            self.send_json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
+            return
+        if path is None:
+            self.send_json({"error": "world model not running"}, status=HTTPStatus.NOT_FOUND)
+            return
+        data = Path(path).read_bytes()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "model/vnd.gaussian-splat")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(data)
 
     def send_blob_file(self, key: str, relative: str) -> None:
         root = self.server.store.blobs.resolve(key)
@@ -706,6 +774,81 @@ class ControlStationHandler(BaseHTTPRequestHandler):
             return
         self.send_json(result)
 
+    def start_drone_camera(self, drone_id: str) -> None:
+        """Attach a live camera source for a drone so frames flow to the VLA hub
+        and the world model.
+
+        Body either ``{"framesDir": "/path"}`` (DirectoryFrameSource replay, also
+        useful without hardware) or live camera config
+        ``{"iface": "...", "droneIp": "...", ...}``.
+        """
+
+        payload = self.read_json()
+        frames_dir = optional_str(payload, "framesDir")
+        try:
+            if frames_dir:
+                source = DirectoryFrameSource(frames_dir, fps=float(payload.get("fps") or 10.0))
+            else:
+                iface = optional_str(payload, "iface")
+                if not iface:
+                    self.send_json({"error": "iface or framesDir required"}, status=HTTPStatus.BAD_REQUEST)
+                    return
+                config = LiveDroneFrameSourceConfig(
+                    iface=iface,
+                    local_ip=str(payload.get("localIp") or ""),
+                    drone_ip=str(payload.get("droneIp") or "192.168.1.1"),
+                    use_rtsp=bool(payload.get("useRtsp", True)),
+                )
+                source = LiveDroneFrameSource(config)
+            self.server.runtime.attach_frame_source(drone_id, source)
+        except (FileNotFoundError, ValueError, OSError) as exc:
+            self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+        self.send_json({"ingestion": self.server.runtime.ingestion_status()})
+
+    def bootstrap_world_model(self, flight_drones: Any) -> None:
+        """COLMAP-union cross-drone bootstrap from recorded flights.
+
+        ``flight_drones`` may be a list of flight ids (each treated as its own
+        drone, labelled by flight id) or a mapping ``{flightId: droneId}`` so the
+        resulting transforms apply to the matching live runtime drone.
+        """
+
+        if isinstance(flight_drones, dict):
+            mapping = {str(k): str(v) for k, v in flight_drones.items()}
+        elif isinstance(flight_drones, list):
+            mapping = {str(f): str(f) for f in flight_drones}
+        else:
+            self.send_json({"error": "flightIds must be a list or {flightId: droneId} object"}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        drone_frames: dict[str, list[str]] = {}
+        for flight_id, drone_id in mapping.items():
+            if not self.server.store.flight_exists(flight_id):
+                self.send_json({"error": f"flight not found: {flight_id}"}, status=HTTPStatus.NOT_FOUND)
+                return
+            frame_record = self.server._latest_frame_record(flight_id)
+            if frame_record is None:
+                self.send_json({"error": f"no frames record for flight: {flight_id}"}, status=HTTPStatus.NOT_FOUND)
+                return
+            frame_dir = self.server.store.record_path(str(frame_record["id"]))
+            if frame_dir is None or not frame_dir.is_dir():
+                self.send_json({"error": f"frame blob missing for flight: {flight_id}"}, status=HTTPStatus.NOT_FOUND)
+                return
+            frames = [str(p) for p in sorted(frame_dir.glob("*.jpg"))]
+            if not frames:
+                self.send_json({"error": f"no .jpg frames for flight: {flight_id}"}, status=HTTPStatus.NOT_FOUND)
+                return
+            drone_frames.setdefault(drone_id, []).extend(frames)
+
+        work_dir = self.server.reconstruction_root / "world_bootstrap"
+        try:
+            result = self.server.runtime.bootstrap_world_model(drone_frames, work_dir)
+        except Exception as exc:
+            self.send_json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
+            return
+        self.send_json(result)
+
     def start_reconstruction(self, flight_id: str) -> None:
         if not self.server.store.flight_exists(flight_id):
             self.send_json({"error": "flight not found"}, status=HTTPStatus.NOT_FOUND)
@@ -780,6 +923,10 @@ class ControlStationServer(ThreadingHTTPServer):
                 enable_io=env_bool("DRONE_RUNTIME_ENABLE_IO", False),
                 local_vla_command=env_command("DRONE_LOCAL_VLA_COMMAND"),
                 local_vla_timeout_seconds=float(os.environ.get("DRONE_LOCAL_VLA_TIMEOUT", "0.25")),
+                batched_vla_command=env_command("DRONE_BATCHED_VLA_COMMAND"),
+                batched_vla_timeout_seconds=float(os.environ.get("DRONE_BATCHED_VLA_TIMEOUT", "0.25")),
+                batch_max_wait_seconds=float(os.environ.get("DRONE_BATCH_MAX_WAIT", "0.025")),
+                vla_log_path=os.environ.get("DRONE_VLA_LOG_PATH") or None,
             )
         )
         self.runtime.configure_drones(load_runtime_configs())
@@ -1019,6 +1166,8 @@ class ControlStationServer(ThreadingHTTPServer):
         self.autonomy_loop_running = False
         self.autonomy_thread.join(timeout=1.0)
         self.runtime.stop_all()
+        self.runtime.stop_world_model()
+        self.runtime.close_vla()
         self.reconstructions.stop_all()
         self.sessions.stop_all()
         self.manual_transport.close()

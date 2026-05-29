@@ -88,14 +88,23 @@ Run a short neutral control stream through the local ignored config:
 python3 -m drone_control.swarm --config config/drones.local.json --command neutral --seconds 0.5
 ```
 
-Run the Electron control station:
+Build the React control-station UI, then run the Electron app:
 
 ```bash
+cd ui && npm install && npm run build && cd ..
 npm start
 ```
 
-Packet output is disabled by default in the app unless manual IO is explicitly
-enabled and configured.
+Electron loads the built `ui/dist` when present and falls back to the legacy
+`app/` renderer otherwise. Packet output is disabled by default in the app
+unless manual IO is explicitly enabled and configured.
+
+To put the whole swarm on the batched diffusion VLA loop and live world model:
+
+```bash
+export DRONE_BATCHED_VLA_COMMAND="$(pwd)/.venv/bin/python tools/diffusion_vla_policy.py"
+# in the UI: Swarm panel -> Apply 'batched_vla'; World Model view -> Start / Bootstrap.
+```
 
 ## Configuration
 
@@ -129,10 +138,11 @@ Example ESP serial entry:
 
 ## Repository Map
 
-- `app/`: Electron renderer HTML/CSS/JS.
+- `ui/`: React + Vite control-station UI (built to `ui/dist`). See `ui/README.md`.
+- `app/`: legacy vanilla Electron renderer (fallback if `ui/dist` is absent).
 - `electron/`: Electron main process and preload bridge.
-- `drone_control/`: Python service, protocols, transports, camera, pose, and
-  reconstruction code.
+- `drone_control/`: Python service, protocols, transports, camera, pose,
+  reconstruction, batched VLA, live splat, and cross-drone co-registration code.
 - `firmware/esp32_drone_link/`: PlatformIO ESP32-S3 bridge firmware.
 - `tools/`: capture, scan, probe, conversion, and verification utilities.
 - `config/`: tracked example configs. Local configs are ignored.
