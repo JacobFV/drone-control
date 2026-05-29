@@ -416,6 +416,17 @@ class RuntimeManager:
         if world is not None:
             world.set_drone_transform(drone_id, np.asarray(transform, dtype=float))
 
+    def seed_world_points(self, xyz: Any, rgb: Any = None) -> int:
+        """Seed the live splat from an external point cloud (e.g. estimated depth)."""
+        with self._lock:
+            world = self._world_model
+        if world is None or not hasattr(world, "seed_from_points"):
+            return 0
+        try:
+            return int(world.seed_from_points(xyz, rgb))
+        except Exception:
+            return 0
+
     def bootstrap_world_model(
         self,
         drone_frames: dict[str, list[Path]],

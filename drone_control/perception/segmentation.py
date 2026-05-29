@@ -224,8 +224,14 @@ class Segmenter:
         drone_id: str,
         detections: list[ScreenDetection],
         pose: dict[str, Any] | None,
+        depth_map: "np.ndarray | None" = None,
     ) -> None:
-        """Back-project detection centroids through the drone pose and fuse."""
+        """Back-project detection centroids through the drone pose and fuse.
+
+        When a metric ``depth_map`` (estimated, [H,W] in metres) is supplied the
+        centroid depth is sampled from it; otherwise the fixed ``default_depth``
+        assumption is used.
+        """
 
         if pose is None or not detections:
             return
@@ -236,14 +242,24 @@ class Segmenter:
         now = time.time()
         with self._lock:
             for det in detections:
-                world_pt = self._backproject_centroid(det, center, rotation)
+                depth = self._sample_depth(det, depth_map)
+                world_pt = self._backproject_centroid(det, center, rotation, depth=depth)
                 self._fuse(drone_id, det.cls, world_pt, det.score, now)
             if len(self._objects) > self.max_objects:
                 self._objects.sort(key=lambda o: o.last_seen, reverse=True)
                 self._objects = self._objects[: self.max_objects]
 
+    def _sample_depth(self, det: ScreenDetection, depth_map: "np.ndarray | None") -> float:
+        if depth_map is None:
+            return self.default_depth
+        h, w = depth_map.shape[:2]
+        u = int(min(w - 1, max(0, (det.centroid[0] / max(1, det.width)) * w)))
+        v = int(min(h - 1, max(0, (det.centroid[1] / max(1, det.height)) * h)))
+        depth = float(depth_map[v, u])
+        return depth if depth > 0 else self.default_depth
+
     def _backproject_centroid(
-        self, det: ScreenDetection, center: np.ndarray, rotation: np.ndarray
+        self, det: ScreenDetection, center: np.ndarray, rotation: np.ndarray, *, depth: float | None = None
     ) -> np.ndarray:
         width, height = det.width, det.height
         focal = (width / 2.0) / np.tan(np.deg2rad(self.fov_deg) / 2.0)
@@ -255,7 +271,7 @@ class Segmenter:
         )
         ray_cam = ray_cam / (np.linalg.norm(ray_cam) + 1e-9)
         ray_world = rotation @ ray_cam
-        return center + ray_world * self.default_depth
+        return center + ray_world * (depth if depth is not None else self.default_depth)
 
     def _fuse(self, drone_id: str, cls: str, world_pt: np.ndarray, score: float, now: float) -> None:
         for obj in self._objects:

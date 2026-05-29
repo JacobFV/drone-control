@@ -27,6 +27,7 @@ from typing import Any
 
 from drone_control.environment.real_env import RealEnvironment
 from drone_control.environment.sim_env import SimEnvironment
+from drone_control.perception.depth import DepthEstimator, write_ply
 from drone_control.perception.segmentation import Segmenter
 from drone_control.runtime.manager import RuntimeManager
 from drone_control.sim.session import SimSessionConfig
@@ -57,6 +58,8 @@ class SessionService:
         self.recorder_hz = recorder_hz
 
         self.segmenter = Segmenter()
+        self.depth = DepthEstimator()
+        self._depth_every = 2  # run depth every Nth perception tick (it is heavier)
 
         self._lock = threading.RLock()
         self._env: SimEnvironment | RealEnvironment | None = None
@@ -114,6 +117,7 @@ class SessionService:
             )
 
             self.segmenter.reset()
+            self.depth.reset()
             self._env = env
             self._environment_id = environment_id
             self._session_id = session["id"]
@@ -196,6 +200,12 @@ class SessionService:
         env = self._env
         return env.latest_frame(drone_id) if env is not None else None
 
+    def depth_frame(self, drone_id: str) -> bytes | None:
+        return self.depth.latest_depth_jpeg(drone_id)
+
+    def point_cloud(self, max_points: int = 2500) -> dict[str, Any]:
+        return {"points": self.depth.cloud_snapshot(max_points)}
+
     def set_speed(self, mode: str) -> dict[str, Any]:
         env = self._env
         if env is None:
@@ -225,6 +235,7 @@ class SessionService:
                 "screen": self.segmenter.screen_summary(),
                 "world": self.segmenter.world_objects(),
             },
+            "depth": self.depth.status(),
             "env": env.status(),
         }
 
@@ -232,19 +243,33 @@ class SessionService:
 
     def _perception_loop(self) -> None:
         interval = 1.0 / max(0.5, self.perception_hz)
+        tick = 0
         while not self._stop_event.is_set():
             started = time.monotonic()
             env = self._env
             if env is not None:
+                run_depth = self.depth.available() and tick % self._depth_every == 0
                 for drone_id in env.drone_ids():
                     jpeg = env.latest_frame(drone_id)
                     if not jpeg:
                         continue
+                    pose = env.latest_pose(drone_id)
                     try:
+                        if run_depth:
+                            self.depth.process(drone_id, jpeg, pose)
                         dets = self.segmenter.segment_frame(drone_id, jpeg)
-                        self.segmenter.project_to_world(drone_id, dets, env.latest_pose(drone_id))
+                        # Ground world-space segmentation in estimated metric depth.
+                        self.segmenter.project_to_world(
+                            drone_id, dets, pose, depth_map=self.depth.latest_depth_map(drone_id)
+                        )
                     except Exception:
                         continue
+                # Seed the live splat from the estimated point cloud (real env).
+                if run_depth and isinstance(env, RealEnvironment) and env.world_model_status().get("running"):
+                    xyz, rgb = self.depth.cloud_arrays()
+                    if xyz.shape[0]:
+                        self.runtime.seed_world_points(xyz, rgb)
+            tick += 1
             elapsed = time.monotonic() - started
             self._stop_event.wait(max(0.0, interval - elapsed))
 
@@ -365,6 +390,17 @@ class SessionService:
                 "application/json", seg_world,
             )
         metrics["worldObjects"] = len(world)
+
+        # Estimated-depth point cloud.
+        xyz, rgb = self.depth.cloud_arrays()
+        if xyz.shape[0]:
+            cloud_path = session_dir / "pointcloud.ply"
+            write_ply(cloud_path, xyz, rgb)
+            self.store.import_record(
+                session_id, "pointcloud", "point-cloud", "Depth point cloud",
+                "model/ply", cloud_path,
+            )
+            metrics["points"] = int(xyz.shape[0])
         return metrics
 
 

@@ -79,6 +79,15 @@ class ControlStationHandler(BaseHTTPRequestHandler):
         if match:
             self.send_jpeg(self.server.session_service.frame(match.group(1)))
             return
+        match = re.fullmatch(r"/api/session/drones/([^/]+)/depth", parsed.path)
+        if match:
+            self.send_jpeg(self.server.session_service.depth_frame(match.group(1)))
+            return
+        if parsed.path == "/api/session/pointcloud":
+            query = parse_qs(parsed.query)
+            max_points = int(query.get("max", ["2500"])[0])
+            self.send_json(self.server.session_service.point_cloud(max_points))
+            return
         if parsed.path == "/api/scenes":
             self.send_json({"scenes": list_scenes()})
             return

@@ -8,5 +8,7 @@ pymeshlab>=2025.7
 gsplat>=1.5
 # Object segmentation (drone_control/perception/segmentation.py): YOLO11-seg instance masks.
 ultralytics>=8.3
+# Monocular depth (drone_control/perception/depth.py): Depth Anything V2 via transformers.
+transformers>=4.40
 # Realtime push transport for the desktop UI (drone_control/ws.py).
 websockets>=13
