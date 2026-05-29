@@ -102,7 +102,7 @@ class ControlStationHandler(BaseHTTPRequestHandler):
             self.wfile.write(data)
             return
         if parsed.path == "/api/session/splat/viewer":
-            body = splat_viewer_html("Live splat", "/api/session/splat/snapshot").encode()
+            body = splat_viewer_html("Live splat", "/api/session/splat/snapshot", fmt="ply").encode()
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -708,7 +708,9 @@ class ControlStationHandler(BaseHTTPRequestHandler):
         artifact_url = f"/api/records/{record_id}/artifact"
         if relative:
             artifact_url += f"?path={relative}"
-        body = splat_viewer_html(str(info["label"]), artifact_url).encode()
+        suffix = artifact.suffix.lower()
+        fmt = "splat" if suffix == ".splat" else "spz" if suffix == ".spz" else "ply"
+        body = splat_viewer_html(str(info["label"]), artifact_url, fmt=fmt).encode()
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -1590,10 +1592,18 @@ def export_frame_dir(frame_dir: Path, export_root: Path, *, fmt: str, fps: float
     raise RuntimeError(f"unsupported export format: {fmt}")
 
 
-def splat_viewer_html(title: str, artifact_url: str) -> str:
+def splat_viewer_html(title: str, artifact_url: str, fmt: str | None = None) -> str:
     escaped_title = html.escape(title)
     title_json = json.dumps(title)
     url_json = json.dumps(artifact_url)
+    # Choose the gsplat loader by artifact format. ``.ply`` (our live/INRIA
+    # export) needs PLYLoader; ``.splat`` is the packed format; ``.spz`` is
+    # compressed. Loader.LoadAsync (splat) on a .ply throws "byte length ...
+    # multiple of 4", so dispatch correctly.
+    if fmt is None:
+        lower = artifact_url.lower()
+        fmt = "splat" if ".splat" in lower else "spz" if ".spz" in lower else "ply"
+    fmt_json = json.dumps(fmt)
     return f"""<!doctype html>
 <html lang="en">
   <head>
@@ -1611,6 +1621,7 @@ def splat_viewer_html(title: str, artifact_url: str) -> str:
     <script type="module">
       import * as SPLAT from "https://cdn.jsdelivr.net/npm/gsplat@latest/+esm";
       const label = {title_json};
+      const fmt = {fmt_json};
       const artifactUrl = new URL({url_json}, window.location.href).toString();
       const status = document.getElementById("status");
       const scene = new SPLAT.Scene();
@@ -1618,11 +1629,23 @@ def splat_viewer_html(title: str, artifact_url: str) -> str:
       const renderer = new SPLAT.WebGLRenderer();
       const controls = new SPLAT.OrbitControls(camera, renderer.canvas);
       document.body.appendChild(renderer.canvas);
+      const onProgress = (progress) => {{
+        const pct = Number.isFinite(progress) ? Math.round(progress * 100) : 0;
+        status.textContent = pct > 0 ? `${{label}} ${{pct}}%` : `LOADING ${{label}}`;
+      }};
+      const loadByFormat = async (f) => {{
+        if (f === "ply") return SPLAT.PLYLoader.LoadAsync(artifactUrl, scene, onProgress);
+        if (f === "spz" && SPLAT.SPZLoader) return SPLAT.SPZLoader.LoadAsync(artifactUrl, scene, onProgress);
+        return SPLAT.Loader.LoadAsync(artifactUrl, scene, onProgress);
+      }};
       try {{
-        await SPLAT.Loader.LoadAsync(artifactUrl, scene, (progress) => {{
-          const pct = Number.isFinite(progress) ? Math.round(progress * 100) : 0;
-          status.textContent = pct > 0 ? `${{label}} ${{pct}}%` : `LOADING ${{label}}`;
-        }});
+        try {{
+          await loadByFormat(fmt);
+        }} catch (first) {{
+          // Fall back to the PLY loader (our default export format).
+          if (fmt !== "ply") await loadByFormat("ply");
+          else throw first;
+        }}
         status.textContent = label;
         const frame = () => {{
           controls.update();
