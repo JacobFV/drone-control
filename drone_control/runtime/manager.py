@@ -19,6 +19,7 @@ from drone_control.controllers.manual import ManualController
 from drone_control.controllers.scripted import scripted_controller
 from drone_control.controllers.text_command import TextCommandController
 from drone_control.controllers.vla import VLAController
+from drone_control.coordinator.guidance import GuidanceBus, apply_tool_calls
 from drone_control.coordinator.tasks import Assignment, MissionProgress
 from drone_control.perception.frame_registry import LiveFrameRegistry
 from drone_control.protocols import make_protocol
@@ -40,6 +41,9 @@ class RuntimeManagerConfig:
     batched_vla_timeout_seconds: float = 0.25
     batch_max_wait_seconds: float = 0.025
     vla_log_path: str | None = None
+    # Optional per-policy model commands for select_policy guidance. Drones on a
+    # named policy are batched separately (one model process per policy group).
+    policy_commands: dict[str, list[str]] | None = None
 
 
 class RuntimeManager:
@@ -56,6 +60,8 @@ class RuntimeManager:
         self._vla_log_lock = threading.Lock()
         self._world_model: Any | None = None
         self._ingestors: dict[str, Any] = {}
+        self.guidance = GuidanceBus()
+        self._policy_clients: dict[str, BatchLocalVLAClient] = {}
 
     def configure_drones(self, configs: list[DroneConfig]) -> None:
         with self._lock:
@@ -126,6 +132,7 @@ class RuntimeManager:
                     hub=hub,
                     drone_id=drone_id,
                     registry=self.frame_registry,
+                    guidance_bus=self.guidance,
                     wait_seconds=wait,
                 )
             )
@@ -212,6 +219,30 @@ class RuntimeManager:
             return self._vla_hub
 
     def _batch_model(self, payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        # Group by policy: drones without a select_policy override share the default
+        # model in one batch; named policies are batched separately (the documented
+        # cost of select_policy). Targets/styles never split the batch.
+        groups: dict[str, list[dict[str, Any]]] = {}
+        for payload in payloads:
+            groups.setdefault(payload.get("policyId") or "default", []).append(payload)
+        results: list[dict[str, Any]] = []
+        for policy_id, group in groups.items():
+            results.extend(self._run_policy_group(policy_id, group))
+        self._log_transitions(payloads, results)
+        return results
+
+    def _run_policy_group(self, policy_id: str, group: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if policy_id and policy_id != "default":
+            command = (self.config.policy_commands or {}).get(policy_id)
+            if command:
+                client = self._policy_clients.get(policy_id)
+                if client is None:
+                    client = BatchLocalVLAClient(
+                        LocalVLAConfig(command=command, timeout_seconds=self.config.batched_vla_timeout_seconds)
+                    )
+                    self._policy_clients[policy_id] = client
+                return client.step_batch(group)
+            # Unknown named policy -> fall through to the default model.
         if self.config.batched_vla_command:
             if self._vla_client is None:
                 self._vla_client = BatchLocalVLAClient(
@@ -220,11 +251,28 @@ class RuntimeManager:
                         timeout_seconds=self.config.batched_vla_timeout_seconds,
                     )
                 )
-            results = self._vla_client.step_batch(payloads)
-        else:
-            results = _neutral_batch(payloads)
-        self._log_transitions(payloads, results)
-        return results
+            return self._vla_client.step_batch(group)
+        return _neutral_batch(group)
+
+    # ----- Guidance (low-frequency VLM -> hi-frequency conditioning) ----- #
+
+    def set_target(self, drone_id: str, target: tuple[float, float, float] | None) -> None:
+        self.guidance.set_target(drone_id, target)
+
+    def set_trajectory(self, drone_id: str, waypoints: list[tuple[float, float, float]], *, loop: bool = False) -> None:
+        self.guidance.set_trajectory(drone_id, waypoints, loop=loop)
+
+    def set_style(self, drone_id: str, style: list[float]) -> None:
+        self.guidance.set_style(drone_id, style)
+
+    def select_policy(self, drone_id: str, policy_id: str | None) -> None:
+        self.guidance.select_policy(drone_id, policy_id)
+
+    def apply_guidance_tool_calls(self, calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return apply_tool_calls(self.guidance, calls)
+
+    def guidance_status(self) -> dict[str, Any]:
+        return self.guidance.snapshot()
 
     def _log_transitions(self, payloads: list[dict[str, Any]], results: list[dict[str, Any]]) -> None:
         if not self.config.vla_log_path:
@@ -400,12 +448,16 @@ class RuntimeManager:
         with self._lock:
             hub = self._vla_hub
             client = self._vla_client
+            policy_clients = list(self._policy_clients.values())
             self._vla_hub = None
             self._vla_client = None
+            self._policy_clients = {}
         if hub is not None:
             hub.close()
         if client is not None:
             client.close()
+        for policy_client in policy_clients:
+            policy_client.close()
 
     def snapshots(self) -> dict[str, Any]:
         self._collect_events()

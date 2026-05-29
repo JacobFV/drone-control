@@ -66,6 +66,9 @@ class ControlStationHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/world/splat/status":
             self.send_json(self.server.runtime.world_model_status())
             return
+        if parsed.path == "/api/guidance/status":
+            self.send_json({"guidance": self.server.runtime.guidance_status()})
+            return
         if parsed.path == "/api/world/splat/snapshot":
             self.serve_world_snapshot()
             return
@@ -355,6 +358,16 @@ class ControlStationHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": str(exc)}, status=HTTPStatus.NOT_FOUND)
                 return
             self.send_json(self.server.runtime_status())
+            return
+        if parsed.path == "/api/guidance/tools":
+            payload = self.read_json()
+            calls = payload.get("calls") or payload.get("toolCalls") or []
+            results = self.server.runtime.apply_guidance_tool_calls(calls)
+            self.send_json({"results": results, "guidance": self.server.runtime.guidance_status()})
+            return
+        match = re.fullmatch(r"/api/guidance/drones/([^/]+)", parsed.path)
+        if match:
+            self.set_drone_guidance(match.group(1))
             return
         match = re.fullmatch(r"/api/runtime/drones/([^/]+)/camera/start", parsed.path)
         if match:
@@ -774,6 +787,27 @@ class ControlStationHandler(BaseHTTPRequestHandler):
             return
         self.send_json(result)
 
+    def set_drone_guidance(self, drone_id: str) -> None:
+        """Set guidance for one drone. Body may include any of: target {x,y,z} or
+        null to clear, trajectory [[x,y,z],...] (+ loop), style [...], policyId."""
+
+        payload = self.read_json()
+        runtime = self.server.runtime
+        if "target" in payload:
+            target = payload.get("target")
+            if target is None:
+                runtime.set_target(drone_id, None)
+            else:
+                runtime.set_target(drone_id, (float(target[0]), float(target[1]), float(target[2])))
+        if "trajectory" in payload:
+            waypoints = [(float(w[0]), float(w[1]), float(w[2])) for w in payload.get("trajectory") or []]
+            runtime.set_trajectory(drone_id, waypoints, loop=bool(payload.get("loop", False)))
+        if "style" in payload:
+            runtime.set_style(drone_id, [float(v) for v in payload.get("style") or []])
+        if "policyId" in payload:
+            runtime.select_policy(drone_id, payload.get("policyId"))
+        self.send_json({"guidance": runtime.guidance_status()})
+
     def start_drone_camera(self, drone_id: str) -> None:
         """Attach a live camera source for a drone so frames flow to the VLA hub
         and the world model.
@@ -927,6 +961,7 @@ class ControlStationServer(ThreadingHTTPServer):
                 batched_vla_timeout_seconds=float(os.environ.get("DRONE_BATCHED_VLA_TIMEOUT", "0.25")),
                 batch_max_wait_seconds=float(os.environ.get("DRONE_BATCH_MAX_WAIT", "0.025")),
                 vla_log_path=os.environ.get("DRONE_VLA_LOG_PATH") or None,
+                policy_commands=_parse_policy_commands(os.environ.get("DRONE_POLICY_COMMANDS")),
             )
         )
         self.runtime.configure_drones(load_runtime_configs())
@@ -1013,6 +1048,9 @@ class ControlStationServer(ThreadingHTTPServer):
         else:
             progress = self.coordinator.step(snapshots)
         self.runtime.apply_mission_progress(progress)
+        if progress.tool_calls:
+            # Low-frequency VLM guidance -> guidance bus -> hi-frequency conditioning.
+            self.runtime.apply_guidance_tool_calls(progress.tool_calls)
         if self.coordinator.mission is not None:
             self.runtime.heartbeat_all()
         return progress
@@ -1380,6 +1418,26 @@ def env_bool(name: str, default: bool) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _parse_policy_commands(raw: str | None) -> dict[str, list[str]] | None:
+    """Parse DRONE_POLICY_COMMANDS: a JSON object of policyId -> command (string
+    or string list) used for select_policy per-policy model processes."""
+
+    if not raw or not raw.strip():
+        return None
+    value = json.loads(raw)
+    if not isinstance(value, dict):
+        raise ValueError("DRONE_POLICY_COMMANDS must be a JSON object")
+    commands: dict[str, list[str]] = {}
+    for policy_id, command in value.items():
+        if isinstance(command, str):
+            commands[str(policy_id)] = shlex.split(command)
+        elif isinstance(command, list) and all(isinstance(item, str) for item in command):
+            commands[str(policy_id)] = command
+        else:
+            raise ValueError("each policy command must be a string or string list")
+    return commands
 
 
 def optional_str(payload: dict[str, object], key: str) -> str | None:

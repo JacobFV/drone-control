@@ -150,6 +150,7 @@ class BatchedVLAController:
     hub: BatchedVLAHub
     drone_id: str
     registry: LiveFrameRegistry | None = None
+    guidance_bus: Any = None
     wait_seconds: float = 0.05
     frame_max_age_seconds: float = 1.0
     mission_context: dict[str, Any] | None = None
@@ -198,6 +199,19 @@ class BatchedVLAController:
                 frame_b64 = base64.b64encode(frame.jpeg).decode("ascii")
                 frame_width = frame.width
                 frame_height = frame.height
+
+        # Fold low-frequency VLM guidance into the per-tick conditioning: a target
+        # (or trajectory waypoint) becomes goalRel, plus a style vector and an
+        # optional policy id that groups the batch.
+        goal_rel: list[float] | None = None
+        style: list[float] = []
+        policy_id: str | None = None
+        if self.guidance_bus is not None:
+            pos = _observation_position(observation)
+            target, style, policy_id = self.guidance_bus.resolve(self.drone_id, pos)
+            if target is not None:
+                goal_rel = [target[0] - pos[0], target[1] - pos[1], target[2] - pos[2]]
+
         return {
             "droneId": self.drone_id,
             "observation": observation.as_dict(),
@@ -208,6 +222,9 @@ class BatchedVLAController:
             "frameJpegB64": frame_b64,
             "frameWidth": frame_width,
             "frameHeight": frame_height,
+            "goalRel": goal_rel,
+            "style": style,
+            "policyId": policy_id,
         }
 
     def set_recent_actions(self, actions: list[DroneAction]) -> None:
@@ -222,6 +239,14 @@ class BatchedVLAController:
         if self._registered:
             self.hub.unregister(self.drone_id)
             self._registered = False
+
+
+def _observation_position(observation: DroneObservation) -> tuple[float, float, float]:
+    pose = observation.pose
+    if pose is not None and getattr(pose, "translation", None):
+        t = pose.translation
+        return (float(t[0]), float(t[1]), float(t[2]))
+    return (0.0, 0.0, 0.0)
 
 
 def _action_schema(action: DroneAction) -> dict[str, Any]:

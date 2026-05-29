@@ -73,4 +73,9 @@ def parse_vlm_output(mission: Mission, summaries: list[dict[str, Any]], result: 
     raw_notes = result.get("notes", [])
     if not isinstance(raw_notes, list) or not all(isinstance(item, str) for item in raw_notes):
         raise TypeError("notes must be a list of strings")
-    return MissionProgress(mission.id, state, assignments=assignments, notes=raw_notes)
+    raw_tool_calls = result.get("toolCalls", [])
+    if not isinstance(raw_tool_calls, list) or not all(isinstance(item, dict) for item in raw_tool_calls):
+        raise TypeError("toolCalls must be a list of objects")
+    return MissionProgress(
+        mission.id, state, assignments=assignments, notes=raw_notes, tool_calls=raw_tool_calls
+    )

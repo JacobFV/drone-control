@@ -56,6 +56,9 @@ class MissionProgress:
     state: str
     assignments: list[Assignment] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    # Low-frequency guidance tool calls (set_target / set_trajectory / set_style /
+    # select_policy) the VLM wants applied to the guidance bus this cycle.
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -63,5 +66,6 @@ class MissionProgress:
             "state": self.state,
             "assignments": [item.as_dict() for item in self.assignments],
             "notes": self.notes,
+            "toolCalls": self.tool_calls,
         }
 
