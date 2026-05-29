@@ -6,3 +6,7 @@ pymeshlab>=2025.7
 # Live cross-drone Gaussian-splat world model (drone_control/perception/live_splat.py).
 # Compiles CUDA kernels JIT on first use; needs nvcc + a torch build matching the GPU arch.
 gsplat>=1.5
+# Object segmentation (drone_control/perception/segmentation.py): YOLO11-seg instance masks.
+ultralytics>=8.3
+# Realtime push transport for the desktop UI (drone_control/ws.py).
+websockets>=13
