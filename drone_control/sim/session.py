@@ -39,6 +39,7 @@ class SimSessionConfig:
     num_drones: int = 4
     task: str = "goto"
     rate_hz: float = 15.0
+    max_speed: bool = False         # run the sim as fast as the CPU allows (ignore rate_hz pacing)
     max_trajectory: int = 400
     render: bool = True
     render_every: int = 2          # render frames every N ticks (CPU bound)
@@ -130,6 +131,8 @@ class SimSession:
             self._record(env)
             self._step += 1
 
+            if self.config.max_speed:
+                continue
             elapsed = time.monotonic() - started
             time.sleep(max(0.0, interval - elapsed))
 
@@ -203,4 +206,15 @@ class SimSession:
         with self._lock:
             if 0 <= index < len(self._tracks):
                 return self._tracks[index].frame
+            return None
+
+    def set_max_speed(self, enabled: bool) -> None:
+        """Toggle realtime pacing vs. run-as-fast-as-possible, live."""
+        with self._lock:
+            self.config.max_speed = bool(enabled)
+
+    def latest_pose(self, index: int) -> dict[str, Any] | None:
+        with self._lock:
+            if 0 <= index < len(self._tracks) and self._tracks[index].poses:
+                return dict(self._tracks[index].poses[-1])
             return None
