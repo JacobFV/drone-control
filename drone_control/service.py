@@ -37,6 +37,7 @@ from drone_control.coordinator.tasks import Mission, MissionProgress
 from drone_control.coordinator.vlm import VLMCoordinator
 from drone_control.runtime.manager import RuntimeManager, RuntimeManagerConfig
 from drone_control.session_service import SessionService
+from drone_control.sim.scenes import list_scenes
 from drone_control.sim.session import SimSession, SimSessionConfig
 from drone_control.store import ControlStationStore
 from drone_control.ws import WebSocketHub
@@ -77,6 +78,9 @@ class ControlStationHandler(BaseHTTPRequestHandler):
         match = re.fullmatch(r"/api/session/drones/([^/]+)/frame", parsed.path)
         if match:
             self.send_jpeg(self.server.session_service.frame(match.group(1)))
+            return
+        if parsed.path == "/api/scenes":
+            self.send_json({"scenes": list_scenes()})
             return
         if parsed.path == "/api/sim/status":
             self.send_json(self.server.sim.status())

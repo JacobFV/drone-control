@@ -38,6 +38,7 @@ _PALETTE = [
 class SimSessionConfig:
     num_drones: int = 4
     task: str = "goto"
+    scene: str = "open_field"       # named scene plan rendered by the synthetic camera
     rate_hz: float = 15.0
     max_speed: bool = False         # run the sim as fast as the CPU allows (ignore rate_hz pacing)
     max_trajectory: int = 400
@@ -89,7 +90,14 @@ class SimSession:
                 params=self.params,
             )
             self._expert = ExpertController(self.params)
-            self._renderer = CameraRenderer(CameraConfig(width=cfg.image_size, height=int(cfg.image_size * 0.75))) if cfg.render else None
+            self._renderer = (
+                CameraRenderer(
+                    CameraConfig(width=cfg.image_size, height=int(cfg.image_size * 0.75)),
+                    scene=cfg.scene,
+                )
+                if cfg.render
+                else None
+            )
             self._tracks = [_DroneTrack(poses=deque(maxlen=cfg.max_trajectory)) for _ in range(cfg.num_drones)]
             self._env.reset()
             self._step = 0
@@ -177,6 +185,7 @@ class SimSession:
             return {
                 "running": self._running,
                 "task": self.config.task,
+                "scene": self.config.scene,
                 "numDrones": self.config.num_drones,
                 "rateHz": self.config.rate_hz,
                 "step": self._step,
