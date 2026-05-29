@@ -84,6 +84,30 @@ class SimEnvironment:
         objs += [(b.label, list(b.center)) for b in dynamic_objects(scene, self.session.sim_time())]
         return objs
 
+    def raycast_cloud(self, drone_id: str):
+        """Ground-truth depth for one drone: ray-cast the scene (ground + boxes,
+        static + moving). Returns (world[K,3], rgb[K,3], depth_jpeg) or None."""
+        import io
+
+        from PIL import Image
+
+        from drone_control.sim.depth_truth import colorize_depth, raycast
+        from drone_control.sim.scenes import build_scene, dynamic_objects
+
+        pose = self.latest_pose(drone_id)
+        cam_rot = self.camera_rot(drone_id)
+        if pose is None or cam_rot is None:
+            return None
+        center = np.array([pose["x"], pose["y"], pose["z"]], dtype=float)
+        scene = build_scene(self.session.config.scene)
+        dyn = dynamic_objects(scene, self.session.sim_time())
+        w, h = self.image_size()
+        world, colors, grid = raycast(scene, dyn, center, cam_rot, self.fov_deg, w, h, stride=3, far=40.0)
+        colored = colorize_depth(grid, near=0.3, far=30.0)
+        buf = io.BytesIO()
+        Image.fromarray(colored, mode="RGB").resize((w, h), Image.NEAREST).save(buf, "JPEG", quality=82)
+        return world, colors, buf.getvalue()
+
     def camera_rot(self, drone_id: str) -> np.ndarray | None:
         """World directions of the camera axes (cols = right, down, forward).
 

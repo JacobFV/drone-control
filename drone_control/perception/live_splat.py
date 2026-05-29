@@ -375,7 +375,7 @@ class LiveSplatEngine:
         viewmat = np.linalg.inv(c2w_world)
         return torch.from_numpy(viewmat.astype(np.float32)).to(self.device)
 
-    def seed_from_points(self, xyz: np.ndarray, rgb: np.ndarray | None = None, scale: float = 0.05) -> int:
+    def seed_from_points(self, xyz: np.ndarray, rgb: np.ndarray | None = None, scale: float = 0.05, opacity: float = -1.0) -> int:
         """Initialise the gaussian set from a point cloud in the shared frame.
 
         ``rgb`` may be 0..1 or 0..255 (auto-normalised). ``scale`` is the initial
@@ -399,7 +399,7 @@ class LiveSplatEngine:
             scales_log = torch.full((count, 3), float(np.log(max(1e-3, scale))), device=self.device)
             quats = torch.zeros((count, 4), device=self.device)
             quats[:, 0] = 1.0
-            opacities_raw = torch.full((count,), -1.0, device=self.device)
+            opacities_raw = torch.full((count,), float(opacity), device=self.device)
             self._params = {
                 "means": torch.nn.Parameter(means),
                 "quats": torch.nn.Parameter(quats),

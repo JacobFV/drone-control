@@ -177,10 +177,19 @@ class DepthEstimator:
     def available(self) -> bool:
         return available()
 
+    def add_points(self, world: np.ndarray, colors: np.ndarray) -> None:
+        """Add externally-computed points (e.g. sim ground-truth raycast)."""
+        with self._lock:
+            self._cloud.add(np.asarray(world, dtype=np.float64), np.asarray(colors))
+
+    def set_depth_jpeg(self, drone_id: str, jpeg: bytes) -> None:
+        with self._lock:
+            self._depth_jpeg[drone_id] = jpeg
+
     def status(self) -> dict[str, Any]:
         with self._lock:
             return {
-                "available": available(),
+                "available": available() or bool(self._depth_jpeg),
                 "reason": unavailable_reason(),
                 "model": self.model_name,
                 "points": self._cloud.total,

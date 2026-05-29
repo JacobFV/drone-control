@@ -348,7 +348,14 @@ class SessionService:
                 continue
             center = np.array([pose["x"], pose["y"], pose["z"]], dtype=float)
             if run_depth:
-                self.depth.process(drone_id, jpeg, pose, cam_rot=cam_rot)
+                # True depth from the scene (the monocular model hallucinates on
+                # abstract sim frames). Yields a correct cloud + splat seed.
+                rc = env.raycast_cloud(drone_id)
+                if rc is not None:
+                    world, colors, depth_jpeg = rc
+                    if world.shape[0]:
+                        self.depth.add_points(world, colors)
+                    self.depth.set_depth_jpeg(drone_id, depth_jpeg)
 
             # Ground-truth detections: other drones + scene landmarks, projected
             # into this view (the sim knows exactly where everything is). Each
@@ -375,28 +382,23 @@ class SessionService:
                 keys.append(key)
             self.segmenter.ingest_truth(drone_id, dets, worlds, keys)
 
-            # Splat keyframe with exact camera extrinsics.
-            if self._splat is not None:
-                quat = rotmat_to_quat_xyzw(cam_rot)
-                self._splat.ingest(
-                    drone_id, jpeg,
-                    {"x": float(center[0]), "y": float(center[1]), "z": float(center[2]), "rotation_xyzw": quat},
-                )
-        # Seed the splat ONCE from an initial metric cloud (good geometry init),
-        # then let the optimizer + densification converge against the keyframes
-        # ingested above. Re-seeding every tick would reset the optimizer and the
-        # splat could never converge to true Gaussian-splat quality.
-        if run_depth and self._splat is not None and not self._seeded:
-            xyz, rgb = self.depth.cloud_arrays()
-            if xyz.shape[0] >= 1500:
-                if xyz.shape[0] > 60_000:  # cap the init set; densify grows it
-                    idx = np.linspace(0, xyz.shape[0] - 1, 60_000).astype(int)
-                    xyz, rgb = xyz[idx], rgb[idx]
-                try:
-                    self._splat.seed_from_points(xyz, rgb, scale=0.15)
-                    self._seeded = True
-                except Exception:
-                    pass
+        # The sim world is KNOWN, so the splat is the true coloured cloud rendered
+        # as gaussians — not a photometric reconstruction of the abstract frames
+        # (which corrupts the geometry into blobs). We do NOT ingest camera
+        # keyframes (so the optimizer stays idle) and instead re-seed from the
+        # growing true cloud, capped + solid, every few seconds as coverage grows.
+        if run_depth and self._splat is not None:
+            self._sim_reseed = getattr(self, "_sim_reseed", 0) + 1
+            if self._sim_reseed % 4 == 1:   # ~ every 4 depth ticks
+                xyz, rgb = self.depth.cloud_arrays()
+                if xyz.shape[0] >= 4000:
+                    if xyz.shape[0] > 200_000:
+                        idx = np.linspace(0, xyz.shape[0] - 1, 200_000).astype(int)
+                        xyz, rgb = xyz[idx], rgb[idx]
+                    try:
+                        self._splat.seed_from_points(xyz, rgb, scale=0.10, opacity=0.9)
+                    except Exception:
+                        pass
 
     def _recorder_loop(self) -> None:
         if not self._recording or self._session_dir is None:
