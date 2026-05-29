@@ -491,6 +491,28 @@ class RuntimeManager:
         with self._lock:
             return list(self._runtimes)
 
+    def trajectories(self, limit: int = 400) -> list[dict[str, Any]]:
+        """Per-drone recent pose tracks for the UI (real-runtime counterpart of
+        the sim session's trajectories)."""
+
+        palette = [
+            "#7fd1ff", "#ffd35a", "#8be0a0", "#f0a39d", "#c9a3ff",
+            "#ff9f5a", "#5ad8d8", "#e069c8", "#9ad84a", "#6a9bff",
+        ]
+        with self._lock:
+            items = list(self._runtimes.items())
+        out: list[dict[str, Any]] = []
+        for index, (drone_id, runtime) in enumerate(items):
+            out.append(
+                {
+                    "droneId": drone_id,
+                    "color": palette[index % len(palette)],
+                    "goal": None,
+                    "poses": runtime.trajectory(limit),
+                }
+            )
+        return out
+
     def event_stream(self, *, since: int = 0) -> dict[str, Any]:
         self._collect_events()
         events = [event for event in self._events if int(event["seq"]) > since]

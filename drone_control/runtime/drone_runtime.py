@@ -151,6 +151,27 @@ class DroneRuntime:
                 last_action=self._action_history[-1] if self._action_history else None,
             )
 
+    def trajectory(self, limit: int = 400) -> list[dict[str, Any]]:
+        """Recent pose track from the observation history (for the UI 3D view)."""
+
+        poses: list[dict[str, Any]] = []
+        with self._lock:
+            history = list(self._history)[-limit:]
+        for obs in history:
+            pose = obs.pose
+            if pose is None or not getattr(pose, "translation", None):
+                continue
+            t = pose.translation
+            rot = pose.rotation_xyzw or (0.0, 0.0, 0.0, 1.0)
+            poses.append(
+                {
+                    "x": float(t[0]), "y": float(t[1]), "z": float(t[2]),
+                    "qw": float(rot[3]), "qx": float(rot[0]), "qy": float(rot[1]), "qz": float(rot[2]),
+                    "frameIndex": pose.frame_index,
+                }
+            )
+        return poses
+
     def drain_events(self, limit: int = 100) -> list[RuntimeEvent]:
         events: list[RuntimeEvent] = []
         for _ in range(max(0, limit)):

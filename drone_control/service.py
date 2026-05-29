@@ -37,6 +37,7 @@ from drone_control.coordinator.scheduler import CoordinatorScheduler
 from drone_control.coordinator.tasks import Mission, MissionProgress
 from drone_control.coordinator.vlm import VLMCoordinator
 from drone_control.runtime.manager import RuntimeManager, RuntimeManagerConfig
+from drone_control.sim.session import SimSession, SimSessionConfig
 from drone_control.store import ControlStationStore
 
 
@@ -68,6 +69,24 @@ class ControlStationHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/guidance/status":
             self.send_json({"guidance": self.server.runtime.guidance_status()})
+            return
+        if parsed.path == "/api/sim/status":
+            self.send_json(self.server.sim.status())
+            return
+        if parsed.path == "/api/sim/trajectories":
+            self.send_json(self.server.sim.trajectories())
+            return
+        match = re.fullmatch(r"/api/sim/drones/([0-9]+)/frame", parsed.path)
+        if match:
+            self.send_jpeg(self.server.sim.frame(int(match.group(1))))
+            return
+        if parsed.path == "/api/runtime/trajectories":
+            self.send_json({"drones": self.server.runtime.trajectories()})
+            return
+        match = re.fullmatch(r"/api/runtime/drones/([^/]+)/frame", parsed.path)
+        if match:
+            frame = self.server.runtime.frame_registry.latest(match.group(1))
+            self.send_jpeg(frame.jpeg if frame is not None else None)
             return
         if parsed.path == "/api/world/splat/snapshot":
             self.serve_world_snapshot()
@@ -359,6 +378,23 @@ class ControlStationHandler(BaseHTTPRequestHandler):
                 return
             self.send_json(self.server.runtime_status())
             return
+        if parsed.path == "/api/sim/start":
+            payload = self.read_json()
+            cfg = SimSessionConfig(
+                num_drones=int(payload.get("numDrones") or 4),
+                task=str(payload.get("task") or "goto"),
+                rate_hz=float(payload.get("rateHz") or 15.0),
+                render=bool(payload.get("render", True)),
+            )
+            try:
+                self.send_json(self.server.sim.start(cfg))
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+        if parsed.path == "/api/sim/stop":
+            self.send_json(self.server.sim.stop())
+            return
+
         if parsed.path == "/api/guidance/tools":
             payload = self.read_json()
             calls = payload.get("calls") or payload.get("toolCalls") or []
@@ -554,6 +590,18 @@ class ControlStationHandler(BaseHTTPRequestHandler):
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "model/vnd.gaussian-splat")
         self.send_header("Content-Length", str(len(data)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def send_jpeg(self, data: bytes | None) -> None:
+        if not data:
+            self.send_json({"error": "no frame"}, status=HTTPStatus.NOT_FOUND)
+            return
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(data)
@@ -965,6 +1013,7 @@ class ControlStationServer(ThreadingHTTPServer):
             )
         )
         self.runtime.configure_drones(load_runtime_configs())
+        self.sim = SimSession()
         self.coordinator = CoordinatorScheduler(tick_hz=float(os.environ.get("DRONE_COORDINATOR_HZ", "1")))
         self.vlm = make_vlm_coordinator()
         self.wifi_previous: dict[str, str] = {}
@@ -1203,6 +1252,7 @@ class ControlStationServer(ThreadingHTTPServer):
         self.manual_thread.join(timeout=1.0)
         self.autonomy_loop_running = False
         self.autonomy_thread.join(timeout=1.0)
+        self.sim.stop()
         self.runtime.stop_all()
         self.runtime.stop_world_model()
         self.runtime.close_vla()
