@@ -342,12 +342,14 @@ class SessionService:
                 self.depth.process(drone_id, jpeg, pose, cam_rot=cam_rot)
 
             # Ground-truth detections: other drones + scene landmarks, projected
-            # into this view (the sim knows exactly where everything is).
-            candidates = [("drone", p) for other, p in positions.items() if other != drone_id]
-            candidates += scene_objects
+            # into this view (the sim knows exactly where everything is). Each
+            # carries a stable key so its world-object id persists across frames.
+            candidates = [(f"drone:{other}", "drone", p) for other, p in positions.items() if other != drone_id]
+            candidates += [(f"scene:{i}", label, p) for i, (label, p) in enumerate(scene_objects)]
             dets: list[ScreenDetection] = []
             worlds: list[list[float]] = []
-            for label, p in candidates:
+            keys: list[str] = []
+            for key, label, p in candidates:
                 rel = np.array(p, dtype=float) - center
                 zc = float(rel @ cam_rot[:, 2])
                 if zc <= 0.3:
@@ -361,7 +363,8 @@ class SessionService:
                     ScreenDetection(label, 0.99, [u - size / 2, v - size / 2, size, size], [u, v], [], w, h)
                 )
                 worlds.append(list(p))
-            self.segmenter.ingest_truth(drone_id, dets, worlds)
+                keys.append(key)
+            self.segmenter.ingest_truth(drone_id, dets, worlds, keys)
 
             # Splat keyframe with exact camera extrinsics.
             if self._splat is not None:

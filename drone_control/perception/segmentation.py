@@ -134,7 +134,8 @@ class Segmenter:
 
         self._lock = threading.RLock()
         self._screen: dict[str, list[ScreenDetection]] = {}
-        self._objects: list[WorldObject] = []
+        self._objects: list[WorldObject] = []          # proximity-fused (model)
+        self._truth: dict[str, WorldObject] = {}       # stable-keyed (sim ground truth)
         self._next_object_id = 1
 
     # -- availability ------------------------------------------------------
@@ -252,17 +253,34 @@ class Segmenter:
         drone_id: str,
         detections: list[ScreenDetection],
         world_points: list[Any],
+        keys: list[str],
     ) -> None:
         """Inject ground-truth detections + known world positions (simulator).
 
-        Bypasses the model and depth back-projection: the sim knows exactly where
-        objects are, so screen detections and world objects are exact.
+        Each object carries a stable ``key`` (e.g. ``scene:3`` / ``drone:sim-1``)
+        so its id and identity persist across frames — no proximity fusion, no
+        id churn. Screen detections and world positions are exact.
         """
         now = time.time()
         with self._lock:
             self._screen[drone_id] = list(detections)
-            for det, world in zip(detections, world_points):
-                self._fuse(drone_id, det.cls, np.asarray(world, dtype=float), det.score, now)
+            for det, world, key in zip(detections, world_points, keys):
+                obj = self._truth.get(key)
+                if obj is None:
+                    self._truth[key] = WorldObject(
+                        object_id=self._next_object_id,
+                        cls=det.cls,
+                        centroid=np.asarray(world, dtype=float),
+                        drones={drone_id},
+                        score=det.score,
+                        last_seen=now,
+                    )
+                    self._next_object_id += 1
+                else:
+                    obj.centroid = np.asarray(world, dtype=float)  # exact, no drift
+                    obj.count += 1
+                    obj.drones.add(drone_id)
+                    obj.last_seen = now
             if len(self._objects) > self.max_objects:
                 self._objects.sort(key=lambda o: o.last_seen, reverse=True)
                 self._objects = self._objects[: self.max_objects]
@@ -323,12 +341,13 @@ class Segmenter:
 
     def world_objects(self) -> list[dict[str, Any]]:
         with self._lock:
-            return [obj.as_dict() for obj in self._objects]
+            return [obj.as_dict() for obj in self._objects] + [obj.as_dict() for obj in self._truth.values()]
 
     def reset(self) -> None:
         with self._lock:
             self._screen.clear()
             self._objects.clear()
+            self._truth.clear()
             self._next_object_id = 1
 
 
