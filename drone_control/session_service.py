@@ -96,6 +96,7 @@ class SessionService:
                         num_drones=int(options.get("numDrones") or 4),
                         task=str(options.get("task") or "goto"),
                         scene=str(options.get("scene") or "open_field"),
+                        camera_noise=options.get("cameraNoise", "medium"),
                         rate_hz=float(options.get("rateHz") or 15.0),
                         max_speed=bool(options.get("maxSpeed", False)),
                         render=bool(options.get("render", True)),

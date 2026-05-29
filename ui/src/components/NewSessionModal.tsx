@@ -23,6 +23,7 @@ export function NewSessionModal() {
   const [numDrones, setNumDrones] = useState(4);
   const [task, setTask] = useState("goto");
   const [rateHz, setRateHz] = useState(15);
+  const [cameraNoise, setCameraNoise] = useState("medium");
   const [speed, setSpeed] = useState<"realtime" | "max">("realtime");
   const [worldModel, setWorldModel] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -40,7 +41,7 @@ export function NewSessionModal() {
     setBusy(true);
     const options =
       kind === "sim"
-        ? { numDrones, task, scene, rateHz, maxSpeed: speed === "max", record: true }
+        ? { numDrones, task, scene, rateHz, cameraNoise, maxSpeed: speed === "max", record: true }
         : { worldModel, record: true };
     const result = await api.sessionStart(kind, `${kind} session`, options);
     setBusy(false);
@@ -97,6 +98,14 @@ export function NewSessionModal() {
               </Field>
               <Field label="Rate (Hz)">
                 <input type="number" min={1} max={120} value={rateHz} onChange={(e) => setRateHz(Number(e.target.value))} />
+              </Field>
+              <Field label="Camera noise">
+                <select value={cameraNoise} onChange={(e) => setCameraNoise(e.target.value)}>
+                  <option value="off">Off (clean)</option>
+                  <option value="low">Low</option>
+                  <option value="medium">Medium (OV2640)</option>
+                  <option value="high">High</option>
+                </select>
               </Field>
               <Field label="Speed">
                 <SegmentedControl

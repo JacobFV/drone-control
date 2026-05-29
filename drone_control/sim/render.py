@@ -20,7 +20,7 @@ from .dynamics import quat_to_rotmat
 from .scenes import Box, Scene, build_scene
 
 try:
-    from PIL import Image, ImageDraw
+    from PIL import Image, ImageDraw, ImageFilter
 
     _PIL = True
 except Exception:  # pragma: no cover
@@ -38,16 +38,60 @@ class CameraConfig:
     jpeg_quality: int = 80
 
 
+@dataclass(slots=True)
+class CameraNoise:
+    """Sensor-realism model approximating cheap CMOS modules (OV2640 etc.):
+    read + shot (signal-dependent) noise, chroma noise, vignetting, a touch of
+    blur, per-frame white-balance drift, and hard JPEG compression."""
+
+    enabled: bool = True
+    read_sigma: float = 6.0       # additive luma noise (0..255 scale)
+    shot_scale: float = 0.06      # signal-dependent (shot) noise
+    chroma_sigma: float = 8.0     # per-channel colour noise
+    vignette: float = 0.35        # corner darkening strength (0..1)
+    blur_sigma: float = 0.6       # gaussian blur radius (px)
+    wb_jitter: float = 0.04       # white-balance gain jitter
+    jpeg_quality: int = 30        # OV2640 compresses hard
+
+    _PRESETS = {
+        "off": None,
+        "low": dict(read_sigma=3.0, shot_scale=0.03, chroma_sigma=4.0, vignette=0.2, blur_sigma=0.3, wb_jitter=0.02, jpeg_quality=45),
+        "medium": dict(read_sigma=6.0, shot_scale=0.06, chroma_sigma=8.0, vignette=0.35, blur_sigma=0.6, wb_jitter=0.04, jpeg_quality=30),
+        "high": dict(read_sigma=11.0, shot_scale=0.11, chroma_sigma=15.0, vignette=0.5, blur_sigma=1.0, wb_jitter=0.07, jpeg_quality=20),
+    }
+
+    @classmethod
+    def from_spec(cls, spec) -> "CameraNoise | None":
+        if spec is None or spec is False:
+            return None
+        if isinstance(spec, str):
+            preset = cls._PRESETS.get(spec.lower(), cls._PRESETS["medium"] if spec else None)
+            return cls(**preset) if preset else None
+        if isinstance(spec, dict):
+            if spec.get("enabled") is False:
+                return None
+            fields = {k: spec[k] for k in spec if k in cls.__slots__ and k != "enabled"}
+            return cls(**fields)
+        return None
+
+
 # Per-face shading factors (top brightest, bottom darkest) for box faces.
 _FACE_SHADE = {"top": 1.0, "side_x": 0.82, "side_y": 0.68, "bottom": 0.5}
 
 
 class CameraRenderer:
-    def __init__(self, config: CameraConfig | None = None, scene: Scene | str | None = None) -> None:
+    def __init__(
+        self,
+        config: CameraConfig | None = None,
+        scene: Scene | str | None = None,
+        noise: "CameraNoise | str | dict | None" = None,
+    ) -> None:
         if not _PIL:
             raise RuntimeError("Pillow is required for the sim renderer")
         self.config = config or CameraConfig()
         self.scene = scene if isinstance(scene, Scene) else build_scene(scene)
+        self.noise = noise if isinstance(noise, CameraNoise) else CameraNoise.from_spec(noise)
+        self._rng = np.random.default_rng()
         self.config.far = max(self.config.far, self.scene.far)
         self.focal = (self.config.width / 2.0) / np.tan(np.deg2rad(self.config.fov_deg) / 2.0)
         self.cx = self.config.width / 2.0
@@ -117,9 +161,40 @@ class CameraRenderer:
             draw.ellipse([pg[0] - rad, pg[1] - rad, pg[0] + rad, pg[1] + rad], outline=(255, 60, 220), width=2)
             draw.line([self.cx, self.cy, pg[0], pg[1]], fill=(255, 60, 220), width=1)
 
+        quality = cfg.jpeg_quality
+        if self.noise is not None and self.noise.enabled:
+            img = self._apply_noise(img)
+            quality = self.noise.jpeg_quality
         buffer = io.BytesIO()
-        img.save(buffer, format="JPEG", quality=cfg.jpeg_quality)
+        img.save(buffer, format="JPEG", quality=quality)
         return buffer.getvalue()
+
+    def _apply_noise(self, img: "Image.Image") -> "Image.Image":
+        n = self.noise
+        arr = np.asarray(img, dtype=np.float32)
+        h, w = arr.shape[0], arr.shape[1]
+        # Signal-dependent (shot) + read noise.
+        sigma = n.read_sigma + n.shot_scale * np.sqrt(np.clip(arr, 0, 255) * 255.0)
+        arr = arr + self._rng.normal(0.0, 1.0, arr.shape).astype(np.float32) * sigma
+        # Per-channel chroma noise.
+        if n.chroma_sigma > 0:
+            arr += self._rng.normal(0.0, n.chroma_sigma, (h, w, 3)).astype(np.float32)
+        # White-balance drift (per-frame gains).
+        if n.wb_jitter > 0:
+            gains = 1.0 + self._rng.normal(0.0, n.wb_jitter, 3).astype(np.float32)
+            arr *= gains
+        # Vignette (radial corner darkening).
+        if n.vignette > 0:
+            ys, xs = np.mgrid[0:h, 0:w]
+            cx, cy = (w - 1) / 2.0, (h - 1) / 2.0
+            r = np.sqrt(((xs - cx) / cx) ** 2 + ((ys - cy) / cy) ** 2) / np.sqrt(2.0)
+            mask = (1.0 - n.vignette * (r ** 2)).astype(np.float32)
+            arr *= mask[..., None]
+        arr = np.clip(arr, 0, 255).astype(np.uint8)
+        out = Image.fromarray(arr, mode="RGB")
+        if n.blur_sigma > 0:
+            out = out.filter(ImageFilter.GaussianBlur(radius=float(n.blur_sigma)))
+        return out
 
     def _fill_sky(self, img: "Image.Image", draw: "ImageDraw.ImageDraw", forward, up, right) -> None:
         # Vertical gradient (sky for outdoor, ceiling tint for indoor) so the

@@ -39,6 +39,7 @@ class SimSessionConfig:
     num_drones: int = 4
     task: str = "goto"
     scene: str = "open_field"       # named scene plan rendered by the synthetic camera
+    camera_noise: object = "medium" # OV2640-style sensor noise: off|low|medium|high or dict
     rate_hz: float = 15.0
     max_speed: bool = False         # run the sim as fast as the CPU allows (ignore rate_hz pacing)
     max_trajectory: int = 400
@@ -94,6 +95,7 @@ class SimSession:
                 CameraRenderer(
                     CameraConfig(width=cfg.image_size, height=int(cfg.image_size * 0.75)),
                     scene=cfg.scene,
+                    noise=cfg.camera_noise,
                 )
                 if cfg.render
                 else None
@@ -186,6 +188,7 @@ class SimSession:
                 "running": self._running,
                 "task": self.config.task,
                 "scene": self.config.scene,
+                "cameraNoise": self.config.camera_noise,
                 "numDrones": self.config.num_drones,
                 "rateHz": self.config.rate_hz,
                 "step": self._step,
