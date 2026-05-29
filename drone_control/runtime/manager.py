@@ -209,6 +209,20 @@ class RuntimeManager:
             )
         )
 
+    def set_batched_vla_command(self, command: list[str] | None) -> None:
+        """Swap the batched VLA model process (policy selection). Tears down the
+        existing client so the next control window uses the new policy. None
+        disables the medium tier entirely (no fallback)."""
+        with self._lock:
+            self.config.batched_vla_command = command
+            old = self._vla_client
+            self._vla_client = None
+        if old is not None and hasattr(old, "close"):
+            try:
+                old.close()
+            except Exception:
+                pass
+
     def _ensure_vla_hub(self) -> BatchedVLAHub:
         with self._lock:
             if self._vla_hub is None:

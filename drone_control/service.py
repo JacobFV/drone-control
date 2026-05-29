@@ -24,7 +24,7 @@ from drone_control.discovery import connect_wifi as platform_connect_wifi
 from drone_control.discovery import current_wifi_connection as platform_current_wifi_connection
 from drone_control.discovery import default_wifi_interface, platform_network_summary
 from drone_control.discovery import reconnect_wifi as platform_reconnect_wifi
-from drone_control.discovery import scan_access_points, wifi_interfaces
+from drone_control.discovery import scan_access_points, serial_bridges, wifi_interfaces
 from drone_control.intrinsics import load_intrinsics
 from drone_control.live_video import DirectoryFrameSource, LiveDroneFrameSource, LiveDroneFrameSourceConfig, mjpeg_chunks
 from drone_control.manual_control import ManualControlConfig, ManualControlSession
@@ -37,6 +37,7 @@ from drone_control.coordinator.scheduler import CoordinatorScheduler
 from drone_control.coordinator.tasks import Mission, MissionProgress
 from drone_control.coordinator.vlm import VLMCoordinator
 from drone_control.coordinator.llm import LLMConfig, LLMDirector
+from drone_control.models import ModelStore
 from drone_control.runtime.manager import RuntimeManager, RuntimeManagerConfig
 from drone_control.session_service import SessionService
 from drone_control.sim.scenes import list_scenes
@@ -76,6 +77,9 @@ class ControlStationHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/coordinator/config":
             self.send_json(self.server.coordinator_config())
+            return
+        if parsed.path == "/api/models":
+            self.send_json(self.server.models.list())
             return
         if parsed.path == "/api/session/status":
             self.send_json(self.server.session_service.status())
@@ -151,6 +155,14 @@ class ControlStationHandler(BaseHTTPRequestHandler):
                 self.send_json({"interfaces": [], "error": str(exc)}, status=HTTPStatus.SERVICE_UNAVAILABLE)
                 return
             self.send_json({"interfaces": interfaces})
+            return
+        if parsed.path == "/api/serial/bridges":
+            try:
+                bridges = [asdict(item) for item in serial_bridges()]
+            except OSError as exc:
+                self.send_json({"bridges": [], "error": str(exc)}, status=HTTPStatus.SERVICE_UNAVAILABLE)
+                return
+            self.send_json({"bridges": bridges, "platform": platform.system() or "Unknown"})
             return
         if parsed.path == "/api/wifi/access-points":
             query = parse_qs(parsed.query)
@@ -504,6 +516,21 @@ class ControlStationHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/coordinator/config":
             self.send_json(self.server.set_coordinator_config(self.read_json()))
+            return
+
+        if parsed.path == "/api/models/select":
+            payload = self.read_json()
+            try:
+                self.send_json(self.server.models.select(optional_str(payload, "id")))
+            except (KeyError, RuntimeError) as exc:
+                self.send_json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
+            return
+        match = re.fullmatch(r"/api/models/([^/]+)/download", parsed.path)
+        if match:
+            try:
+                self.send_json({**self.server.models.download(match.group(1)), **self.server.models.list()})
+            except (KeyError, RuntimeError) as exc:
+                self.send_json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
             return
 
         match = re.fullmatch(r"/api/sessions/([^/]+)/pose/compute", parsed.path)
@@ -982,7 +1009,7 @@ class ControlStationServer(ThreadingHTTPServer):
                 enable_io=env_bool("DRONE_RUNTIME_ENABLE_IO", False),
                 local_vla_command=env_command("DRONE_LOCAL_VLA_COMMAND"),
                 local_vla_timeout_seconds=float(os.environ.get("DRONE_LOCAL_VLA_TIMEOUT", "0.25")),
-                batched_vla_command=env_command("DRONE_BATCHED_VLA_COMMAND") or default_batched_vla_command(),
+                batched_vla_command=env_command("DRONE_BATCHED_VLA_COMMAND"),
                 batched_vla_timeout_seconds=float(os.environ.get("DRONE_BATCHED_VLA_TIMEOUT", "0.25")),
                 batch_max_wait_seconds=float(os.environ.get("DRONE_BATCH_MAX_WAIT", "0.025")),
                 vla_log_path=os.environ.get("DRONE_VLA_LOG_PATH") or None,
@@ -990,6 +1017,9 @@ class ControlStationServer(ThreadingHTTPServer):
             )
         )
         self.runtime.configure_drones(load_runtime_configs())
+        # VLA policy registry — no default/fallback; a policy must be explicitly
+        # selected (persisted) before the medium tier runs.
+        self.models = ModelStore(REPO_ROOT, self.runtime)
         self.sim = SimSession()
         self.session_service = SessionService(
             store,
@@ -1492,22 +1522,6 @@ def save_llm_config(path: Path, cfg: LLMConfig) -> None:
             indent=2,
         )
     )
-
-
-def default_batched_vla_command() -> list[str] | None:
-    """Auto-use the trained diffusion VLA as the medium-frequency controller when
-    a checkpoint exists, so the VLA tier runs without manual env config."""
-    checkpoint = REPO_ROOT / "runs" / "vla.pt"
-    if not checkpoint.is_file():
-        return None
-    return [
-        sys.executable,
-        str(REPO_ROOT / "tools" / "diffusion_vla_policy.py"),
-        "--checkpoint",
-        str(checkpoint),
-        "--steps",
-        "8",
-    ]
 
 
 def env_command(name: str) -> list[str] | None:
