@@ -54,6 +54,19 @@ body {
 .section-label { font: 600 11px/1.4 var(--mono); text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-dim); margin: 0; }
 .count-badge { font: 600 11px/1 var(--mono); background: var(--bg-3); border: 1px solid var(--line); border-radius: 999px; padding: 3px 8px; color: var(--text-dim); }
 
+/* ----- Selection bar + unit rows ----- */
+.select-bar { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-bottom: 1px solid var(--line); }
+.select-count { font: 11px/1 var(--mono); color: var(--accent); }
+.unit-check { accent-color: var(--accent); cursor: pointer; flex: none; }
+.unit-main { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; background: none; border: none; color: var(--text); cursor: pointer; text-align: left; padding: 0; }
+.drone-row.is-primary { outline: 1px solid var(--accent); outline-offset: -1px; border-radius: 6px; }
+.unit-status { display: flex; gap: 12px; padding: 0 12px 6px 34px; font: 10px/1.4 var(--mono); color: var(--text-dim); }
+.status-dot.is-armed { background: var(--warn); box-shadow: 0 0 6px rgba(216,162,58,0.7); }
+.traj-input { width: 100%; background: var(--bg); border: 1px solid var(--line); color: var(--text); border-radius: 5px; padding: 6px 8px; font: 11px var(--mono); resize: vertical; }
+.sidebar-header.sub { background: var(--bg-3); }
+.sim-row { cursor: default; gap: 8px; }
+.sim-row:hover { background: none; }
+
 /* ----- Drone tree ----- */
 .tree { padding: 6px; display: flex; flex-direction: column; gap: 2px; }
 .tree-row { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; background: none; border: none; color: var(--text); padding: 8px 10px; border-radius: 6px; cursor: pointer; font-size: 13px; }

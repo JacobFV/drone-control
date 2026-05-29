@@ -33,7 +33,8 @@ interface StationContextValue {
 
   // domain state
   drones: Drone[];
-  selectedDroneId: string;
+  selectedDroneId: string;          // primary focus (review: flights/records)
+  selectedDroneIds: string[];        // operation set (arm/controller/guidance/camera)
   selectedFlightId: string;
   selectedRecordId: string;
   selectedDrone: Drone | undefined;
@@ -65,6 +66,8 @@ interface StationContextValue {
   setSelectedRecordId: (id: string) => void;
   selectDrone: (id: string) => void;
   selectFlight: (droneId: string, flightId: string) => void;
+  setSelectedDroneIds: (ids: string[]) => void;
+  toggleDroneSelected: (id: string) => void;
 
   // refresh / mutations
   refreshState: () => Promise<void>;
@@ -95,6 +98,7 @@ export function StationProvider({ children }: { children: ReactNode }) {
 
   const [drones, setDrones] = useState<Drone[]>([]);
   const [selectedDroneId, setSelectedDroneId] = useState("");
+  const [selectedDroneIds, setSelectedDroneIds] = useState<string[]>([]);
   const [selectedFlightId, setSelectedFlightId] = useState("");
   const [selectedRecordId, setSelectedRecordId] = useState("");
 
@@ -208,12 +212,20 @@ export function StationProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const selectDrone = useCallback((id: string) => {
+    // Plain selection focuses one drone for both review and operations.
     setSelectedDroneId(id);
+    setSelectedDroneIds(id ? [id] : []);
     setSelectedFlightId((prev) => prev);
+  }, []);
+
+  const toggleDroneSelected = useCallback((id: string) => {
+    setSelectedDroneIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+    setSelectedDroneId((prev) => prev || id);
   }, []);
 
   const selectFlight = useCallback((droneId: string, flightId: string) => {
     setSelectedDroneId(droneId);
+    setSelectedDroneIds((prev) => (prev.includes(droneId) ? prev : [droneId]));
     setSelectedFlightId(flightId);
     setSelectedRecordId("");
   }, []);
@@ -252,6 +264,7 @@ export function StationProvider({ children }: { children: ReactNode }) {
     health,
     drones,
     selectedDroneId,
+    selectedDroneIds,
     selectedFlightId,
     selectedRecordId,
     selectedDrone,
@@ -278,6 +291,8 @@ export function StationProvider({ children }: { children: ReactNode }) {
     setSelectedRecordId,
     selectDrone,
     selectFlight,
+    setSelectedDroneIds,
+    toggleDroneSelected,
     refreshState,
     refreshManual,
     refreshSession,

@@ -201,6 +201,7 @@ export const api = {
   getRuntimeTrajectories: () => request<TrajectoriesResult>("GET", "/api/runtime/trajectories"),
 
   // ----- Guidance -----
+  getGuidanceStatus: () => request<{ guidance: Record<string, unknown> }>("GET", "/api/guidance/status"),
   setDroneGuidance: (droneId: string, body: Record<string, unknown>) =>
     request("POST", `/api/guidance/drones/${droneId}`, body),
 };

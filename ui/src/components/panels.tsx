@@ -53,34 +53,44 @@ export function ConnectPanel() {
 const CONTROLLER_MODES = ["disabled", "manual", "autonomy", "vla", "batched_vla"];
 
 export function FlyPanel() {
-  const { selectedDroneId, selectedRuntimeDrone, runtimeStatus, refreshRuntime } = useStation();
-  const armed = Boolean(selectedRuntimeDrone?.safety?.armed);
+  const { selectedDroneId, selectedDroneIds, selectedRuntimeDrone, runtimeStatus, refreshRuntime } = useStation();
 
-  // Heartbeat while armed (mirrors the original 250ms cadence).
+  // Operations apply to the whole selection (falling back to the primary drone).
+  const targets = selectedDroneIds.length ? selectedDroneIds : selectedDroneId ? [selectedDroneId] : [];
+  const armedCount = (runtimeStatus?.drones ?? []).filter(
+    (d) => targets.includes(d.droneId) && d.safety?.armed,
+  ).length;
+
+  // Heartbeat every armed selected drone.
   usePolling(
     () => {
-      if (armed && selectedDroneId) void api.runtimeHeartbeat(selectedDroneId);
+      for (const id of targets) {
+        const rt = runtimeStatus?.drones?.find((d) => d.droneId === id);
+        if (rt?.safety?.armed) void api.runtimeHeartbeat(id);
+      }
     },
     250,
-    armed && Boolean(selectedDroneId),
+    armedCount > 0,
   );
 
-  const act = async (fn: () => Promise<unknown>) => {
-    await fn();
+  const broadcast = async (fn: (id: string) => Promise<unknown>) => {
+    await Promise.all(targets.map((id) => fn(id)));
     await refreshRuntime();
   };
-
   const setAxis = (axis: string, value: number) => {
-    if (selectedDroneId) void api.runtimeAxes(selectedDroneId, { [axis]: value });
+    for (const id of targets) void api.runtimeAxes(id, { [axis]: value });
   };
 
-  if (!selectedDroneId) {
+  if (targets.length === 0) {
     return (
       <Panel title="Fly">
-        <p className="note">Select a drone to control.</p>
+        <p className="note">Select one or more drones (checkboxes in the sidebar) to control.</p>
       </Panel>
     );
   }
+
+  const single = targets.length === 1;
+  const scope = single ? targets[0] : `${targets.length} drones`;
 
   return (
     <>
@@ -88,11 +98,13 @@ export function FlyPanel() {
         title="Runtime"
         right={<Pill tone={runtimeStatus?.running ? "ok" : "default"}>{runtimeStatus?.running ? "Running" : "Stopped"}</Pill>}
       >
+        <p className="note">Acting on <strong>{scope}</strong>.</p>
         <Field label="Controller">
           <select
-            value={selectedRuntimeDrone?.controller ?? "disabled"}
-            onChange={(e) => act(() => api.runtimeSetController(selectedDroneId, e.target.value))}
+            value={single ? selectedRuntimeDrone?.controller ?? "disabled" : ""}
+            onChange={(e) => broadcast((id) => api.runtimeSetController(id, e.target.value))}
           >
+            {!single && <option value="">— set for all —</option>}
             {CONTROLLER_MODES.map((mode) => (
               <option key={mode} value={mode}>
                 {upper(mode)}
@@ -101,42 +113,36 @@ export function FlyPanel() {
           </select>
         </Field>
         <div className="button-row">
-          <Button variant="primary" onClick={() => act(() => api.runtimeStart())}>Start</Button>
-          <Button onClick={() => act(() => api.runtimeStop())}>Stop</Button>
+          <Button variant="primary" onClick={() => broadcast(() => api.runtimeStart())}>Start all</Button>
+          <Button onClick={() => broadcast(() => api.runtimeStop())}>Stop all</Button>
         </div>
-        <KeyValue
-          entries={[
-            { key: "Link", value: `${selectedRuntimeDrone?.linkType ?? "—"} · ${selectedRuntimeDrone?.linkState ?? "—"}` },
-            { key: "Controller", value: selectedRuntimeDrone?.controller },
-            { key: "Safety", value: selectedRuntimeDrone?.safety?.armed ? "armed" : "disarmed" },
-            { key: "Max throttle", value: selectedRuntimeDrone?.constraints?.maxThrottle },
-            { key: "Confidence", value: selectedRuntimeDrone?.observation?.confidence },
-            { key: "Sent", value: selectedRuntimeDrone?.sent },
-            { key: "Errors", value: selectedRuntimeDrone?.errors },
-          ]}
-        />
+        {single && (
+          <KeyValue
+            entries={[
+              { key: "Link", value: `${selectedRuntimeDrone?.linkType ?? "—"} · ${selectedRuntimeDrone?.linkState ?? "—"}` },
+              { key: "Controller", value: selectedRuntimeDrone?.controller },
+              { key: "Safety", value: selectedRuntimeDrone?.safety?.armed ? "armed" : "disarmed" },
+              { key: "Max throttle", value: selectedRuntimeDrone?.constraints?.maxThrottle },
+              { key: "Sent", value: selectedRuntimeDrone?.sent },
+              { key: "Errors", value: selectedRuntimeDrone?.errors },
+            ]}
+          />
+        )}
+        {!single && <KeyValue entries={[{ key: "Armed", value: `${armedCount}/${targets.length}` }]} />}
       </Panel>
 
-      <Panel title="Manual control" right={<Pill tone={armed ? "ok" : "danger"}>{armed ? "Armed" : "Disarmed"}</Pill>}>
+      <Panel title="Manual control" right={<Pill tone={armedCount ? "ok" : "danger"}>{armedCount ? `${armedCount} armed` : "Disarmed"}</Pill>}>
         <div className="button-row">
-          <Button variant="primary" onClick={() => act(() => api.runtimeArm(selectedDroneId))}>Arm</Button>
-          <Button onClick={() => act(() => api.runtimeDisarm(selectedDroneId))}>Disarm</Button>
-          <Button variant="danger" onClick={() => act(() => api.runtimeStopDrone(selectedDroneId))}>Stop</Button>
-          <Button onClick={() => act(() => api.runtimeClearFault(selectedDroneId))}>Clear fault</Button>
+          <Button variant="primary" onClick={() => broadcast((id) => api.runtimeArm(id))}>Arm</Button>
+          <Button onClick={() => broadcast((id) => api.runtimeDisarm(id))}>Disarm</Button>
+          <Button variant="danger" onClick={() => broadcast((id) => api.runtimeStopDrone(id))}>Stop</Button>
+          <Button onClick={() => broadcast((id) => api.runtimeClearFault(id))}>Clear fault</Button>
         </div>
         <ControlPad setAxis={setAxis} />
         <Field label="Throttle">
-          <input
-            type="range"
-            min={0}
-            max={255}
-            defaultValue={128}
-            onChange={(e) => setAxis("throttle", Number(e.target.value))}
-          />
+          <input type="range" min={0} max={255} defaultValue={128} onChange={(e) => setAxis("throttle", Number(e.target.value))} />
         </Field>
-        {selectedRuntimeDrone?.safety?.faultReason && (
-          <p className="note danger">Fault: {selectedRuntimeDrone.safety.faultReason}</p>
-        )}
+        <p className="note">Manual stick input is broadcast to all selected drones.</p>
       </Panel>
     </>
   );
@@ -158,6 +164,104 @@ function ControlPad({ setAxis }: { setAxis: (axis: string, value: number) => voi
       <button className="pad pad-yr" {...hold("yaw", 255)}>↻</button>
       <button className="pad pad-stop" onPointerDown={() => { setAxis("roll", 128); setAxis("pitch", 128); setAxis("yaw", 128); }}>■</button>
     </div>
+  );
+}
+
+// --------------------------------------------------------------------------- //
+// Guidance (per-selection target / trajectory / style / policy)
+// --------------------------------------------------------------------------- //
+
+export function GuidancePanel() {
+  const { selectedDroneId, selectedDroneIds } = useStation();
+  const targets = selectedDroneIds.length ? selectedDroneIds : selectedDroneId ? [selectedDroneId] : [];
+  const [xyz, setXyz] = useState({ x: 0, y: 0, z: 3 });
+  const [trajText, setTrajText] = useState("");
+  const [styleText, setStyleText] = useState("");
+  const [policyId, setPolicyId] = useState("");
+  const [status, setStatus] = useState<Record<string, unknown>>({});
+
+  usePolling(async () => {
+    const result = await api.getGuidanceStatus();
+    if (result) setStatus(result.guidance ?? {});
+  }, 1000);
+
+  const broadcast = async (body: Record<string, unknown>) => {
+    await Promise.all(targets.map((id) => api.setDroneGuidance(id, body)));
+  };
+
+  if (targets.length === 0) {
+    return (
+      <Panel title="Guidance">
+        <p className="note">Select drones to set targets, trajectories, styles, or policies.</p>
+      </Panel>
+    );
+  }
+
+  const setTarget = () => broadcast({ target: [xyz.x, xyz.y, xyz.z] });
+  const clearTarget = () => broadcast({ target: null });
+  const setTrajectory = () => {
+    const waypoints = trajText
+      .split("\n")
+      .map((line) => line.split(",").map((n) => Number(n.trim())))
+      .filter((w) => w.length === 3 && w.every((n) => Number.isFinite(n)));
+    if (waypoints.length) broadcast({ trajectory: waypoints, loop: true });
+  };
+  const setStyleVec = () => {
+    const style = styleText.split(",").map((n) => Number(n.trim())).filter((n) => Number.isFinite(n));
+    broadcast({ style });
+  };
+  const setPolicy = () => broadcast({ policyId: policyId || null });
+
+  return (
+    <Panel title="Guidance" right={<Pill>{targets.length} sel</Pill>}>
+      <Field label="Target X">
+        <input type="number" value={xyz.x} onChange={(e) => setXyz({ ...xyz, x: Number(e.target.value) })} />
+      </Field>
+      <Field label="Target Y">
+        <input type="number" value={xyz.y} onChange={(e) => setXyz({ ...xyz, y: Number(e.target.value) })} />
+      </Field>
+      <Field label="Target Z">
+        <input type="number" value={xyz.z} onChange={(e) => setXyz({ ...xyz, z: Number(e.target.value) })} />
+      </Field>
+      <div className="button-row">
+        <Button variant="primary" onClick={setTarget}>Set target</Button>
+        <Button onClick={clearTarget}>Clear</Button>
+      </div>
+
+      <Field label="Trajectory">
+        <textarea
+          className="traj-input"
+          rows={3}
+          placeholder={"x,y,z per line\n0,0,3\n5,0,3"}
+          value={trajText}
+          onChange={(e) => setTrajText(e.target.value)}
+        />
+      </Field>
+      <div className="button-row">
+        <Button onClick={setTrajectory}>Set looped trajectory</Button>
+      </div>
+
+      <Field label="Style (csv)">
+        <input value={styleText} placeholder="0.5, -0.2" onChange={(e) => setStyleText(e.target.value)} />
+      </Field>
+      <Field label="Policy id">
+        <input value={policyId} placeholder="default" onChange={(e) => setPolicyId(e.target.value)} />
+      </Field>
+      <div className="button-row">
+        <Button onClick={setStyleVec}>Set style</Button>
+        <Button onClick={setPolicy}>Set policy</Button>
+      </div>
+
+      {targets.length === 1 && status[targets[0]] != null && (
+        <KeyValue
+          entries={[
+            { key: "Target", value: JSON.stringify((status[targets[0]] as { target?: unknown }).target) },
+            { key: "Policy", value: (status[targets[0]] as { policyId?: string }).policyId ?? "—" },
+          ]}
+        />
+      )}
+      <p className="note">Applied to {targets.length} drone(s). Low-frequency guidance conditions the hi-frequency batched controller.</p>
+    </Panel>
   );
 }
 
