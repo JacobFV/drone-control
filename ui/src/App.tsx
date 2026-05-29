@@ -4,10 +4,11 @@ import { ReviewGrid } from "./components/ReviewGrid";
 import { SessionPicker } from "./components/SessionPicker";
 import { NewSessionModal } from "./components/NewSessionModal";
 import { FlightPanel } from "./components/panels/FlightPanel";
+import { BrainPanel } from "./components/panels/BrainPanel";
 import { ConnectionsPanel } from "./components/panels/ConnectionsPanel";
 import { ConfigPanel } from "./components/panels/ConfigPanel";
 import { useSession, type RhsTab } from "./store/SessionContext";
-import { ConfigIcon, ConnectionsIcon, FlightIcon, MoonIcon, PanelIcon, PlusIcon, SunIcon } from "./components/icons";
+import { BrainIcon, ConfigIcon, ConnectionsIcon, FlightIcon, MoonIcon, PanelIcon, PlusIcon, SunIcon } from "./components/icons";
 import type { ComponentType, SVGProps } from "react";
 
 type Theme = "dark" | "light";
@@ -26,6 +27,7 @@ function useTheme(): [Theme, () => void] {
 
 const TABS: { id: RhsTab; label: string; Icon: ComponentType<SVGProps<SVGSVGElement> & { size?: number }> }[] = [
   { id: "flight", label: "Flight", Icon: FlightIcon },
+  { id: "brain", label: "Brain", Icon: BrainIcon },
   { id: "connections", label: "Connections", Icon: ConnectionsIcon },
   { id: "config", label: "Config", Icon: ConfigIcon },
 ];
@@ -111,6 +113,7 @@ export function App() {
             </nav>
             <div className="rhs-body">
               {rhsTab === "flight" && <FlightPanel />}
+              {rhsTab === "brain" && <BrainPanel />}
               {rhsTab === "connections" && <ConnectionsPanel />}
               {rhsTab === "config" && <ConfigPanel />}
             </div>

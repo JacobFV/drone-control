@@ -35,6 +35,7 @@ from drone_control.coordinator.http_vlm import HttpVLMClient, HttpVLMConfig
 from drone_control.coordinator.scheduler import CoordinatorScheduler
 from drone_control.coordinator.tasks import Mission, MissionProgress
 from drone_control.coordinator.vlm import VLMCoordinator
+from drone_control.coordinator.llm import LLMConfig, LLMDirector
 from drone_control.runtime.manager import RuntimeManager, RuntimeManagerConfig
 from drone_control.session_service import SessionService
 from drone_control.sim.scenes import list_scenes
@@ -71,6 +72,9 @@ class ControlStationHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/guidance/status":
             self.send_json({"guidance": self.server.runtime.guidance_status()})
+            return
+        if parsed.path == "/api/coordinator/config":
+            self.send_json(self.server.coordinator_config())
             return
         if parsed.path == "/api/session/status":
             self.send_json(self.server.session_service.status())
@@ -495,6 +499,10 @@ class ControlStationHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/mission/stop":
             self.server.coordinator.stop()
             self.send_json(self.server.mission_progress())
+            return
+
+        if parsed.path == "/api/coordinator/config":
+            self.send_json(self.server.set_coordinator_config(self.read_json()))
             return
 
         match = re.fullmatch(r"/api/sessions/([^/]+)/pose/compute", parsed.path)
@@ -988,8 +996,10 @@ class ControlStationServer(ThreadingHTTPServer):
             work_root=self.session_work_root,
             export_root=self.export_root,
         )
-        self.coordinator = CoordinatorScheduler(tick_hz=float(os.environ.get("DRONE_COORDINATOR_HZ", "1")))
-        self.vlm = make_vlm_coordinator()
+        self.coordinator = CoordinatorScheduler(tick_hz=float(os.environ.get("DRONE_COORDINATOR_HZ", "0.2")))
+        self.coordinator_config_path = REPO_ROOT / "config" / "coordinator.local.json"
+        self.llm = LLMDirector(load_llm_config(self.coordinator_config_path))
+        self.vlm = VLMCoordinator(model_step=self.llm.step)
         self.wifi_previous: dict[str, str] = {}
         self.ws_hub = WebSocketHub(
             self.server_address[0],
@@ -1051,7 +1061,8 @@ class ControlStationServer(ThreadingHTTPServer):
                 "enableIo": self.runtime.config.enable_io,
                 "controlHz": self.runtime.config.control_hz,
                 "localVlaConfigured": bool(self.runtime.config.local_vla_command),
-                "internetVlmConfigured": self.vlm.available,
+                "batchedVlaConfigured": bool(self.runtime.config.batched_vla_command),
+                "llmConfigured": self.llm.available,
             },
         }
 
@@ -1094,20 +1105,43 @@ class ControlStationServer(ThreadingHTTPServer):
     def mission_progress(self) -> dict[str, object]:
         return self._advance_mission().as_dict()
 
+    def coordinator_config(self) -> dict[str, object]:
+        return {
+            "config": self.llm.config.as_public_dict(),
+            "lastError": self.llm.last_error,
+            "mission": self.mission_progress(),
+            "guidance": self.runtime.guidance_status(),
+        }
+
+    def set_coordinator_config(self, payload: dict[str, object]) -> dict[str, object]:
+        cfg = self.llm.config
+        cfg.provider = str(payload.get("provider") or cfg.provider)
+        cfg.model = str(payload.get("model") or cfg.model)
+        if "baseUrl" in payload:
+            cfg.base_url = str(payload.get("baseUrl") or "")
+        if payload.get("apiKey"):
+            cfg.api_key = str(payload["apiKey"])
+        if payload.get("temperature") is not None:
+            cfg.temperature = float(payload["temperature"])
+        save_llm_config(self.coordinator_config_path, cfg)
+        return self.coordinator_config()
+
     def _advance_mission(self) -> MissionProgress:
+        # High-level direction comes ONLY from the LLM coordinator — no analytic
+        # fallback. If no model is configured, the mission simply idles.
         snapshots = self.runtime.snapshot_objects()
-        if self.coordinator.mission is not None and self.vlm.available:
-            progress = self.vlm.step(self.coordinator.mission, [snapshot.as_dict() for snapshot in snapshots])
-            if progress.state == "faulted":
-                fallback = self.coordinator.step(snapshots)
-                progress = type(progress)(
-                    mission_id=progress.mission_id,
-                    state=fallback.state,
-                    assignments=fallback.assignments,
-                    notes=[*progress.notes, "vlm_failed_using_scheduler", *fallback.notes],
-                )
-        else:
-            progress = self.coordinator.step(snapshots)
+        mission = self.coordinator.mission
+        if mission is None:
+            return MissionProgress(mission_id="", state="idle", assignments=[], notes=[], tool_calls=[])
+        if not self.vlm.available:
+            return MissionProgress(
+                mission_id=mission.id,
+                state="unavailable",
+                assignments=[],
+                notes=["no LLM coordinator configured — set a provider + API key in the Brain tab"],
+                tool_calls=[],
+            )
+        progress = self.vlm.step(mission, [snapshot.as_dict() for snapshot in snapshots])
         self.runtime.apply_mission_progress(progress)
         if progress.tool_calls:
             # Low-frequency VLM guidance -> guidance bus -> hi-frequency conditioning.
@@ -1408,18 +1442,43 @@ def load_runtime_configs() -> list[object]:
     return []
 
 
-def make_vlm_coordinator() -> VLMCoordinator:
-    endpoint = os.environ.get("DRONE_VLM_ENDPOINT", "")
-    if not endpoint:
-        return VLMCoordinator()
-    client = HttpVLMClient(
-        HttpVLMConfig(
-            endpoint=endpoint,
-            api_key=os.environ.get("DRONE_VLM_API_KEY", ""),
-            timeout_seconds=float(os.environ.get("DRONE_VLM_TIMEOUT", "5")),
+def load_llm_config(path: Path) -> LLMConfig:
+    """LLM director config from env defaults, overlaid by a local JSON file."""
+    cfg = LLMConfig(
+        provider=os.environ.get("DRONE_LLM_PROVIDER", "anthropic"),
+        model=os.environ.get("DRONE_LLM_MODEL", "claude-opus-4-8"),
+        api_key=os.environ.get("DRONE_LLM_API_KEY", ""),
+        base_url=os.environ.get("DRONE_LLM_BASE_URL", ""),
+    )
+    if path.is_file():
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return cfg
+        cfg.provider = str(data.get("provider", cfg.provider))
+        cfg.model = str(data.get("model", cfg.model))
+        cfg.base_url = str(data.get("baseUrl", cfg.base_url))
+        if data.get("apiKey"):
+            cfg.api_key = str(data["apiKey"])
+        if data.get("temperature") is not None:
+            cfg.temperature = float(data["temperature"])
+    return cfg
+
+
+def save_llm_config(path: Path, cfg: LLMConfig) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "provider": cfg.provider,
+                "model": cfg.model,
+                "baseUrl": cfg.base_url,
+                "apiKey": cfg.api_key,
+                "temperature": cfg.temperature,
+            },
+            indent=2,
         )
     )
-    return VLMCoordinator(model_step=client.step)
 
 
 def env_command(name: str) -> list[str] | None:

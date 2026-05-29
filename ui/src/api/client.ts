@@ -127,7 +127,30 @@ export const api = {
   // ----- Guidance -----
   setDroneGuidance: (droneId: string, body: Record<string, unknown>) =>
     request("POST", `/api/guidance/drones/${droneId}`, body),
+
+  // ----- LLM coordinator (high-level director) -----
+  getCoordinatorConfig: () => request<CoordinatorConfigResult>("GET", "/api/coordinator/config"),
+  setCoordinatorConfig: (body: Record<string, unknown>) =>
+    request<CoordinatorConfigResult>("POST", "/api/coordinator/config", body),
+  missionStart: (objective: string) =>
+    request("POST", "/api/mission/start", { objective, controllerMode: "batched_vla" }),
+  missionStop: () => request("POST", "/api/mission/stop", {}),
 };
+
+export interface CoordinatorConfigResult {
+  config: {
+    provider: string;
+    model: string;
+    baseUrl: string;
+    temperature: number;
+    maxTokens: number;
+    hasApiKey: boolean;
+    configured: boolean;
+  };
+  lastError?: string | null;
+  mission?: { state?: string; notes?: string[]; toolCalls?: { name: string; arguments: Record<string, unknown> }[] };
+  guidance?: Record<string, unknown>;
+}
 
 /** Service-relative live camera frame path for a drone in the active session. */
 export function sessionFramePath(droneId: string): string {

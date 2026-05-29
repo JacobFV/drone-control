@@ -12,7 +12,7 @@ import { useLiveSnapshot } from "../api/socket";
 import { usePolling } from "../lib/usePolling";
 import type { ConfigStatus, NetworkSummary, StationState, WsSnapshot } from "../api/types";
 
-export type RhsTab = "flight" | "connections" | "config";
+export type RhsTab = "flight" | "brain" | "connections" | "config";
 
 interface SessionContextValue {
   health: ServiceHealth;
