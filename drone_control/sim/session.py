@@ -152,7 +152,9 @@ class SimSession:
         goals = env.goals.detach().cpu()
         frames = None
         if self._renderer is not None and self._step % max(1, self.config.render_every) == 0:
-            frames = self._renderer.render(pos.numpy(), quat.numpy(), goals.numpy())
+            frames = self._renderer.render(
+                pos.numpy(), quat.numpy(), goals.numpy(), t=self._step * self.params.dt
+            )
         with self._lock:
             for i, track in enumerate(self._tracks):
                 track.poses.append(
@@ -219,6 +221,11 @@ class SimSession:
             if 0 <= index < len(self._tracks):
                 return self._tracks[index].frame
             return None
+
+    def sim_time(self) -> float:
+        """Elapsed simulated time (s) — drives moving scene objects."""
+        with self._lock:
+            return self._step * self.params.dt
 
     def set_max_speed(self, enabled: bool) -> None:
         """Toggle realtime pacing vs. run-as-fast-as-possible, live."""

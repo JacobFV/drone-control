@@ -17,7 +17,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from .dynamics import quat_to_rotmat
-from .scenes import Box, Scene, build_scene
+from .scenes import Box, Scene, build_scene, dynamic_objects
 
 try:
     from PIL import Image, ImageDraw, ImageFilter
@@ -104,15 +104,20 @@ class CameraRenderer:
         quat_wxyz: np.ndarray,
         goals: np.ndarray,
         indices: list[int] | None = None,
+        t: float = 0.0,
     ) -> list[bytes]:
         pos = np.asarray(pos, dtype=np.float64)
         quat_wxyz = np.asarray(quat_wxyz, dtype=np.float64)
         goals = np.asarray(goals, dtype=np.float64)
         rot = _rotmats(quat_wxyz)
+        # Moving-object faces for this instant (shared across all drone views).
+        dyn_quads = []
+        for box in dynamic_objects(self.scene, t):
+            dyn_quads.extend(_box_faces(box))
         idxs = list(range(pos.shape[0])) if indices is None else indices
-        return [self._render_one(i, pos, rot, goals) for i in idxs]
+        return [self._render_one(i, pos, rot, goals, dyn_quads) for i in idxs]
 
-    def _render_one(self, i: int, pos: np.ndarray, rot: np.ndarray, goals: np.ndarray) -> bytes:
+    def _render_one(self, i: int, pos: np.ndarray, rot: np.ndarray, goals: np.ndarray, dyn_quads=()) -> bytes:
         cfg = self.config
         cam = pos[i]
         r = rot[i]
@@ -134,7 +139,7 @@ class CameraRenderer:
         # Depth-sort static scene quads (floor checker, ceiling, box faces) and
         # paint far -> near so nearer geometry occludes.
         rendered = []
-        for corners, color in self._static_quads:
+        for corners, color in (*self._static_quads, *dyn_quads):
             projected = [project(c) for c in corners]
             if any(p is None for p in projected):
                 continue

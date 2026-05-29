@@ -75,11 +75,14 @@ class SimEnvironment:
         return out
 
     def scene_objects(self) -> list[tuple[str, list[float]]]:
-        """Ground-truth scene landmarks: (label, world-centre) per scene box."""
-        from drone_control.sim.scenes import build_scene
+        """Ground-truth scene landmarks: (label, world-centre) per scene box,
+        including moving objects at the current simulated time."""
+        from drone_control.sim.scenes import build_scene, dynamic_objects
 
         scene = build_scene(self.session.config.scene)
-        return [(box.label, list(box.center)) for box in scene.boxes]
+        objs = [(box.label, list(box.center)) for box in scene.boxes]
+        objs += [(b.label, list(b.center)) for b in dynamic_objects(scene, self.session.sim_time())]
+        return objs
 
     def camera_rot(self, drone_id: str) -> np.ndarray | None:
         """World directions of the camera axes (cols = right, down, forward).

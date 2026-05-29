@@ -12,6 +12,7 @@ happened somewhere.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 Color = tuple[int, int, int]
@@ -26,6 +27,45 @@ class Box:
 
 
 @dataclass(slots=True)
+class DynamicSpec:
+    """A moving scene object. ``motion`` + ``params`` define a deterministic
+    parametric path in time so positions are reproducible across renders."""
+
+    label: str
+    color: Color
+    size: tuple[float, float, float]
+    motion: str                      # "line" | "circle" | "patrol"
+    params: dict
+    z: float = 0.5
+
+    def position_at(self, t: float) -> tuple[float, float, float]:
+        p = self.params
+        if self.motion == "circle":
+            w = 2 * math.pi / max(1e-3, p["period"])
+            ang = w * t + p.get("phase", 0.0)
+            return (p["cx"] + p["r"] * math.cos(ang), p["cy"] + p["r"] * math.sin(ang), self.z)
+        if self.motion == "line":
+            a, b, period = p["a"], p["b"], p["period"]
+            frac = (t % period) / period
+            tri = 2 * frac if frac < 0.5 else 2 * (1 - frac)   # ping-pong 0..1..0
+            return (a[0] + (b[0] - a[0]) * tri, a[1] + (b[1] - a[1]) * tri, self.z)
+        if self.motion == "patrol":
+            pts = p["points"]
+            speed = p.get("speed", 1.0)
+            segs = [(pts[i], pts[(i + 1) % len(pts)]) for i in range(len(pts))]
+            seglens = [math.dist(s, e) for s, e in segs]
+            total = sum(seglens) or 1.0
+            d = (t * speed) % total
+            for (s, e), L in zip(segs, seglens):
+                if d <= L:
+                    f = d / (L or 1.0)
+                    return (s[0] + (e[0] - s[0]) * f, s[1] + (e[1] - s[1]) * f, self.z)
+                d -= L
+            return (pts[0][0], pts[0][1], self.z)
+        return (p.get("cx", 0.0), p.get("cy", 0.0), self.z)
+
+
+@dataclass(slots=True)
 class Scene:
     id: str
     name: str
@@ -36,6 +76,7 @@ class Scene:
     ground_alt: Color   # second checker colour for floor texture
     grid_color: Color
     boxes: list[Box] = field(default_factory=list)
+    dynamics: list[DynamicSpec] = field(default_factory=list)   # moving objects
     ceiling_z: float | None = None     # indoor scenes have a ceiling plane
     ceiling_color: Color = (40, 44, 50)
     far: float = 45.0
@@ -85,11 +126,20 @@ def _warehouse() -> Scene:
     boxes.append(Box((0, 12, 2.0), (28, 0.4, 4.0), (118, 122, 130), "wall"))
     for dx in (-8, -3, 2, 7):
         boxes.append(Box((dx, 11.8, 1.4), (2.4, 0.3, 2.8), (70, 74, 82), "dock-door"))
+    dynamics = [
+        # Forklifts shuttling down two aisles + an AGV crossing.
+        DynamicSpec("forklift", (220, 160, 40), (1.2, 1.0, 1.4), "line",
+                    {"a": (-2.2, -10), "b": (-2.2, 10), "period": 14.0}, z=0.7),
+        DynamicSpec("forklift", (210, 120, 40), (1.2, 1.0, 1.4), "line",
+                    {"a": (6.8, 10), "b": (6.8, -10), "period": 16.0}, z=0.7),
+        DynamicSpec("agv", (90, 170, 200), (0.9, 0.9, 0.5), "line",
+                    {"a": (-11, 0), "b": (11, 0), "period": 12.0}, z=0.3),
+    ]
     return Scene(
         id="warehouse", name="Warehouse", kind="indoor",
         sky_top=(50, 54, 62), sky_bottom=(74, 78, 86),
         ground_color=(98, 100, 106), ground_alt=(86, 88, 94), grid_color=(120, 122, 130),
-        boxes=boxes, ceiling_z=5.0, ceiling_color=(44, 46, 52),
+        boxes=boxes, dynamics=dynamics, ceiling_z=5.0, ceiling_color=(44, 46, 52),
     )
 
 
@@ -140,11 +190,19 @@ def _city() -> Scene:
         boxes.append(Box((0, x, 0.35), (2.0, 1.0, 0.7), _jit((60, 80, 150), i, 40), "car"))
     for (x, y) in [(-2.5, -2.5), (2.5, 2.5), (-2.5, 2.5), (2.5, -2.5)]:
         boxes.append(Box((x, y, 1.4), (0.2, 0.2, 2.8), (60, 62, 68), "lamp"))
+    # Traffic: cars driving the avenues (some along x, some along y), at offsets.
+    dynamics = [
+        DynamicSpec("car", (200, 70, 60), (1.0, 2.0, 0.7), "line", {"a": (-1.5, -12), "b": (-1.5, 12), "period": 12.0}, z=0.35),
+        DynamicSpec("car", (70, 110, 210), (1.0, 2.0, 0.7), "line", {"a": (1.5, 12), "b": (1.5, -12), "period": 14.0}, z=0.35),
+        DynamicSpec("car", (230, 200, 70), (2.0, 1.0, 0.7), "line", {"a": (-12, 1.5), "b": (12, 1.5), "period": 13.0}, z=0.35),
+        DynamicSpec("car", (90, 200, 120), (2.0, 1.0, 0.7), "line", {"a": (12, -1.5), "b": (-12, -1.5), "period": 15.0}, z=0.35),
+        DynamicSpec("bus", (220, 160, 50), (2.6, 1.2, 1.1), "line", {"a": (-1.5, 12), "b": (-1.5, -12), "period": 22.0}, z=0.55),
+    ]
     return Scene(
         id="city", name="City block (outdoor)", kind="outdoor",
         sky_top=(56, 90, 150), sky_bottom=(152, 180, 206),
         ground_color=(56, 58, 64), ground_alt=(66, 68, 74), grid_color=(150, 150, 90),
-        boxes=boxes, far=70.0,
+        boxes=boxes, dynamics=dynamics, far=70.0,
     )
 
 
@@ -165,11 +223,19 @@ def _park() -> Scene:
     for (x, y) in [(-4, -4), (4, 4), (6, -2)]:
         boxes.append(Box((x, y, 0.3), (1.6, 0.5, 0.5), (140, 100, 60), "bench"))
     boxes.append(Box((7, 7, 0.6), (1.6, 1.6, 1.2), (210, 120, 60), "playground"))
+    dynamics = [
+        DynamicSpec("person", (210, 170, 150), (0.5, 0.5, 1.7), "patrol",
+                    {"points": [(-8, -1), (8, -1), (8, 5), (-8, 5)], "speed": 1.6}, z=0.85),
+        DynamicSpec("cyclist", (90, 90, 200), (0.6, 1.4, 1.2), "circle",
+                    {"cx": 0.0, "cy": 0.0, "r": 8.0, "period": 20.0}, z=0.6),
+        DynamicSpec("dog", (180, 150, 90), (0.7, 0.4, 0.5), "patrol",
+                    {"points": [(-6, 2), (-2, -2), (2, 3)], "speed": 2.2}, z=0.25),
+    ]
     return Scene(
         id="park", name="Park (outdoor)", kind="outdoor",
         sky_top=(70, 120, 175), sky_bottom=(170, 198, 216),
         ground_color=(70, 122, 64), ground_alt=(60, 110, 56), grid_color=(90, 140, 80),
-        boxes=boxes, far=60.0,
+        boxes=boxes, dynamics=dynamics, far=60.0,
     )
 
 
@@ -193,11 +259,18 @@ def _construction() -> Scene:
         boxes.append(Box((x, y, 0.5), (1.6, 1.0, 1.0), _jit((150, 120, 80), k), "materials"))
     boxes.append(Box((-9, -7, 1.0), (2.6, 2.0, 2.0), (210, 130, 50), "site-cabin"))
     boxes.append(Box((-8, 6, 0.7), (2.2, 1.2, 1.4), (220, 190, 40), "excavator"))
+    dynamics = [
+        # The crane hook sweeps; a dump truck loops the haul road.
+        DynamicSpec("hook", (240, 200, 60), (0.4, 0.4, 0.6), "circle",
+                    {"cx": 6.0, "cy": -8.0, "r": 4.0, "period": 16.0}, z=6.0),
+        DynamicSpec("truck", (180, 150, 60), (1.6, 1.0, 1.1), "line",
+                    {"a": (-11, -10), "b": (11, -10), "period": 18.0}, z=0.6),
+    ]
     return Scene(
         id="construction", name="Construction site (outdoor)", kind="outdoor",
         sky_top=(120, 130, 150), sky_bottom=(186, 192, 200),
         ground_color=(126, 110, 88), ground_alt=(116, 100, 80), grid_color=(150, 130, 90),
-        boxes=boxes, far=70.0,
+        boxes=boxes, dynamics=dynamics, far=70.0,
     )
 
 
@@ -270,3 +343,11 @@ def list_scenes() -> list[dict[str, str]]:
 def build_scene(scene_id: str | None) -> Scene:
     builder = _BUILDERS.get(scene_id or DEFAULT_SCENE, _BUILDERS[DEFAULT_SCENE])
     return builder()
+
+
+def dynamic_objects(scene: Scene, t: float) -> list[Box]:
+    """Current-position boxes for the scene's moving objects at time ``t`` (s)."""
+    out: list[Box] = []
+    for spec in scene.dynamics:
+        out.append(Box(spec.position_at(t), spec.size, spec.color, spec.label))
+    return out
