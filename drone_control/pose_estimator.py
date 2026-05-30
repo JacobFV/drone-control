@@ -133,12 +133,17 @@ class PoseEstimator:
         intrinsics: CameraIntrinsics | None = None,
         max_features: int = 1500,
         min_matches: int = 30,
+        history_limit: int | None = None,
     ) -> None:
         self.out_path = out_path
         self.out_path.parent.mkdir(parents=True, exist_ok=True)
         self.intrinsics = intrinsics
         self.max_features = max_features
         self.min_matches = min_matches
+        # In a long-running LIVE session the in-memory pose list would grow without
+        # bound; cap it for live use. The durable record is still the .jsonl file,
+        # and offline replay leaves this None to keep the whole track.
+        self.history_limit = history_limit
 
         self._lock = threading.RLock()
         self._poses: list[PoseSample] = []
@@ -294,6 +299,8 @@ class PoseEstimator:
         self._last_t = now
         with self._lock:
             self._poses.append(sample)
+            if self.history_limit is not None and len(self._poses) > self.history_limit:
+                del self._poses[: len(self._poses) - self.history_limit]
             self._status.state = state.value
             self._status.confidence = float(confidence)
             if advance:

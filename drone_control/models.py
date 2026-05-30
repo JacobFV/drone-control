@@ -138,14 +138,20 @@ class ModelStore:
         spec = _BY_ID.get(model_id)
         if spec is None:
             raise KeyError(f"unknown model: {model_id}")
+        checkpoint = self._checkpoint_path(spec)
+        if checkpoint is not None:
+            return {"id": spec.id, "path": str(checkpoint), "sizeBytes": _dir_size(checkpoint), "source": "local"}
         try:
             from huggingface_hub import hf_hub_download
         except Exception as exc:  # pragma: no cover
             raise RuntimeError(f"huggingface_hub not installed: {exc}") from exc
         target_dir = self.models_dir / spec.id
         target_dir.mkdir(parents=True, exist_ok=True)
-        path = hf_hub_download(repo_id=spec.hf_repo, filename=spec.checkpoint_file, local_dir=str(target_dir))
-        return {"id": spec.id, "path": str(path), "sizeBytes": _dir_size(Path(path))}
+        try:
+            path = hf_hub_download(repo_id=spec.hf_repo, filename=spec.checkpoint_file, local_dir=str(target_dir))
+        except Exception as exc:
+            raise RuntimeError(f"failed to download {spec.name} from {spec.hf_repo}: {exc}") from exc
+        return {"id": spec.id, "path": str(path), "sizeBytes": _dir_size(Path(path)), "source": "huggingface"}
 
     def serve_command(self, model_id: str) -> list[str] | None:
         spec = _BY_ID.get(model_id)

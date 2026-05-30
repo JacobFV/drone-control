@@ -35,12 +35,13 @@ export function ModelsPanel() {
   const download = async (id: string) => {
     setBusy(id);
     setError(null);
-    const r = await api.downloadModel(id);
-    if (r) {
+    try {
+      const r = await api.downloadModelOrThrow(id);
       setModels(r.models);
       setActive(r.active);
-    } else {
-      setError(`Download failed for ${id} — the public repo may not exist yet.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setError(`Download failed for ${id}: ${message}`);
     }
     setBusy(null);
   };
