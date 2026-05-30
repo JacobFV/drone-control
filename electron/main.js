@@ -93,6 +93,7 @@ app.whenReady().then(async () => {
   ipcMain.handle("app:serviceUrl", () => serviceUrl);
   ipcMain.handle("app:wsUrl", () => serviceWsUrl);
   ipcMain.handle("app:openExternal", async (_event, url) => shell.openExternal(url));
+  ipcMain.handle("app:openPath", async (_event, targetPath) => shell.openPath(targetPath));
   ipcMain.handle("app:fetchBinary", async (_event, servicePath) => serviceFetchBinary(servicePath));
   createWindow();
 

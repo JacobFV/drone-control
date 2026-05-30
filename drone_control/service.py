@@ -95,6 +95,13 @@ class ControlStationHandler(BaseHTTPRequestHandler):
         if match:
             self.send_jpeg(self.server.session_service.frame(match.group(1)))
             return
+        match = re.fullmatch(r"/api/session/drones/([^/]+)/detail", parsed.path)
+        if match:
+            try:
+                self.send_json(self.server.session_service.drone_detail(match.group(1)))
+            except RuntimeError as exc:
+                self.send_json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
+            return
         match = re.fullmatch(r"/api/session/drones/([^/]+)/depth", parsed.path)
         if match:
             self.send_jpeg(self.server.session_service.depth_frame(match.group(1)))
@@ -289,6 +296,32 @@ class ControlStationHandler(BaseHTTPRequestHandler):
             payload = self.read_json()
             try:
                 self.send_json(self.server.session_service.set_speed(str(payload.get("mode") or "realtime")))
+            except RuntimeError as exc:
+                self.send_json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
+            return
+
+        if parsed.path == "/api/session/pause":
+            try:
+                self.send_json(self.server.session_service.pause())
+            except RuntimeError as exc:
+                self.send_json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
+            return
+
+        if parsed.path == "/api/session/resume":
+            try:
+                self.send_json(self.server.session_service.resume())
+            except RuntimeError as exc:
+                self.send_json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
+            return
+
+        match = re.fullmatch(r"/api/session/drones/([^/]+)/(estop|release)", parsed.path)
+        if match:
+            drone_id, op = match.group(1), match.group(2)
+            try:
+                if op == "estop":
+                    self.send_json(self.server.session_service.drone_estop(drone_id))
+                else:
+                    self.send_json(self.server.session_service.drone_release(drone_id))
             except RuntimeError as exc:
                 self.send_json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
             return

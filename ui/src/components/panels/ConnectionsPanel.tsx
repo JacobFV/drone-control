@@ -1,212 +1,46 @@
 import { useCallback, useEffect, useState } from "react";
-import { useSession } from "../../store/SessionContext";
 import { api } from "../../api/client";
-import { Button, Field, KeyValue, Panel, Pill } from "../primitives";
-import type { AccessPoint, Drone, SerialBridge, WifiInterface, RuntimeDrone } from "../../api/types";
+import { Button, KeyValue, Panel, Pill } from "../primitives";
+import type { SerialBridge } from "../../api/types";
 
 const REPO_URL = "https://github.com/JacobFV/drone-control.git";
 
 /**
- * Connections is organised around the conceptual model: the PC's own network is
- * fixed, so what matters is each usable *radio* — a PC Wi-Fi interface, or an
- * ESP32 serial bridge that carries the Wi-Fi link to one drone. Each radio gets
- * its own container; the help block at the bottom guides bringing an ESP32 online.
+ * Connections is organised around usable *radios*. The PC's own Wi-Fi interface
+ * is deliberately NOT listed: joining a drone AP with it would drop the laptop's
+ * internet connection (single-radio cards can't do both), so it isn't a usable
+ * drone link. The real path is an ESP32 serial bridge that carries the Wi-Fi link
+ * to one drone — each bridge gets its own container, and the help block guides
+ * bringing one online.
  */
 export function ConnectionsPanel() {
-  const { state, snapshot, refreshState, refreshNetwork } = useSession();
-  const [interfaces, setInterfaces] = useState<WifiInterface[]>([]);
   const [bridges, setBridges] = useState<SerialBridge[]>([]);
-  const [apsByIface, setApsByIface] = useState<Record<string, AccessPoint[]>>({});
-  const [scanning, setScanning] = useState<Record<string, boolean>>({});
-  const [target, setTarget] = useState<{ iface: string; ssid: string } | null>(null);
-  const [password, setPassword] = useState("");
-  const [connecting, setConnecting] = useState(false);
 
-  const knownDrones = state?.drones ?? [];
-  const runtimeDrones = snapshot?.runtime.drones ?? [];
-
-  const scan = useCallback(async (iface: string, rescan: boolean) => {
-    setScanning((s) => ({ ...s, [iface]: true }));
-    if (rescan) await api.discoverDrones(iface); // register detected drone APs as known
-    const res = await api.getAccessPoints(iface, rescan);
-    if (res?.accessPoints) setApsByIface((m) => ({ ...m, [iface]: res.accessPoints }));
-    if (rescan) await refreshState();
-    setScanning((s) => ({ ...s, [iface]: false }));
-  }, [refreshState]);
-
-  const loadRadios = useCallback(async () => {
-    const [ifaceRes, bridgeRes] = await Promise.all([api.getWifiInterfaces(), api.getSerialBridges()]);
-    const found = ifaceRes?.interfaces ?? [];
-    setInterfaces(found);
-    setBridges(bridgeRes?.bridges ?? []);
-    for (const iface of found) void scan(iface.name, false);
-  }, [scan]);
+  const loadBridges = useCallback(async () => {
+    const res = await api.getSerialBridges();
+    setBridges(res?.bridges ?? []);
+  }, []);
 
   useEffect(() => {
-    void loadRadios();
-  }, [loadRadios]);
-
-  const connect = async () => {
-    if (!target) return;
-    setConnecting(true);
-    await api.connectWifi(target.iface, target.ssid, password);
-    setPassword("");
-    const iface = target.iface;
-    setTarget(null);
-    await Promise.all([loadRadios(), refreshNetwork()]);
-    await scan(iface, false);
-    setConnecting(false);
-  };
-
-  const hasRadios = interfaces.length > 0 || bridges.length > 0;
+    void loadBridges();
+  }, [loadBridges]);
 
   return (
     <div className="panel-stack">
-      {!hasRadios && (
-        <Panel title="Radios">
-          <p className="muted">No usable radios detected yet. Attach a Wi-Fi adapter or an ESP32 bridge over USB.</p>
-        </Panel>
-      )}
-
-      {interfaces.map((iface) => (
-        <WifiRadio
-          key={iface.name}
-          iface={iface}
-          aps={apsByIface[iface.name] ?? []}
-          scanning={Boolean(scanning[iface.name])}
-          knownDrones={knownDrones}
-          runtimeDrones={runtimeDrones}
-          target={target?.iface === iface.name ? target.ssid : null}
-          password={password}
-          connecting={connecting}
-          onScan={() => scan(iface.name, true)}
-          onPickTarget={(ssid) => {
-            setTarget({ iface: iface.name, ssid });
-            setPassword("");
-          }}
-          onCancelTarget={() => setTarget(null)}
-          onPassword={setPassword}
-          onConnect={connect}
-        />
-      ))}
+      <Panel title="Radios" right={<Pill>{bridges.length} bridge{bridges.length === 1 ? "" : "s"}</Pill>}>
+        <p className="muted">
+          The PC's built-in Wi-Fi radio isn't listed here on purpose. Joining a drone access point with it would
+          disconnect the laptop from the internet — one radio can't hold both links. Use an ESP32 serial bridge instead:
+          it carries the Wi-Fi link to a drone over USB while the PC keeps its network.
+        </p>
+      </Panel>
 
       {bridges.map((bridge) => (
         <BridgeRadio key={bridge.port} bridge={bridge} />
       ))}
 
-      <EspHelp onRefresh={loadRadios} foundCount={bridges.length} />
+      <EspHelp onRefresh={loadBridges} foundCount={bridges.length} />
     </div>
-  );
-}
-
-function droneForSsid(ssid: string, known: Drone[]): Drone | undefined {
-  if (!ssid) return undefined;
-  return known.find((d) => (d.connection?.ssid as string | undefined) === ssid || d.name === ssid);
-}
-
-function WifiRadio({
-  iface,
-  aps,
-  scanning,
-  knownDrones,
-  runtimeDrones,
-  target,
-  password,
-  connecting,
-  onScan,
-  onPickTarget,
-  onCancelTarget,
-  onPassword,
-  onConnect,
-}: {
-  iface: WifiInterface;
-  aps: AccessPoint[];
-  scanning: boolean;
-  knownDrones: Drone[];
-  runtimeDrones: RuntimeDrone[];
-  target: string | null;
-  password: string;
-  connecting: boolean;
-  onScan: () => void;
-  onPickTarget: (ssid: string) => void;
-  onCancelTarget: () => void;
-  onPassword: (v: string) => void;
-  onConnect: () => void;
-}) {
-  const connected = Boolean(iface.connection);
-  const connectedDrone = droneForSsid(iface.connection, knownDrones);
-  const linkState = connectedDrone
-    ? runtimeDrones.find((r) => r.droneId === connectedDrone.id)?.linkState
-    : undefined;
-
-  return (
-    <Panel
-      title={`Wi-Fi radio · ${iface.name}`}
-      right={<Pill tone={connected ? "ok" : "default"}>{connected ? "connected" : iface.state || "idle"}</Pill>}
-    >
-      <KeyValue
-        entries={[
-          { key: "Joined network", value: iface.connection || "—" },
-          {
-            key: "Drone",
-            value: connectedDrone
-              ? `${connectedDrone.name}${linkState ? ` (${linkState})` : ""}`
-              : connected
-                ? "unknown"
-                : "—",
-          },
-        ]}
-      />
-
-      <div className="radio-scan-head">
-        <span className="section-label">Detected</span>
-        <Button onClick={onScan} disabled={scanning}>
-          {scanning ? "Scanning…" : "Rescan"}
-        </Button>
-      </div>
-
-      {aps.length === 0 ? (
-        <p className="muted">{scanning ? "Scanning for networks…" : "Nothing detected yet — rescan to look."}</p>
-      ) : (
-        <ul className="ap-list">
-          {aps.map((ap) => {
-            const joined = ap.ssid === iface.connection && connected;
-            const open = ap.security === "" || ap.security.toLowerCase() === "none";
-            return (
-              <li key={`${ap.ssid}-${ap.bssid}`} className={`ap-item${ap.likely_drone ? " is-drone" : ""}`}>
-                <div className="ap-row">
-                  <span className="ap-name">{ap.ssid || "(hidden)"}</span>
-                  {ap.likely_drone && <Pill tone="recording">drone</Pill>}
-                  <span className="ap-signal">{ap.signal}%</span>
-                  {joined ? (
-                    <Pill tone="ok">joined</Pill>
-                  ) : (
-                    <Button onClick={() => onPickTarget(ap.ssid)}>Connect</Button>
-                  )}
-                </div>
-                {target === ap.ssid && !joined && (
-                  <div className="ap-connect">
-                    {!open && (
-                      <Field label="Password">
-                        <input value={password} type="password" autoFocus onChange={(e) => onPassword(e.target.value)} />
-                      </Field>
-                    )}
-                    <div className="btn-row">
-                      <Button variant="primary" onClick={onConnect} disabled={connecting}>
-                        {connecting ? "Connecting…" : "Join"}
-                      </Button>
-                      <Button onClick={onCancelTarget} disabled={connecting}>
-                        Cancel
-                      </Button>
-                    </div>
-                  </div>
-                )}
-              </li>
-            );
-          })}
-        </ul>
-      )}
-    </Panel>
   );
 }
 

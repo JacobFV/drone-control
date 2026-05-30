@@ -19,6 +19,26 @@ export interface TrajectoryDrone {
   poses: Pose[];
 }
 
+/** One drone's VO-estimated trajectory, similarity-aligned to ground truth. */
+export interface EstimatedTrajectoryDrone {
+  droneId: string;
+  color?: string | null;
+  poses: Pose[];
+  aligned: boolean; // true when aligned to ground truth (sim); raw otherwise
+  scale: number | null; // similarity scale applied during alignment
+  driftRmse: number | null; // absolute-pose-error RMSE after alignment (m)
+  driftFinal: number | null; // current-position error after alignment (m)
+  state: string; // VO tracking state (tracking | degraded | awaiting_parallax | …)
+  confidence: number;
+  keyframes: number;
+}
+
+export interface EstimatedTrajectories {
+  available: boolean;
+  reason?: string | null;
+  drones: EstimatedTrajectoryDrone[];
+}
+
 export interface RecordEntry {
   id: string;
   sessionId?: string;
@@ -100,6 +120,44 @@ export interface SegmentationStatus {
   dronesWithScreen?: string[];
 }
 
+/** Stick command (E99 byte form, neutral 128) sent to a drone. */
+export interface DroneCommand {
+  roll: number;
+  pitch: number;
+  throttle: number;
+  yaw: number;
+}
+
+/** One history entry in a drone's command log (a sampled command or an event). */
+export interface DroneCommandEntry {
+  t: number;
+  roll?: number;
+  pitch?: number;
+  throttle?: number;
+  yaw?: number;
+  event?: string;
+}
+
+/** Per-drone live status inside a sim session's `env.drones`. */
+export interface SimDrone {
+  droneId: string;
+  color?: string;
+  position?: number[];
+  goal?: number[];
+  distance?: number;
+  hasFrame?: boolean;
+  command?: DroneCommand | null;
+  frozen?: boolean;
+}
+
+/** Command history + record directory for one drone (Drones panel). */
+export interface DroneDetail {
+  droneId: string;
+  commands: DroneCommandEntry[];
+  dir?: string | null;
+  frameCount?: number;
+}
+
 export interface SessionStatus {
   active: boolean;
   sessionId?: string;
@@ -107,10 +165,12 @@ export interface SessionStatus {
   kind?: string;
   recording?: boolean;
   speed?: "realtime" | "max";
+  paused?: boolean;
   elapsedSeconds?: number;
   drones?: string[];
   frameCounts?: Record<string, number>;
   trajectories?: TrajectoryDrone[];
+  estimatedTrajectories?: EstimatedTrajectories;
   worldModel?: { available?: boolean; running?: boolean; gaussians?: number; reason?: string };
   segmentation?: {
     status: SegmentationStatus;
@@ -133,6 +193,9 @@ export interface RuntimeDrone {
   running?: boolean;
   controller?: string;
   linkState?: string;
+  sent?: number;
+  errors?: number;
+  lastAction?: DroneCommand & { takeoff?: boolean; land?: boolean; emergency_stop?: boolean };
   safety?: { armed?: boolean; faultReason?: string };
 }
 

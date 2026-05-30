@@ -4,12 +4,14 @@ import { ReviewGrid } from "./components/ReviewGrid";
 import { SessionPicker } from "./components/SessionPicker";
 import { NewSessionModal } from "./components/NewSessionModal";
 import { FlightPanel } from "./components/panels/FlightPanel";
+import { DronesPanel } from "./components/panels/DronesPanel";
 import { BrainPanel } from "./components/panels/BrainPanel";
 import { ModelsPanel } from "./components/panels/ModelsPanel";
 import { ConnectionsPanel } from "./components/panels/ConnectionsPanel";
 import { ConfigPanel } from "./components/panels/ConfigPanel";
 import { useSession, type RhsTab } from "./store/SessionContext";
-import { BrainIcon, ConfigIcon, ConnectionsIcon, FlightIcon, ModelIcon, MoonIcon, PanelIcon, PlusIcon, SunIcon } from "./components/icons";
+import { api } from "./api/client";
+import { BrainIcon, ConfigIcon, ConnectionsIcon, DroneIcon, FlightIcon, ModelIcon, MoonIcon, PanelIcon, PauseIcon, PlayIcon, PlusIcon, SunIcon } from "./components/icons";
 import type { ComponentType, SVGProps } from "react";
 
 type Theme = "dark" | "light";
@@ -28,6 +30,7 @@ function useTheme(): [Theme, () => void] {
 
 const TABS: { id: RhsTab; label: string; Icon: ComponentType<SVGProps<SVGSVGElement> & { size?: number }> }[] = [
   { id: "flight", label: "Flight", Icon: FlightIcon },
+  { id: "drones", label: "Drones", Icon: DroneIcon },
   { id: "brain", label: "Brain", Icon: BrainIcon },
   { id: "models", label: "Models", Icon: ModelIcon },
   { id: "connections", label: "Connections", Icon: ConnectionsIcon },
@@ -39,6 +42,7 @@ export function App() {
     health,
     transport,
     state,
+    snapshot,
     rhsTab,
     setRhsTab,
     rhsCollapsed,
@@ -48,6 +52,14 @@ export function App() {
   } = useSession();
 
   const [theme, toggleTheme] = useTheme();
+
+  const session = snapshot?.session;
+  const isSimActive = Boolean(session?.active) && session?.kind === "sim";
+  const paused = Boolean(session?.paused);
+  const togglePause = () => {
+    if (paused) void api.sessionResume();
+    else void api.sessionPause();
+  };
 
   const reviewed = reviewSessionId
     ? state?.environments.flatMap((e) => e.sessions).find((s) => s.id === reviewSessionId) ?? null
@@ -64,6 +76,18 @@ export function App() {
           <SessionPicker />
         </div>
         <div className="topbar-status">
+          {isSimActive && (
+            <button
+              type="button"
+              className={`sim-pause-btn${paused ? " is-paused" : ""}`}
+              title={paused ? "Resume simulation" : "Pause simulation"}
+              aria-label={paused ? "Resume simulation" : "Pause simulation"}
+              onClick={togglePause}
+            >
+              {paused ? <PlayIcon size={15} /> : <PauseIcon size={15} />}
+              <span>{paused ? "Resume" : "Pause"}</span>
+            </button>
+          )}
           <button type="button" className="new-session-btn" onClick={() => setNewSessionOpen(true)}>
             <PlusIcon size={15} />
             <span>New session</span>
@@ -115,6 +139,7 @@ export function App() {
             </nav>
             <div className="rhs-body">
               {rhsTab === "flight" && <FlightPanel />}
+              {rhsTab === "drones" && <DronesPanel />}
               {rhsTab === "brain" && <BrainPanel />}
               {rhsTab === "models" && <ModelsPanel />}
               {rhsTab === "connections" && <ConnectionsPanel />}

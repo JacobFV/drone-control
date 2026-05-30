@@ -94,6 +94,28 @@ class SimEnvironment:
     def set_speed(self, mode: str) -> None:
         self.session.set_max_speed(mode == "max")
 
+    # -- pause / per-drone control -----------------------------------------
+
+    def pause(self) -> None:
+        self.session.pause()
+
+    def resume(self) -> None:
+        self.session.resume()
+
+    def drone_estop(self, drone_id: str) -> None:
+        idx = _index(drone_id)
+        if idx is not None:
+            self.session.estop(idx)
+
+    def drone_release(self, drone_id: str) -> None:
+        idx = _index(drone_id)
+        if idx is not None:
+            self.session.release(idx)
+
+    def drone_commands(self, drone_id: str) -> list[dict[str, Any]]:
+        idx = _index(drone_id)
+        return self.session.drone_commands(idx) if idx is not None else []
+
     def status(self) -> dict[str, Any]:
         status = self.session.status()
         status["speed"] = "max" if self.session.config.max_speed else "realtime"

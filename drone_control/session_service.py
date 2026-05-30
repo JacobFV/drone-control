@@ -31,8 +31,9 @@ from drone_control.environment.real_env import RealEnvironment
 from drone_control.environment.sim_env import SimEnvironment
 from drone_control.perception import live_splat
 from drone_control.perception.depth import write_ply
+from drone_control.perception.odometry import LiveVisualOdometry
+from drone_control.perception.segmentation import Segmenter, _pose_center
 from drone_control.perception.slam import MultiViewSLAM
-from drone_control.perception.segmentation import Segmenter
 from drone_control.runtime.manager import RuntimeManager
 from drone_control.sim.session import SimSessionConfig
 from drone_control.store import ControlStationStore
@@ -70,6 +71,13 @@ class SessionService:
         # only, identical for sim and real.
         self.depth = MultiViewSLAM()
         self._depth_every = 3  # run depth every Nth perception tick (plane-sweep is heavier)
+
+        # Live monocular visual odometry: each drone's ESTIMATED world trajectory,
+        # computed from its camera stream alone (frame + calibrated intrinsics).
+        # It runs every perception tick (cheap ORB on the small frames) and is the
+        # estimated counterpart to env.trajectories() (the objective track). The
+        # estimate is similarity-aligned to ground truth for display only.
+        self.odometry = LiveVisualOdometry(self.work_root)
 
         self._lock = threading.RLock()
         self._env: SimEnvironment | RealEnvironment | None = None
@@ -133,6 +141,7 @@ class SessionService:
             cloud_dir = self.export_root / "clouds"
             cloud_dir.mkdir(parents=True, exist_ok=True)
             self.depth.reset(stream_path=cloud_dir / f"{session['id']}.bin")
+            self.odometry.reset(session["id"])
             self._seeded = False
             # ONE splat engine, fed identically for sim and real from (frame,
             # camera_pose). It must never know which kind of environment it is in.
@@ -276,6 +285,61 @@ class SessionService:
         env.set_speed("max" if mode == "max" else "realtime")
         return self.status()
 
+    def pause(self) -> dict[str, Any]:
+        env = self._env
+        if env is None:
+            raise RuntimeError("no active session")
+        if not hasattr(env, "pause"):
+            raise RuntimeError("pause is only supported for simulated sessions")
+        env.pause()
+        return self.status()
+
+    def resume(self) -> dict[str, Any]:
+        env = self._env
+        if env is None:
+            raise RuntimeError("no active session")
+        if not hasattr(env, "resume"):
+            raise RuntimeError("resume is only supported for simulated sessions")
+        env.resume()
+        return self.status()
+
+    def drone_estop(self, drone_id: str) -> dict[str, Any]:
+        env = self._env
+        if env is None:
+            raise RuntimeError("no active session")
+        if not hasattr(env, "drone_estop"):
+            raise RuntimeError("per-drone e-stop is only supported for simulated sessions")
+        env.drone_estop(drone_id)
+        return self.status()
+
+    def drone_release(self, drone_id: str) -> dict[str, Any]:
+        env = self._env
+        if env is None:
+            raise RuntimeError("no active session")
+        if not hasattr(env, "drone_release"):
+            raise RuntimeError("per-drone resume is only supported for simulated sessions")
+        env.drone_release(drone_id)
+        return self.status()
+
+    def drone_detail(self, drone_id: str) -> dict[str, Any]:
+        """Command history + on-disk file directory for one drone (Drones panel)."""
+        env = self._env
+        if env is None:
+            raise RuntimeError("no active session")
+        commands = env.drone_commands(drone_id) if hasattr(env, "drone_commands") else []
+        return {
+            "droneId": drone_id,
+            "commands": commands,
+            "dir": self.drone_dir(drone_id),
+            "frameCount": self._frame_counts.get(drone_id, 0),
+        }
+
+    def drone_dir(self, drone_id: str) -> str | None:
+        """Absolute path of the drone's recording directory (None if not recording)."""
+        if self._session_dir is None or not self._recording:
+            return None
+        return str(self._session_dir / _safe(drone_id))
+
     def status(self) -> dict[str, Any]:
         env = self._env
         if env is None:
@@ -288,10 +352,12 @@ class SessionService:
             "kind": env.kind,
             "recording": self._recording,
             "speed": "max" if env.status().get("speed") == "max" else "realtime",
+            "paused": bool(env.status().get("paused", False)),
             "elapsedSeconds": round(time.monotonic() - self._started_at, 2),
             "drones": drones,
             "frameCounts": dict(self._frame_counts),
             "trajectories": env.trajectories(),
+            "estimatedTrajectories": self._estimated_trajectories(env),
             "worldModel": self._splat.snapshot() if self._splat is not None else env.world_model_status(),
             "segmentation": {
                 "status": self.segmenter.status(),
@@ -300,6 +366,21 @@ class SessionService:
             },
             "depth": self.depth.status(),
             "env": env.status(),
+        }
+
+    def _estimated_trajectories(self, env: Any) -> dict[str, Any]:
+        """Each drone's VO-estimated trajectory, keyed/coloured to match the
+        objective ``trajectories`` so the UI can overlay estimate vs truth."""
+        drones = []
+        for d in env.trajectories():
+            drone_id = d.get("droneId")
+            if drone_id is None:
+                continue
+            drones.append({"droneId": drone_id, "color": d.get("color"), **self.odometry.estimate(drone_id)})
+        return {
+            "available": self.odometry.available,
+            "reason": self.odometry.reason,
+            "drones": drones,
         }
 
     # ------------------------------------------------------------------ loops
@@ -337,6 +418,14 @@ class SessionService:
             pose = env.camera_pose(drone_id)        # calibration only — never scene truth
             if run_depth:
                 self.depth.process(drone_id, frame, pose)
+            # Estimated trajectory: the VO sees ONLY the frame + calibrated
+            # intrinsics. The concurrent ground-truth position (sim only) is read
+            # purely to similarity-align + score the estimate for the overlay —
+            # the depth-eval privilege — and is NEVER given to the estimator.
+            gt_center = _pose_center(env.latest_pose(drone_id)) if env.kind == "sim" else None
+            self.odometry.process(
+                drone_id, frame, pose.get("intrinsics") if pose else None, gt_center
+            )
             dets = self.segmenter.segment_frame(drone_id, frame)
             self.segmenter.project_to_world(
                 drone_id, dets, pose, depth_map=self.depth.latest_depth_map(drone_id)

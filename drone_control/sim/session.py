@@ -85,9 +85,17 @@ class SimSession:
         self._tracks: list[_DroneTrack] = []
         self._thread: threading.Thread | None = None
         self._running = False
+        self._paused = False           # frozen but alive: loop keeps the thread, stops stepping
         self._step = 0
         self._next_frame_t = 0.0       # sim-time of the next camera frame (fps cadence)
         self._frame_rng = np.random.default_rng(0)  # link-jitter RNG
+        # Per-drone control: latest stick command (E99 byte form) + recent history,
+        # and the set of drones individually e-stopped (held in place) by the operator.
+        self._commands: np.ndarray | None = None     # [K,4] uint8 roll/pitch/throttle/yaw
+        self._cmd_history: list[deque] = []          # per-drone deque of {t,roll,pitch,throttle,yaw}
+        self._cmd_next_t = 0.0                        # sim-time of next history sample
+        self._frozen: set[int] = set()                # drone indices held by e-stop
+        self._frozen_pose: dict[int, tuple] = {}      # i -> (pos, quat) snapshot to hold
         # Airflow + PyBullet physics world (rigid + deformable cloth) + atmospherics.
         self._scene: Scene | None = None
         self._flow: FlowField | None = None
@@ -171,6 +179,12 @@ class SimSession:
             self._env.reset()
             self._step = 0
             self._next_frame_t = 0.0
+            self._paused = False
+            self._commands = np.full((cfg.num_drones, 4), 128, dtype=np.uint8)
+            self._cmd_history = [deque(maxlen=120) for _ in range(cfg.num_drones)]
+            self._cmd_next_t = 0.0
+            self._frozen = set()
+            self._frozen_pose = {}
             self._running = True
             self._thread = threading.Thread(target=self._loop, name="sim-session", daemon=True)
             self._thread.start()
@@ -201,13 +215,20 @@ class SimSession:
                     return
                 env = self._env
                 expert = self._expert
+                paused = self._paused
+            if paused:
+                # Hold the whole sim: keep the thread + state alive, just don't step.
+                time.sleep(0.05)
+                continue
             started = time.monotonic()
 
             obs = env._observe()
             command = expert.command(obs)
             t = self._step * self.params.dt
+            self._capture_commands(command, t)
             ext_accel = self._airflow_accel(env, t)
             obs, _reward, _done = env.step(command, ext_accel=ext_accel)
+            self._apply_freeze(env)
             # Advance soft bodies (cloth), rigid bodies, and particles against the
             # wind at the post-step instant.
             self._advance_bodies(env, t + self.params.dt)
@@ -226,6 +247,91 @@ class SimSession:
                 continue
             elapsed = time.monotonic() - started
             time.sleep(max(0.0, interval - elapsed))
+
+    # ------------------------------------------------------- per-drone control
+
+    @staticmethod
+    def _to_bytes(command: "np.ndarray") -> np.ndarray:
+        """Expert command (roll/pitch/yaw in [-1,1], throttle in [0,1]) -> E99
+        stick bytes (0-255, neutral 128), matching the real DroneAction packet."""
+        c = np.asarray(command, dtype=float)
+        roll = np.clip(np.round(128 + c[:, 0] * 127), 0, 255)
+        pitch = np.clip(np.round(128 + c[:, 1] * 127), 0, 255)
+        throttle = np.clip(np.round(c[:, 2] * 255), 0, 255)
+        yaw = np.clip(np.round(128 + c[:, 3] * 127), 0, 255)
+        return np.stack([roll, pitch, throttle, yaw], axis=1).astype(np.uint8)
+
+    def _capture_commands(self, command, t: float) -> None:
+        """Record the latest per-drone stick command (always) and a throttled
+        history sample (~4 Hz of sim time) for the Drones panel."""
+        bytes_cmd = self._to_bytes(command.detach().cpu().numpy())
+        with self._lock:
+            self._commands = bytes_cmd
+            sample = t >= self._cmd_next_t
+            if sample:
+                self._cmd_next_t = t + 0.25
+            for i in range(bytes_cmd.shape[0]):
+                if i in self._frozen:
+                    continue
+                if sample and i < len(self._cmd_history):
+                    r, p, th, y = (int(v) for v in bytes_cmd[i])
+                    self._cmd_history[i].append(
+                        {"t": round(t, 2), "roll": r, "pitch": p, "throttle": th, "yaw": y}
+                    )
+
+    def _apply_freeze(self, env: SwarmEnv) -> None:
+        """Hold e-stopped drones exactly in place (zero velocity) post-step."""
+        if not self._frozen:
+            return
+        with self._lock:
+            frozen = list(self._frozen)
+            poses = dict(self._frozen_pose)
+        for i in frozen:
+            saved = poses.get(i)
+            if saved is None or i >= env.state.pos.shape[0]:
+                continue
+            pos, quat = saved
+            env.state.pos[i] = torch.as_tensor(pos, dtype=env.state.pos.dtype, device=env.state.pos.device)
+            env.state.quat[i] = torch.as_tensor(quat, dtype=env.state.quat.dtype, device=env.state.quat.device)
+            env.state.vel[i] = 0.0
+            env.state.omega[i] = 0.0
+
+    def pause(self) -> dict[str, Any]:
+        with self._lock:
+            self._paused = True
+        return self.status()
+
+    def resume(self) -> dict[str, Any]:
+        with self._lock:
+            self._paused = False
+        return self.status()
+
+    def estop(self, index: int) -> None:
+        """E-stop a single drone: hold it in place until released."""
+        with self._lock:
+            env = self._env
+            if env is None or not (0 <= index < env.state.pos.shape[0]):
+                return
+            pos = env.state.pos[index].detach().cpu().numpy().copy()
+            quat = env.state.quat[index].detach().cpu().numpy().copy()
+            self._frozen.add(index)
+            self._frozen_pose[index] = (pos, quat)
+            if index < len(self._cmd_history):
+                self._cmd_history[index].append({"t": round(self._step * self.params.dt, 2), "event": "e-stop"})
+
+    def release(self, index: int) -> None:
+        """Release a single drone from e-stop (resume its flight)."""
+        with self._lock:
+            self._frozen.discard(index)
+            self._frozen_pose.pop(index, None)
+            if index < len(self._cmd_history):
+                self._cmd_history[index].append({"t": round(self._step * self.params.dt, 2), "event": "resume"})
+
+    def drone_commands(self, index: int) -> list[dict[str, Any]]:
+        with self._lock:
+            if 0 <= index < len(self._cmd_history):
+                return list(self._cmd_history[index])
+            return []
 
     # ----------------------------------------------------------------- airflow
 
@@ -388,7 +494,12 @@ class SimSession:
                 pos = env.state.pos.detach().cpu()
                 goals = env.goals.detach().cpu()
                 dist = (env.goals - env.state.pos).norm(dim=1).detach().cpu()
+                cmds = self._commands
                 for i in range(self.config.num_drones):
+                    command = None
+                    if cmds is not None and i < cmds.shape[0]:
+                        r, p, th, y = (int(v) for v in cmds[i])
+                        command = {"roll": r, "pitch": p, "throttle": th, "yaw": y}
                     drones.append(
                         {
                             "droneId": f"sim-{i}",
@@ -397,11 +508,14 @@ class SimSession:
                             "goal": [float(v) for v in goals[i]],
                             "distance": float(dist[i]),
                             "hasFrame": self._tracks[i].frame is not None if i < len(self._tracks) else False,
+                            "command": command,
+                            "frozen": i in self._frozen,
                         }
                     )
             wind = self._wind_ambient
             return {
                 "running": self._running,
+                "paused": self._paused,
                 "task": self.config.task,
                 "scene": self.config.scene,
                 "cameraNoise": self.config.camera_noise,

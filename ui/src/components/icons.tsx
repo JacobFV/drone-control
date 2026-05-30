@@ -122,3 +122,39 @@ export const BrainIcon = (p: IconProps) => (
     <path d="M12 4.5v15" />
   </svg>
 );
+
+export const PauseIcon = (p: IconProps) => (
+  <svg {...base(p)}>
+    <rect x="6" y="5" width="4" height="14" rx="1" />
+    <rect x="14" y="5" width="4" height="14" rx="1" />
+  </svg>
+);
+
+export const PlayIcon = (p: IconProps) => (
+  <svg {...base(p)}>
+    <path d="M7 4.5v15l13-7.5Z" />
+  </svg>
+);
+
+export const StopIcon = (p: IconProps) => (
+  <svg {...base(p)}>
+    <rect x="6" y="6" width="12" height="12" rx="2" />
+  </svg>
+);
+
+export const DroneIcon = (p: IconProps) => (
+  <svg {...base(p)}>
+    <circle cx="5" cy="5" r="2.4" />
+    <circle cx="19" cy="5" r="2.4" />
+    <circle cx="5" cy="19" r="2.4" />
+    <circle cx="19" cy="19" r="2.4" />
+    <path d="M7 7l3 3M17 7l-3 3M7 17l3-3M17 17l-3-3" />
+    <rect x="9.5" y="9.5" width="5" height="5" rx="1" />
+  </svg>
+);
+
+export const FolderIcon = (p: IconProps) => (
+  <svg {...base(p)}>
+    <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />
+  </svg>
+);

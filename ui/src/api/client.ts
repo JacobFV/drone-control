@@ -3,6 +3,7 @@ import type {
   AccessPoint,
   ConfigStatus,
   DiscoverResult,
+  DroneDetail,
   ManualStatus,
   NetworkSummary,
   SerialBridge,
@@ -49,6 +50,11 @@ export function openExternal(url: string): void {
   else window.open(url, "_blank", "noopener");
 }
 
+/** Open a local folder in the OS file manager (Electron only). */
+export function openPath(path: string): void {
+  if (bridge.openPath) void bridge.openPath(path);
+}
+
 export async function request<T = unknown>(
   method: string,
   path: string,
@@ -62,6 +68,22 @@ export async function request<T = unknown>(
     console.error(`[droneStation] ${method} ${path}`, error);
     setHealth("error");
     return null;
+  }
+}
+
+export async function requestOrThrow<T = unknown>(
+  method: string,
+  path: string,
+  body?: unknown,
+): Promise<T> {
+  try {
+    const result = (await bridge.request({ method, path, body })) as T;
+    setHealth("ready");
+    return result;
+  } catch (error) {
+    console.error(`[droneStation] ${method} ${path}`, error);
+    setHealth("error");
+    throw error;
   }
 }
 
@@ -94,6 +116,17 @@ export const api = {
   sessionStop: () => request<SessionStatus>("POST", "/api/session/stop", {}),
   sessionSpeed: (mode: "realtime" | "max") =>
     request<SessionStatus>("POST", "/api/session/speed", { mode }),
+  sessionPause: () => request<SessionStatus>("POST", "/api/session/pause", {}),
+  sessionResume: () => request<SessionStatus>("POST", "/api/session/resume", {}),
+
+  // Per-drone control (sim sessions): hold one drone in place / release it, and
+  // fetch its command history + record directory.
+  droneEstop: (droneId: string) =>
+    request<SessionStatus>("POST", `/api/session/drones/${encodeURIComponent(droneId)}/estop`, {}),
+  droneRelease: (droneId: string) =>
+    request<SessionStatus>("POST", `/api/session/drones/${encodeURIComponent(droneId)}/release`, {}),
+  getDroneDetail: (droneId: string) =>
+    request<DroneDetail>("GET", `/api/session/drones/${encodeURIComponent(droneId)}/detail`),
 
   getPointCloud: (max = 2500) =>
     request<{ points: number[][] }>("GET", `/api/session/pointcloud?max=${max}`),
@@ -153,6 +186,7 @@ export const api = {
   // ----- VLA model registry -----
   getModels: () => request<ModelsResult>("GET", "/api/models"),
   downloadModel: (id: string) => request<ModelsResult>("POST", `/api/models/${id}/download`, {}),
+  downloadModelOrThrow: (id: string) => requestOrThrow<ModelsResult>("POST", `/api/models/${id}/download`, {}),
   selectModel: (id: string | null) => request<ModelsResult>("POST", "/api/models/select", { id }),
 };
 
