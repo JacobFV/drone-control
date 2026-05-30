@@ -13,6 +13,7 @@ session or the real runtime.
 
 from __future__ import annotations
 
+import sys
 import threading
 import time
 from collections import deque
@@ -59,6 +60,10 @@ class SimSessionConfig:
     drag_area: float = 0.006
     drag_cd: float = 1.1
     wind_enabled: bool = True
+    # Environment-body physics backend: "lite" (in-house numpy rigid+cloth) or
+    # "pybullet" (high-fidelity rigid + deformable cloth/soft body). Drones always
+    # use the torch quadrotor dynamics; only scene bodies switch backend.
+    physics_backend: str = "lite"
 
 
 @dataclass(slots=True)
@@ -86,6 +91,9 @@ class SimSession:
         self._flag_render: list[tuple] = []  # (grid[ny,nx,3], color)
         self._rigid: RigidWorld | None = None
         self._rigid_render: list[tuple] = []  # (corners, color, label) face quads
+        self._physics: Any | None = None      # PyBulletWorld when backend == "pybullet"
+        self._cloth_meshes: list[tuple] = []  # (verts, faces, color, label) for pybullet cloth
+        self._backend = "lite"
         self._particles: ParticleField | None = None
         self._particle_render: tuple | None = None  # (pos, rgba, size)
         self._c_aero = 0.0
@@ -127,13 +135,9 @@ class SimSession:
             # Airflow field + cloth soft bodies from the scene plan.
             self._scene = build_scene(cfg.scene)
             self._flow = FlowField(self._scene.flows, seed=cfg.seed) if cfg.wind_enabled else None
-            self._flags = [
-                ClothFlag(spec.mast_top, spec.direction, width=spec.width, height=spec.height,
-                          color=spec.color, label=spec.label)
-                for spec in self._scene.flags
-            ]
-            self._rigid = RigidWorld(self._scene.rigids, seed=cfg.seed) if self._scene.rigids else None
+            self._backend = self._init_physics(cfg)
             self._rigid_render = []
+            self._cloth_meshes = []
             self._particles = ParticleField(self._scene.particles, seed=cfg.seed) if self._scene.particles else None
             self._particle_render = None
             self._c_aero = 0.5 * AIR_DENSITY * cfg.drag_cd * cfg.drag_area
@@ -153,6 +157,14 @@ class SimSession:
             self._thread = None
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=2.0)
+        # Release the PyBullet client (if any) once the loop has stopped.
+        physics = self._physics
+        self._physics = None
+        if physics is not None:
+            try:
+                physics.close()
+            except Exception:
+                pass
         return self.status()
 
     def _loop(self) -> None:
@@ -224,27 +236,82 @@ class SimSession:
         acc = aero_accel(wind, vel, self.params.mass, self._c_aero)
         return torch.from_numpy(acc.astype(np.float32))
 
+    def _init_physics(self, cfg: SimSessionConfig) -> str:
+        """Build the environment-body physics for the chosen backend.
+
+        Returns the backend actually used ("pybullet" or "lite"); falls back to
+        lite if PyBullet is unavailable so a session never fails to start.
+        """
+        assert self._scene is not None
+        self._flags = []
+        self._rigid = None
+        self._physics = None
+
+        if (cfg.physics_backend or "lite").lower() == "pybullet":
+            try:
+                from .physics import PyBulletWorld
+                from .scenes import ClothSpec
+
+                cloths = list(self._scene.cloths)
+                # Lite flag specs become simple cloth panels so flag scenes still
+                # render real deformable cloth under the high-fidelity backend.
+                for fs in self._scene.flags:
+                    plane = "yz" if abs(fs.direction[1]) > abs(fs.direction[0]) else "xz"
+                    cloths.append(ClothSpec(anchor=fs.mast_top, color=fs.color, width=fs.width,
+                                            height=fs.height, label=fs.label, kind="flag", plane=plane))
+                self._physics = PyBulletWorld(self._scene.rigids, cloths, dt=self.params.dt)
+                return "pybullet"
+            except Exception as exc:  # pragma: no cover - depends on optional dep
+                sys.stderr.write(f"sim: pybullet backend unavailable ({exc}); falling back to lite\n")
+                self._physics = None
+
+        self._flags = [
+            ClothFlag(spec.mast_top, spec.direction, width=spec.width, height=spec.height,
+                      color=spec.color, label=spec.label)
+            for spec in self._scene.flags
+        ]
+        # Cloth panels (authored for the high-fidelity backend) still render on
+        # the lite engine: a top-pinned ClothFlag droops under gravity and sways
+        # in the wind, which reads fine for a hanging flag/garment/banner.
+        for spec in self._scene.cloths:
+            direction = (0.0, 1.0, 0.0) if spec.plane == "yz" else (1.0, 0.0, 0.0)
+            self._flags.append(
+                ClothFlag(spec.anchor, direction, width=spec.width, height=spec.height,
+                          color=spec.color, label=spec.label)
+            )
+        self._rigid = RigidWorld(self._scene.rigids, seed=cfg.seed) if self._scene.rigids else None
+        return "lite"
+
     def _advance_bodies(self, env: SwarmEnv, t: float) -> None:
         """Step cloth, rigid bodies, and particles against the shared wind field."""
-        if self._flow is None and not (self._flags or self._rigid or self._particles):
-            return
         objects = self._object_kinematics(t)
         rotors = self._rotor_sources(env)
 
         def wind_at(points):
             if self._flow is None:
-                return np.zeros_like(points)
+                return np.zeros_like(np.atleast_2d(points))
             return self._flow.sample(points, t, objects=objects, rotors=rotors)
 
-        flag_render = []
-        for flag in self._flags:
-            flag.step(self.params.dt, wind_at(flag.pos))
-            flag_render.append((flag.grid(), flag.color))
+        self._wind_ambient = (
+            tuple(float(v) for v in self._flow.ambient(t, z=2.0)) if self._flow else (0.0, 0.0, 0.0)
+        )
 
+        flag_render: list = []
         rigid_render: list = []
-        if self._rigid is not None:
-            self._rigid.step(self.params.dt, wind_at)
-            rigid_render = self._rigid.face_quads()
+        cloth_meshes: list = []
+
+        if self._physics is not None:
+            # High-fidelity backend owns rigid + cloth; particles stay lite.
+            self._physics.step(self.params.dt, wind_at)
+            rigid_render = self._physics.rigid_faces()
+            cloth_meshes = self._physics.cloth_meshes()
+        else:
+            for flag in self._flags:
+                flag.step(self.params.dt, wind_at(flag.pos))
+                flag_render.append((flag.grid(), flag.color))
+            if self._rigid is not None:
+                self._rigid.step(self.params.dt, wind_at)
+                rigid_render = self._rigid.face_quads()
 
         particle_render = None
         if self._particles is not None:
@@ -254,6 +321,7 @@ class SimSession:
         with self._lock:
             self._flag_render = flag_render
             self._rigid_render = rigid_render
+            self._cloth_meshes = cloth_meshes
             self._particle_render = particle_render
 
     def _record(self, env: SwarmEnv) -> None:
@@ -265,11 +333,12 @@ class SimSession:
             with self._lock:
                 flag_render = list(self._flag_render)
                 rigid_render = list(self._rigid_render)
+                cloth_meshes = list(self._cloth_meshes)
                 particle_render = self._particle_render
             frames = self._renderer.render(
                 pos.numpy(), quat.numpy(), goals.numpy(), t=self._step * self.params.dt,
                 flags=flag_render, wind=self._wind_ambient,
-                rigids=rigid_render, particles=particle_render,
+                rigids=rigid_render, particles=particle_render, meshes=cloth_meshes,
             )
         with self._lock:
             for i, track in enumerate(self._tracks):
@@ -317,10 +386,14 @@ class SimSession:
                     "ambient": [round(v, 3) for v in wind],
                     "speed": round(float(np.linalg.norm(wind)), 3),
                     "sources": len(self._scene.flows) if self._scene is not None else 0,
-                    "flags": len(self._flags),
-                    "rigidBodies": (self._rigid.centers().shape[0] if self._rigid is not None else 0),
+                    "flags": len(self._flags) + (len(self._cloth_meshes) if self._physics is not None else 0),
+                    "rigidBodies": (
+                        len(self._rigid_render) // 6 if self._physics is not None
+                        else (self._rigid.centers().shape[0] if self._rigid is not None else 0)
+                    ),
                     "particles": (len(self._particle_render[0]) if self._particle_render is not None else 0),
                 },
+                "physicsBackend": self._backend,
             }
 
     def trajectories(self) -> dict[str, Any]:

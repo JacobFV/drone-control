@@ -118,6 +118,7 @@ class CameraRenderer:
         wind: tuple[float, float, float] | None = None,
         rigids: list | None = None,
         particles: tuple | None = None,
+        meshes: list | None = None,
     ) -> list[bytes]:
         pos = np.asarray(pos, dtype=np.float64)
         quat_wxyz = np.asarray(quat_wxyz, dtype=np.float64)
@@ -132,11 +133,11 @@ class CameraRenderer:
             dyn_quads.extend(rigids)
         idxs = list(range(pos.shape[0])) if indices is None else indices
         return [
-            self._render_one(i, pos, rot, goals, dyn_quads, flags or [], wind, t, particles)
+            self._render_one(i, pos, rot, goals, dyn_quads, flags or [], wind, t, particles, meshes or [])
             for i in idxs
         ]
 
-    def _render_one(self, i, pos, rot, goals, dyn_quads, flags, wind, t, particles=None) -> bytes:
+    def _render_one(self, i, pos, rot, goals, dyn_quads, flags, wind, t, particles=None, meshes=()) -> bytes:
         cfg = self.config
         cam = pos[i]
         r = rot[i]
@@ -184,9 +185,13 @@ class CameraRenderer:
         if wind is not None and (wind[0] ** 2 + wind[1] ** 2 + wind[2] ** 2) > 0.4:
             self._draw_streaks(draw, project, np.asarray(wind, dtype=float), t)
 
-        # Cloth flags (soft bodies) as shaded deformed quads.
+        # Cloth flags (lite soft bodies) as shaded deformed quads.
         for grid, fcolor in flags:
             self._draw_flag(draw, project, np.asarray(grid, dtype=float), tuple(fcolor))
+
+        # Deformable cloth meshes (PyBullet backend) as shaded triangles.
+        for verts, faces, mcolor, _label in meshes:
+            self._draw_mesh(draw, project, np.asarray(verts, dtype=float), faces, tuple(mcolor))
 
         # Other drones as cyan markers.
         for j in range(pos.shape[0]):
@@ -331,6 +336,28 @@ class CameraRenderer:
                 shade = 0.7 + 0.3 * ((r + c) % 2)
                 col = self._fog(_scale(color, shade), mean_z)
                 draw.polygon([(p[0], p[1]) for p in proj], fill=col)
+
+    def _draw_mesh(self, draw, project, verts, faces, color) -> None:
+        """Draw a deformable cloth as depth-sorted shaded triangles."""
+        if verts.shape[0] == 0 or not faces:
+            return
+        tris = []
+        for (a, b, c) in faces:
+            if a >= len(verts) or b >= len(verts) or c >= len(verts):
+                continue
+            pa, pb, pc = project(verts[a]), project(verts[b]), project(verts[c])
+            if pa is None or pb is None or pc is None:
+                continue
+            mean_z = (pa[2] + pb[2] + pc[2]) / 3.0
+            # Shade by the triangle's normal vs. vertical so folds catch light.
+            n = np.cross(verts[b] - verts[a], verts[c] - verts[a])
+            nn = np.linalg.norm(n)
+            shade = 0.66 + 0.34 * abs(float(n[2]) / nn) if nn > 1e-9 else 0.8
+            tris.append((mean_z, [(pa[0], pa[1]), (pb[0], pb[1]), (pc[0], pc[1])],
+                         self._fog(_scale(color, shade), mean_z)))
+        tris.sort(key=lambda q: q[0], reverse=True)
+        for _z, poly, col in tris:
+            draw.polygon(poly, fill=col)
 
     # ------------------------------------------------------------------ noise
 

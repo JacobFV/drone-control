@@ -35,6 +35,26 @@ class FlagSpec:
 
 
 @dataclass(slots=True)
+class ClothSpec:
+    """A deformable cloth panel for the high-fidelity (PyBullet) backend —
+    a hanging flag, banner, curtain, or garment pinned along its top edge.
+
+    Pure data (no PyBullet import) so scene-building stays dependency-light; the
+    physics backend consumes these only when ``physics_backend == 'pybullet'``.
+    """
+
+    anchor: tuple[float, float, float]      # world point the top edge pins to
+    color: Color = (200, 80, 80)
+    width: float = 1.4
+    height: float = 1.0
+    mass: float = 0.1
+    label: str = "cloth"
+    kind: str = "flag"                       # flag | banner | curtain | garment
+    plane: str = "xz"                        # plane the panel hangs in (xz | yz)
+    stiffness: float = 40.0
+
+
+@dataclass(slots=True)
 class Box:
     center: tuple[float, float, float]
     size: tuple[float, float, float]
@@ -96,6 +116,7 @@ class Scene:
     flows: list[FlowSpec] = field(default_factory=list)          # airflow primitives
     flags: list[FlagSpec] = field(default_factory=list)          # cloth soft bodies
     rigids: list[RigidSpec] = field(default_factory=list)        # free rigid bodies
+    cloths: list[ClothSpec] = field(default_factory=list)        # deformable cloth (pybullet)
     particles: list[ParticleSpec] = field(default_factory=list)  # dust / smoke
     ceiling_z: float | None = None     # indoor scenes have a ceiling plane
     ceiling_color: Color = (40, 44, 50)
@@ -392,6 +413,61 @@ def _open_field() -> Scene:
     )
 
 
+def _clothing_store() -> Scene:
+    """Indoor retail floor: garment racks with hanging cloth, mannequins, AC
+    draft. Designed to show off the high-fidelity (PyBullet) physics backend —
+    the garments are real deformable cloth that sways in the airflow."""
+    boxes: list[Box] = []
+    cloths: list[ClothSpec] = []
+    garment_palette = [(196, 86, 96), (78, 120, 180), (84, 154, 110), (210, 178, 86), (150, 110, 180), (90, 96, 110)]
+
+    # Garment racks: two posts + a top rail, garments hanging off it. Cloth is
+    # expensive, so a few well-placed racks (4 garments each) — enough to read as
+    # a shop floor while staying real-time on the deformable solver.
+    racks = [(-5.0, -4.0), (5.0, -4.0), (-5.0, 4.0), (5.0, 4.0)]
+    for ri, (rx, ry) in enumerate(racks):
+        rail_z = 1.6
+        boxes.append(Box((rx - 1.3, ry, rail_z / 2), (0.1, 0.1, rail_z), (150, 150, 158), "rack-post"))
+        boxes.append(Box((rx + 1.3, ry, rail_z / 2), (0.1, 0.1, rail_z), (150, 150, 158), "rack-post"))
+        boxes.append(Box((rx, ry, rail_z), (2.7, 0.1, 0.08), (170, 172, 180), "rack-rail"))
+        for gi in range(4):
+            gx = rx - 1.05 + gi * (2.1 / 3)
+            color = garment_palette[(ri * 4 + gi) % len(garment_palette)]
+            cloths.append(ClothSpec(anchor=(gx, ry, rail_z), color=color, width=0.5,
+                                    height=0.95, mass=0.08, label="garment", kind="garment", plane="xz"))
+
+    # Wall shelves with folded stock, mannequins, a checkout counter, fitting rooms.
+    for sx in (-10.5, 10.5):
+        for sz in (0.8, 1.6, 2.4):
+            boxes.append(Box((sx, 0, sz), (0.5, 14, 0.12), (160, 150, 138), "shelf"))
+    for k, (mx, my) in enumerate([(-9, -7), (-9, 7), (9, -7), (9, 7), (0, -9)]):
+        boxes.append(Box((mx, my, 0.95), (0.5, 0.3, 1.9), _jit((205, 198, 188), k, 12), "mannequin"))
+    boxes.append(Box((0, 9, 0.55), (5.0, 1.4, 1.1), (120, 110, 96), "counter"))
+    for fx in (-10.5, -8.0, 8.0, 10.5):
+        boxes.append(Box((fx, 10.5, 1.2), (0.12, 2.0, 2.4), (130, 134, 142), "fitting-wall"))
+    # Perimeter walls.
+    boxes.append(Box((0, -11.5, 1.4), (24, 0.3, 2.8), (172, 168, 162), "wall"))
+    boxes.append(Box((0, 11.5, 1.4), (24, 0.3, 2.8), (172, 168, 162), "wall"))
+
+    # A toppled stock crate + a shopping basket as free rigid bodies.
+    rigids = [
+        RigidSpec("crate", (180, 140, 90), (0.6, 0.6, 0.6), mass=0.5, pos=(3.0, -9.0, 0.35)),
+        RigidSpec("basket", (160, 70, 70), (0.45, 0.6, 0.4), mass=0.2, pos=(-3.0, 9.0, 0.3), spin=(0.0, 0.0, 0.2)),
+    ]
+    # Ceiling AC vents push air across the racks so the garments sway + ripple.
+    flows = [
+        FlowSpec("wind", {"dir": (0.8, 0.0, 0.0), "gust": 0.5, "period": 6.0, "turbulence": 0.4, "shear_ref": 2.5}),
+        FlowSpec("fan", {"pos": (-11.0, 0.0, 2.9), "dir": (1.0, 0.0, -0.15), "speed": 5.5, "radius": 1.4, "reach": 18.0, "spread": 0.7}, label="ac-vent"),
+    ]
+    return Scene(
+        id="clothing_store", name="Clothing store (indoor)", kind="indoor",
+        sky_top=(96, 98, 110), sky_bottom=(150, 150, 162),
+        ground_color=(150, 142, 132), ground_alt=(140, 132, 122), grid_color=(168, 160, 150),
+        boxes=boxes, flows=flows, rigids=rigids, cloths=cloths,
+        ceiling_z=3.2, ceiling_color=(196, 196, 204),
+    )
+
+
 _BUILDERS = {
     "open_field": _open_field,
     "warehouse": _warehouse,
@@ -400,6 +476,7 @@ _BUILDERS = {
     "park": _park,
     "construction": _construction,
     "atrium": _atrium,
+    "clothing_store": _clothing_store,
 }
 
 DEFAULT_SCENE = "open_field"

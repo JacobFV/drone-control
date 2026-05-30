@@ -14,3 +14,7 @@ transformers>=4.40
 huggingface_hub>=0.23
 # Realtime push transport for the desktop UI (drone_control/ws.py).
 websockets>=13
+
+# High-fidelity rigid + soft-body / cloth physics backend (drone_control/sim/physics.py).
+# Opt-in via physics_backend="pybullet"; the lightweight in-house engine is the default.
+pybullet>=3.2
