@@ -2,3 +2,5 @@ node_modules/
 out/
 assets/source/
 public/media/
+# Generated clip library — reproducible from tools/, kept local (keep the README).
+assets/clips/**/*.mp4

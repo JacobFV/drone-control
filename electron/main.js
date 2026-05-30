@@ -12,14 +12,24 @@ app.disableHardwareAcceleration();
 app.commandLine.appendSwitch("disable-gpu");
 
 function createWindow() {
+  // Recording mode (DRONE_REC): frameless window pinned to the screen origin at
+  // a fixed size so an external screen-grab can capture a clean, stable frame.
+  const rec = process.env.DRONE_REC;
+  const recBounds = rec
+    ? {
+        x: 0,
+        y: 0,
+        width: Number(process.env.DRONE_REC_W || 1920),
+        height: Number(process.env.DRONE_REC_H || 1080),
+        frame: false,
+      }
+    : { width: 1440, height: 940, titleBarStyle: "hiddenInset" };
   const window = new BrowserWindow({
-    width: 1440,
-    height: 940,
+    ...recBounds,
     minWidth: 1120,
     minHeight: 720,
     title: "Drone Control Station",
     backgroundColor: "#111416",
-    titleBarStyle: "hiddenInset",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -47,11 +57,38 @@ padding:2px 6px;border-radius:4px;color:#ffd35a}</style></head><body><main>
 <p>then restart the app with <code>npm start</code>.</p></main></body></html>`),
     );
   }
+
+  // Recording automation: poll a command file and run each new line as JS in the
+  // renderer (e.g. set `location.hash` to maximize a tile). Keeps the recorder
+  // in control of the live UI without simulated mouse/keyboard input.
+  if (process.env.DRONE_REC) {
+    const cmdFile = process.env.DRONE_REC_CMD || "/tmp/drone_rec_cmd";
+    let last = "";
+    setInterval(() => {
+      let text = "";
+      try {
+        text = require("fs").readFileSync(cmdFile, "utf8");
+      } catch (_error) {
+        return;
+      }
+      if (text === last) return;
+      last = text;
+      const js = text.trim();
+      if (js) window.webContents.executeJavaScript(js).catch(() => {});
+    }, 200);
+  }
 }
 
 app.whenReady().then(async () => {
   Menu.setApplicationMenu(null);
-  serviceUrl = await startPythonService();
+  // Allow pointing the UI at an already-running service (recording/automation),
+  // instead of spawning a fresh one on a random port.
+  if (process.env.DRONE_SERVICE_URL) {
+    serviceUrl = process.env.DRONE_SERVICE_URL;
+    serviceWsUrl = process.env.DRONE_WS_URL || "";
+  } else {
+    serviceUrl = await startPythonService();
+  }
   ipcMain.handle("app:request", async (_event, request) => serviceRequest(request));
   ipcMain.handle("app:serviceUrl", () => serviceUrl);
   ipcMain.handle("app:wsUrl", () => serviceWsUrl);
@@ -131,7 +168,14 @@ async function serviceRequest(request) {
   }
   const response = await fetch(new URL(pathName, serviceUrl), options);
   if (!response.ok) {
-    throw new Error(`Service request failed: ${response.status} ${response.statusText}`);
+    let detail = "";
+    try {
+      const payload = await response.json();
+      if (payload && typeof payload.error === "string") detail = `: ${payload.error}`;
+    } catch (_error) {
+      detail = "";
+    }
+    throw new Error(`Service request failed: ${response.status} ${response.statusText}${detail}`);
   }
   return response.json();
 }

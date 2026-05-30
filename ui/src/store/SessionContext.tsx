@@ -65,7 +65,18 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const [rhsTab, setRhsTab] = useState<RhsTab>("flight");
   const [rhsCollapsed, setRhsCollapsed] = useState(false);
-  const [maximizedTile, setMaximizedTile] = useState<string | null>(null);
+  // Honor a `#max=<tileId>` URL hash so an external recorder can drive which
+  // tile is maximized (and change it live via hashchange) without UI clicks.
+  const hashTile = () => {
+    const m = /(?:^|[#&])max=([^&]+)/.exec(window.location.hash);
+    return m ? decodeURIComponent(m[1]) : null;
+  };
+  const [maximizedTile, setMaximizedTile] = useState<string | null>(hashTile());
+  useEffect(() => {
+    const onHash = () => setMaximizedTile(hashTile());
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
   const [newSessionOpen, setNewSessionOpen] = useState(false);
   const [reviewSessionId, setReviewSessionId] = useState<string | null>(null);
 
