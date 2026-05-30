@@ -23,7 +23,7 @@ export function FlightPanel() {
   const seg = session?.segmentation?.status;
   const env = (session?.env ?? {}) as Record<string, unknown>;
   const wind = env.wind as
-    | { speed?: number; ambient?: number[]; sources?: number; flags?: number; rigidBodies?: number; particles?: number }
+    | { speed?: number; ambient?: number[]; sources?: number; cloth?: number; rigidBodies?: number; particles?: number; smoke?: number }
     | undefined;
   const currentSession = state?.environments
     .flatMap((e) => e.sessions)
@@ -100,12 +100,13 @@ export function FlightPanel() {
             entries={[
               { key: "Wind (m/s)", value: wind.speed ?? 0 },
               { key: "Vector", value: (wind.ambient ?? []).map((v) => v.toFixed(1)).join(", ") || "—" },
-              { key: "Cloth flags", value: wind.flags ?? 0 },
+              { key: "Cloth", value: wind.cloth ?? 0 },
               { key: "Rigid bodies", value: wind.rigidBodies ?? 0 },
-              { key: "Particles", value: wind.particles ?? 0 },
+              { key: "Dust", value: wind.particles ?? 0 },
+              { key: "Smoke puffs", value: wind.smoke ?? 0 },
             ]}
           />
-          <p className="muted">Drones are pushed by wind, fans, moving-object wakes, and each other's rotor downwash; cloth, rigid debris, and dust/smoke react to the same field.</p>
+          <p className="muted">Drones are pushed by wind, fans, wakes, and rotor downwash, and collide with walls and bodies. Cloth, rigid debris, and smoke react to the same field.</p>
         </Panel>
       )}
 

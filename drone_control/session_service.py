@@ -107,7 +107,6 @@ class SessionService:
                         rate_hz=float(options.get("rateHz") or 15.0),
                         max_speed=bool(options.get("maxSpeed", False)),
                         render=bool(options.get("render", True)),
-                        physics_backend=str(options.get("physicsBackend") or "lite"),
                     )
                 )
                 environment_id = str(options.get("environmentId") or "env-sim-default")

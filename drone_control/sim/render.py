@@ -114,11 +114,11 @@ class CameraRenderer:
         goals: np.ndarray,
         indices: list[int] | None = None,
         t: float = 0.0,
-        flags: list | None = None,
         wind: tuple[float, float, float] | None = None,
         rigids: list | None = None,
         particles: tuple | None = None,
         meshes: list | None = None,
+        smoke: dict | None = None,
     ) -> list[bytes]:
         pos = np.asarray(pos, dtype=np.float64)
         quat_wxyz = np.asarray(quat_wxyz, dtype=np.float64)
@@ -133,11 +133,11 @@ class CameraRenderer:
             dyn_quads.extend(rigids)
         idxs = list(range(pos.shape[0])) if indices is None else indices
         return [
-            self._render_one(i, pos, rot, goals, dyn_quads, flags or [], wind, t, particles, meshes or [])
+            self._render_one(i, pos, rot, goals, dyn_quads, wind, t, particles, meshes or [], smoke)
             for i in idxs
         ]
 
-    def _render_one(self, i, pos, rot, goals, dyn_quads, flags, wind, t, particles=None, meshes=()) -> bytes:
+    def _render_one(self, i, pos, rot, goals, dyn_quads, wind, t, particles=None, meshes=(), smoke=None) -> bytes:
         cfg = self.config
         cam = pos[i]
         r = rot[i]
@@ -185,11 +185,7 @@ class CameraRenderer:
         if wind is not None and (wind[0] ** 2 + wind[1] ** 2 + wind[2] ** 2) > 0.4:
             self._draw_streaks(draw, project, np.asarray(wind, dtype=float), t)
 
-        # Cloth flags (lite soft bodies) as shaded deformed quads.
-        for grid, fcolor in flags:
-            self._draw_flag(draw, project, np.asarray(grid, dtype=float), tuple(fcolor))
-
-        # Deformable cloth meshes (PyBullet backend) as shaded triangles.
+        # Deformable cloth meshes (PyBullet soft bodies) as shaded triangles.
         for verts, faces, mcolor, _label in meshes:
             self._draw_mesh(draw, project, np.asarray(verts, dtype=float), faces, tuple(mcolor))
 
@@ -209,6 +205,12 @@ class CameraRenderer:
             rad = max(2.0, 120.0 / pg[2])
             draw.ellipse([pg[0] - rad, pg[1] - rad, pg[0] + rad, pg[1] + rad], outline=(255, 60, 220), width=2)
             draw.line([self.cx, self.cy, pg[0], pg[1]], fill=(255, 60, 220), width=1)
+
+        # Volumetric smoke + fire: composite soft depth-sorted puffs over the
+        # whole frame (the camera genuinely sees through/into smoke).
+        if smoke is not None and len(smoke.get("pos", ())) > 0:
+            img = self._composite_smoke(img, project, smoke)
+            draw = ImageDraw.Draw(img)
 
         quality = cfg.jpeg_quality
         if self.noise is not None and self.noise.enabled:
@@ -323,19 +325,52 @@ class CameraRenderer:
                 continue
             draw.line([(a[0], a[1]), (b[0], b[1])], fill=(220, 226, 232), width=1)
 
-    def _draw_flag(self, draw, project, grid, color) -> None:
-        ny, nx = grid.shape[0], grid.shape[1]
-        for r in range(ny - 1):
-            for c in range(nx - 1):
-                quad = [grid[r, c], grid[r, c + 1], grid[r + 1, c + 1], grid[r + 1, c]]
-                proj = [project(p) for p in quad]
-                if any(p is None for p in proj):
-                    continue
-                # Shade by facing the camera + stripe so folds read.
-                mean_z = sum(p[2] for p in proj) / 4.0
-                shade = 0.7 + 0.3 * ((r + c) % 2)
-                col = self._fog(_scale(color, shade), mean_z)
-                draw.polygon([(p[0], p[1]) for p in proj], fill=col)
+    def _composite_smoke(self, img, project, smoke) -> "Image.Image":
+        """Alpha-composite volumetric smoke/fire puffs over the frame.
+
+        Each puff is a soft radial splat: smoke uses 'over' compositing (it
+        occludes), fire adds emissive glow. Painted far->near so nearer puffs
+        layer correctly. Done in a numpy framebuffer for true partial opacity.
+        """
+        pos = np.asarray(smoke["pos"], dtype=float)
+        radius = np.asarray(smoke["radius"], dtype=float)
+        opacity = np.asarray(smoke["opacity"], dtype=float)
+        color = np.asarray(smoke["color"], dtype=float)
+        emissive = np.asarray(smoke["emissive"], dtype=float)
+
+        arr = np.asarray(img, dtype=np.float32)
+        h, w = arr.shape[0], arr.shape[1]
+
+        # Project all centres; keep those in front of the camera.
+        proj = [project(p) for p in pos]
+        items = []
+        for k, pr in enumerate(proj):
+            if pr is None:
+                continue
+            u, v, z = pr
+            sr = max(2.0, self.focal * radius[k] / z)
+            items.append((z, u, v, sr, k))
+        items.sort(key=lambda q: q[0], reverse=True)  # far -> near
+
+        for z, u, v, sr, k in items:
+            x0, x1 = max(0, int(u - sr)), min(w, int(u + sr) + 1)
+            y0, y1 = max(0, int(v - sr)), min(h, int(v + sr) + 1)
+            if x1 <= x0 or y1 <= y0:
+                continue
+            ys, xs = np.mgrid[y0:y1, x0:x1]
+            d2 = ((xs - u) / sr) ** 2 + ((ys - v) / sr) ** 2
+            falloff = np.exp(-2.2 * d2).astype(np.float32)
+            patch = arr[y0:y1, x0:x1, :]
+            col = color[k].astype(np.float32)
+            if emissive[k] > 0.05:
+                # Fire: additive glow (bright, light-emitting).
+                patch += (emissive[k] * falloff)[..., None] * col
+            else:
+                a = np.clip(opacity[k] * falloff, 0.0, 1.0)[..., None]
+                patch[:] = patch * (1.0 - a) + col[None, None, :] * a
+            arr[y0:y1, x0:x1, :] = patch
+
+        return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8), mode="RGB")
 
     def _draw_mesh(self, draw, project, verts, faces, color) -> None:
         """Draw a deformable cloth as depth-sorted shaded triangles."""

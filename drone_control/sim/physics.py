@@ -158,6 +158,10 @@ class PyBulletWorld:
         gravity: float = 9.81,
         ground_z: float = 0.0,
         seed: int = 0,
+        static_boxes: list[
+            tuple[tuple[float, float, float], tuple[float, float, float]]
+        ]
+        | None = None,
     ) -> None:
         if p is None:  # pragma: no cover - guarded import
             raise RuntimeError(f"pybullet is unavailable: {_IMPORT_ERROR}")
@@ -171,6 +175,15 @@ class PyBulletWorld:
         self._has_cloth = bool(cloths)
         # DIRECT (headless) client, one per world; threaded through every call.
         self.cid = p.connect(p.DIRECT)
+
+        # Collision-only obstacle ids the drone proxies query against: the
+        # ground plane, the static scene boxes, plus the free rigid bodies
+        # (filled in below). Cloth and the drone proxies themselves are excluded.
+        self.ground_id: int | None = None
+        self.static_box_ids: list[int] = []
+        # Kinematic drone collision proxies (mass-0 spheres); see set_drones.
+        self.drone_proxy_ids: list[int] = []
+        self.drone_radius: float = 0.13
 
         if self._has_cloth:
             # Deformable world is required for soft bodies; resetSimulation with
@@ -189,6 +202,12 @@ class PyBulletWorld:
         )
 
         self._add_ground()
+
+        # --- static scene collision geometry (walls/shelves/furniture) ----
+        # Collision-only: the camera draws scene geometry separately, so these
+        # are *not* returned by rigid_faces(); they only block the drones.
+        for box in static_boxes or []:
+            self._add_static_box(box)
 
         # --- rigid bodies -------------------------------------------------
         self.body_ids: list[int] = []
@@ -230,8 +249,35 @@ class PyBulletWorld:
             p.changeDynamics(
                 gid, -1, restitution=0.3, lateralFriction=0.8, physicsClientId=self.cid
             )
+            self.ground_id = gid
         except Exception as exc:  # pragma: no cover - degrade, never crash
             print(f"[physics] ground plane failed: {exc}", file=sys.stderr)
+
+    def _add_static_box(
+        self,
+        box: tuple[tuple[float, float, float], tuple[float, float, float]],
+    ) -> None:
+        """One STATIC, collision-only axis-aligned box ``(center, full_size)``.
+
+        Mass-0 GEOM_BOX with no visual shape — the camera renders the scene's
+        walls/shelves separately, so these exist purely to block the drones
+        (and the wind-blown rigids). The id is tracked as an obstacle.
+        """
+        try:
+            center, full_size = box
+            half = (np.asarray(full_size, dtype=np.float64) * 0.5).tolist()
+            col = p.createCollisionShape(
+                p.GEOM_BOX, halfExtents=half, physicsClientId=self.cid
+            )
+            bid = p.createMultiBody(
+                baseMass=0.0,
+                baseCollisionShapeIndex=col,
+                basePosition=[float(c) for c in center],
+                physicsClientId=self.cid,
+            )
+            self.static_box_ids.append(bid)
+        except Exception as exc:  # pragma: no cover - degrade, never crash
+            print(f"[physics] static box failed: {exc}", file=sys.stderr)
 
     def _add_rigid(self, spec: RigidSpec) -> None:
         """One free rigid box: collision+visual GEOM_BOX with mass, vel, spin."""
@@ -445,11 +491,8 @@ class PyBulletWorld:
     # ----------------------------------------------------------------- render
 
     def rigid_faces(self) -> list[tuple[list[np.ndarray], tuple[int, int, int], str]]:
-        """Six shaded quads per rigid body, as ``(corners, color, label)``.
-
-        Same shape as :meth:`rigid.RigidWorld.face_quads` so the renderer paints
-        a PyBullet box identically to a hand-rolled one.
-        """
+        """Six shaded quads per rigid body, as ``(corners, color, label)`` —
+        the shape the renderer's depth-sorting box painter consumes."""
         out: list[tuple[list[np.ndarray], tuple[int, int, int], str]] = []
         if self._closed or not self.body_ids:
             return out
@@ -579,6 +622,135 @@ class PyBulletWorld:
             return np.nan_to_num(np.asarray(cs, dtype=np.float64).reshape(-1, 3))
         except Exception:
             return np.zeros((0, 3), dtype=np.float64)
+
+    # ------------------------------------------------------------ drone proxies
+
+    def set_drones(self, count: int, radius: float = 0.13) -> None:
+        """Create ``count`` kinematic mass-0 sphere proxies for collision queries.
+
+        These bodies never move under physics (mass 0); their positions are set
+        explicitly via :meth:`update_drones`, and they are only ever read through
+        ``getClosestPoints`` in :meth:`drone_collisions`. Idempotent: a second
+        call with a different ``count`` tears down the old proxies first. Safe
+        when ``count == 0`` (leaves no proxies).
+        """
+        if self._closed:
+            return
+        count = max(0, int(count))
+        self.drone_radius = float(radius)
+        # Recreate only when the count changed; otherwise reuse existing ids.
+        if count == len(self.drone_proxy_ids):
+            return
+        # Tear down any existing proxies before recreating.
+        for pid in self.drone_proxy_ids:
+            try:
+                p.removeBody(pid, physicsClientId=self.cid)
+            except Exception:
+                pass
+        self.drone_proxy_ids = []
+        for _ in range(count):
+            try:
+                col = p.createCollisionShape(
+                    p.GEOM_SPHERE, radius=self.drone_radius, physicsClientId=self.cid
+                )
+                pid = p.createMultiBody(
+                    baseMass=0.0,
+                    baseCollisionShapeIndex=col,
+                    basePosition=[0.0, 0.0, 0.0],
+                    physicsClientId=self.cid,
+                )
+                self.drone_proxy_ids.append(pid)
+            except Exception as exc:  # pragma: no cover - degrade, never crash
+                print(f"[physics] drone proxy failed: {exc}", file=sys.stderr)
+
+    def update_drones(self, positions) -> None:
+        """Move the drone proxies to ``positions`` [K,3] (identity orientation).
+
+        Guards a length mismatch: only ``min(K, num_proxies)`` proxies move.
+        """
+        if self._closed or not self.drone_proxy_ids:
+            return
+        try:
+            pos = np.atleast_2d(np.asarray(positions, dtype=np.float64)).reshape(-1, 3)
+            pos = np.nan_to_num(pos, nan=0.0, posinf=_MAX_POS, neginf=-_MAX_POS)
+            n = min(pos.shape[0], len(self.drone_proxy_ids))
+            for i in range(n):
+                p.resetBasePositionAndOrientation(
+                    self.drone_proxy_ids[i],
+                    pos[i].tolist(),
+                    [0.0, 0.0, 0.0, 1.0],
+                    physicsClientId=self.cid,
+                )
+        except Exception as exc:  # pragma: no cover - degrade, never crash
+            print(f"[physics] update_drones failed: {exc}", file=sys.stderr)
+
+    def drone_collisions(
+        self, margin: float = 0.02
+    ) -> list[tuple[int, list[float], float]]:
+        """Per-drone deepest contact against the scene's collision obstacles.
+
+        Obstacles are the static scene boxes, the ground plane, and the free
+        rigid bodies — *not* cloth, *not* the other drone proxies. For each drone
+        we ``getClosestPoints`` against every obstacle within ``margin``; a point
+        with ``contactDistance < 0`` is penetrating (depth = -contactDistance),
+        and a slightly-positive distance within ``margin`` counts as imminent
+        (depth >= 0). We keep the single deepest contact per drone and return
+        ``(drone_index, normal_world[3], depth)`` where ``normal_world`` is a unit
+        vector pointing FROM the obstacle TOWARD the drone (the push-out
+        direction). Drones with no contact are omitted; ``[]`` if no proxies.
+
+        ``getClosestPoints(proxyId, bodyId)`` returns ``contactNormalOnB`` for
+        body B (the obstacle), which points from the obstacle toward A (the
+        proxy) — i.e. already the outward push-out direction we want (verified
+        empirically by jamming a proxy into a static box: see module test).
+        """
+        out: list[tuple[int, list[float], float]] = []
+        if self._closed or not self.drone_proxy_ids:
+            return out
+        # Obstacle bodies: ground + static scene boxes + free rigids (no cloth).
+        obstacle_ids: list[int] = []
+        if self.ground_id is not None:
+            obstacle_ids.append(self.ground_id)
+        obstacle_ids.extend(self.static_box_ids)
+        obstacle_ids.extend(self.body_ids)
+        if not obstacle_ids:
+            return out
+        for di, pid in enumerate(self.drone_proxy_ids):
+            best_depth = -np.inf
+            best_normal: np.ndarray | None = None
+            for bid in obstacle_ids:
+                try:
+                    pts = p.getClosestPoints(
+                        pid, bid, distance=margin, physicsClientId=self.cid
+                    )
+                except Exception:
+                    continue
+                if not pts:
+                    continue
+                for cp in pts:
+                    # cp[8] = contactDistance, cp[7] = contactNormalOnB (xyz).
+                    try:
+                        dist = float(cp[8])
+                        normal_b = np.asarray(cp[7], dtype=np.float64)
+                    except Exception:
+                        continue
+                    depth = -dist  # <0 dist -> positive penetration depth
+                    if depth < 0.0:
+                        # Within margin but not yet touching; treat as imminent.
+                        depth = 0.0
+                    if depth > best_depth:
+                        best_depth = depth
+                        best_normal = normal_b
+            if best_normal is None:
+                continue
+            n = np.nan_to_num(best_normal, nan=0.0, posinf=0.0, neginf=0.0)
+            mag = float(np.linalg.norm(n))
+            if mag < 1e-9:
+                n = np.array([0.0, 0.0, 1.0], dtype=np.float64)  # default world-up
+            else:
+                n = n / mag
+            out.append((int(di), n.tolist(), float(max(0.0, best_depth))))
+        return out
 
     # ------------------------------------------------------------------- close
 

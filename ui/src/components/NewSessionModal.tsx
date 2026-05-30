@@ -25,7 +25,6 @@ export function NewSessionModal() {
   const [rateHz, setRateHz] = useState(15);
   const [cameraNoise, setCameraNoise] = useState("medium");
   const [speed, setSpeed] = useState<"realtime" | "max">("realtime");
-  const [physics, setPhysics] = useState<"lite" | "pybullet">("lite");
   const [worldModel, setWorldModel] = useState(true);
   const [busy, setBusy] = useState(false);
 
@@ -42,7 +41,7 @@ export function NewSessionModal() {
     setBusy(true);
     const options =
       kind === "sim"
-        ? { numDrones, task, scene, rateHz, cameraNoise, maxSpeed: speed === "max", physicsBackend: physics, record: true }
+        ? { numDrones, task, scene, rateHz, cameraNoise, maxSpeed: speed === "max", record: true }
         : { worldModel, record: true };
     const result = await api.sessionStart(kind, `${kind} session`, options);
     setBusy(false);
@@ -122,17 +121,6 @@ export function NewSessionModal() {
                   options={[
                     { value: "realtime", label: "Realtime" },
                     { value: "max", label: "Max speed" },
-                  ]}
-                />
-              </Field>
-              <Field label="Physics">
-                <SegmentedControl
-                  ariaLabel="physics backend"
-                  value={physics}
-                  onChange={(v) => setPhysics(v)}
-                  options={[
-                    { value: "lite", label: "Lite" },
-                    { value: "pybullet", label: "High-fidelity" },
                   ]}
                 />
               </Field>

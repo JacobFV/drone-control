@@ -17,31 +17,32 @@ from dataclasses import dataclass, field
 
 from .flow import FlowSpec
 from .particles import ParticleSpec
-from .rigid import RigidSpec
+from .smoke import FireSpec, SmokeSpec
 
 Color = tuple[int, int, int]
 
 
 @dataclass(slots=True)
-class FlagSpec:
-    """A cloth flag the session instantiates as a soft-body mass-spring grid."""
+class RigidSpec:
+    """Scene-authored description of one free rigid body (pure data)."""
 
-    mast_top: tuple[float, float, float]
-    direction: tuple[float, float, float]
-    width: float = 2.8
-    height: float = 1.5
-    color: Color = (210, 70, 70)
-    label: str = "flag"
+    label: str
+    color: Color
+    size: tuple[float, float, float]                    # box full dimensions (m)
+    mass: float = 0.5                                   # kg
+    pos: tuple[float, float, float] = (0.0, 0.0, 1.0)   # initial center
+    vel: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    restitution: float = 0.35                           # bounce on ground contact
+    friction: float = 0.5                               # tangential damping on contact
+    drag_cd: float = 1.05
+    spin: tuple[float, float, float] = (0.0, 0.0, 0.0)  # initial body omega (rad/s)
 
 
 @dataclass(slots=True)
 class ClothSpec:
-    """A deformable cloth panel for the high-fidelity (PyBullet) backend —
-    a hanging flag, banner, curtain, or garment pinned along its top edge.
-
-    Pure data (no PyBullet import) so scene-building stays dependency-light; the
-    physics backend consumes these only when ``physics_backend == 'pybullet'``.
-    """
+    """A deformable cloth panel (PyBullet soft body) — a hanging flag, banner,
+    curtain, or garment pinned along its top edge. Pure data (no PyBullet
+    import) so scene-building stays dependency-light."""
 
     anchor: tuple[float, float, float]      # world point the top edge pins to
     color: Color = (200, 80, 80)
@@ -114,10 +115,11 @@ class Scene:
     boxes: list[Box] = field(default_factory=list)
     dynamics: list[DynamicSpec] = field(default_factory=list)   # moving objects
     flows: list[FlowSpec] = field(default_factory=list)          # airflow primitives
-    flags: list[FlagSpec] = field(default_factory=list)          # cloth soft bodies
     rigids: list[RigidSpec] = field(default_factory=list)        # free rigid bodies
-    cloths: list[ClothSpec] = field(default_factory=list)        # deformable cloth (pybullet)
-    particles: list[ParticleSpec] = field(default_factory=list)  # dust / smoke
+    cloths: list[ClothSpec] = field(default_factory=list)        # deformable cloth
+    particles: list[ParticleSpec] = field(default_factory=list)  # dust tracers
+    smokes: list[SmokeSpec] = field(default_factory=list)        # volumetric smoke
+    fires: list[FireSpec] = field(default_factory=list)          # fire + smoke columns
     ceiling_z: float | None = None     # indoor scenes have a ceiling plane
     ceiling_color: Color = (40, 44, 50)
     far: float = 45.0
@@ -253,7 +255,7 @@ def _city() -> Scene:
     flows = [
         FlowSpec("wind", {"dir": (0.6, 4.2, 0.0), "gust": 0.5, "period": 8.5, "turbulence": 1.1, "shear_ref": 6.0}),
     ]
-    flags = [FlagSpec(mast_top=(4.0, 4.0, 9.0), direction=(0.0, 1.0, 0.1), width=3.2, height=1.8, color=(80, 120, 210), label="banner")]
+    cloths = [ClothSpec(anchor=(4.0, 4.0, 9.0), width=3.2, height=1.8, color=(80, 120, 210), label="banner", kind="banner", plane="yz")]
     rigids = [
         RigidSpec("debris", (180, 180, 175), (0.4, 0.4, 0.25), mass=0.08, pos=(0.0, -2.0, 0.2)),
         RigidSpec("debris", (160, 150, 140), (0.5, 0.3, 0.3), mass=0.1, pos=(-1.0, 1.0, 0.2), spin=(0.0, 0.0, 0.6)),
@@ -263,7 +265,7 @@ def _city() -> Scene:
         id="city", name="City block (outdoor)", kind="outdoor",
         sky_top=(56, 90, 150), sky_bottom=(152, 180, 206),
         ground_color=(56, 58, 64), ground_alt=(66, 68, 74), grid_color=(150, 150, 90),
-        boxes=boxes, dynamics=dynamics, flows=flows, flags=flags, rigids=rigids, particles=particles, far=70.0, fog_density=0.016,
+        boxes=boxes, dynamics=dynamics, flows=flows, cloths=cloths, rigids=rigids, particles=particles, far=70.0, fog_density=0.016,
     )
 
 
@@ -337,22 +339,20 @@ def _construction() -> Scene:
         FlowSpec("fan", {"pos": (-11.0, 0.0, 1.4), "dir": (1.0, 0.0, 0.15), "speed": 9.0, "radius": 1.6, "reach": 16.0, "spread": 0.8}, label="site-fan"),
         FlowSpec("updraft", {"cx": -3.0, "cy": 0.0, "radius": 4.5, "speed": 2.6, "top": 12.0}),
     ]
-    flags = [FlagSpec(mast_top=(8.2, -8.0, 13.8), direction=(-1.0, 0.0, 0.05), width=2.0, height=1.1, color=(230, 200, 60), label="crane-flag")]
-    # Loose materials the fan/wind can shove, plus a smoke plume and site dust.
+    cloths = [ClothSpec(anchor=(8.2, -8.0, 13.8), width=2.0, height=1.1, color=(230, 200, 60), label="crane-flag", kind="flag", plane="xz")]
+    # Loose materials the fan/wind can shove, a burn-barrel fire + smoke, site dust.
     rigids = [
         RigidSpec("pallet", (170, 130, 75), (1.0, 0.9, 0.4), mass=0.6, pos=(-7.0, 1.5, 0.3), spin=(0.0, 0.0, 0.3)),
         RigidSpec("debris", (150, 145, 135), (0.5, 0.5, 0.4), mass=0.2, pos=(-9.0, 0.5, 0.3)),
         RigidSpec("debris", (165, 150, 120), (0.4, 0.6, 0.3), mass=0.18, pos=(-8.0, -1.0, 0.3), spin=(0.4, 0.2, 0.0)),
     ]
-    particles = [
-        ParticleSpec("smoke", (-8.0, 6.0, 1.4), count=55, color=(120, 120, 126), spawn_radius=0.8, lifetime=4.5, rise=2.6, size=2.2),
-        ParticleSpec("dust", (-3.0, 0.0, 0.2), count=60, color=(170, 150, 120), spawn_radius=7.0, lifetime=4.0),
-    ]
+    particles = [ParticleSpec("dust", (-3.0, 0.0, 0.2), count=60, color=(170, 150, 120), spawn_radius=7.0, lifetime=4.0)]
+    fires = [FireSpec((-8.0, 6.0, 0.4), radius=0.5, height=1.4, intensity=0.9, smoke_rate=45, flame_rate=22, rise=3.2, label="burn-barrel")]
     return Scene(
         id="construction", name="Construction site (outdoor)", kind="outdoor",
         sky_top=(120, 130, 150), sky_bottom=(186, 192, 200),
         ground_color=(126, 110, 88), ground_alt=(116, 100, 80), grid_color=(150, 130, 90),
-        boxes=boxes, dynamics=dynamics, flows=flows, flags=flags, rigids=rigids, particles=particles, far=70.0, fog_density=0.02,
+        boxes=boxes, dynamics=dynamics, flows=flows, cloths=cloths, rigids=rigids, particles=particles, fires=fires, far=70.0, fog_density=0.02,
     )
 
 
@@ -399,7 +399,7 @@ def _open_field() -> Scene:
     flows = [
         FlowSpec("wind", {"dir": wind_dir, "gust": 0.55, "period": 7.0, "turbulence": 0.7, "shear_ref": 3.0}),
     ]
-    flags = [FlagSpec(mast_top=(0.12, 0.0, 3.0), direction=(1.0, 0.22, 0.0), color=(220, 80, 70), label="windsock-flag")]
+    cloths = [ClothSpec(anchor=(0.12, 0.0, 3.0), width=2.8, height=1.5, color=(220, 80, 70), label="windsock-flag", kind="flag", plane="xz")]
     rigids = [
         RigidSpec("crate", (185, 150, 90), (0.7, 0.7, 0.7), mass=0.4, pos=(-5.0, 1.0, 0.4), spin=(0.3, 0.0, 0.4)),
         RigidSpec("debris", (170, 165, 150), (0.5, 0.5, 0.3), mass=0.15, pos=(-3.0, -2.0, 0.3)),
@@ -409,7 +409,7 @@ def _open_field() -> Scene:
         id="open_field", name="Open field (outdoor)", kind="outdoor",
         sky_top=(64, 104, 162), sky_bottom=(160, 188, 212),
         ground_color=(78, 118, 70), ground_alt=(70, 108, 62), grid_color=(96, 132, 84),
-        boxes=boxes, flows=flows, flags=flags, rigids=rigids, particles=particles, far=60.0, fog_density=0.012,
+        boxes=boxes, flows=flows, cloths=cloths, rigids=rigids, particles=particles, far=60.0, fog_density=0.012,
     )
 
 
@@ -468,6 +468,119 @@ def _clothing_store() -> Scene:
     )
 
 
+def _retail_store() -> Scene:
+    """General retail floor: stocked aisles, end-caps, checkout, shopping carts
+    (free rigid bodies), promo banners (cloth), AC airflow."""
+    boxes: list[Box] = []
+    cloths: list[ClothSpec] = []
+    product_palette = [(196, 86, 96), (78, 120, 180), (84, 154, 110), (210, 178, 86), (150, 110, 180), (200, 130, 70)]
+
+    # Gondola aisles: long double-sided shelving with stocked product blocks.
+    for ai, ax in enumerate((-7.5, -2.5, 2.5, 7.5)):
+        boxes.append(Box((ax, 0, 1.0), (1.6, 13.0, 2.0), (150, 152, 158), "gondola"))
+        for level in range(3):
+            for j, y in enumerate(range(-6, 7, 2)):
+                color = product_palette[(ai + level + j) % len(product_palette)]
+                boxes.append(Box((ax, y, 0.5 + level * 0.7), (1.7, 1.6, 0.5), _jit(color, ai + j + level, 14), "product"))
+        # End-cap displays.
+        boxes.append(Box((ax, 7.2, 0.7), (1.6, 1.0, 1.4), _jit((200, 120, 70), ai), "endcap"))
+
+    # Checkout lanes + entrance, perimeter walls (collision), promo banners.
+    for lx in (-9.5, -8.0, 8.0, 9.5):
+        boxes.append(Box((lx, -9.5, 0.5), (1.0, 2.4, 1.0), (120, 124, 132), "checkout"))
+    boxes.append(Box((0, -11.6, 1.4), (24, 0.3, 2.8), (168, 168, 172), "wall"))
+    boxes.append(Box((0, 11.6, 1.4), (24, 0.3, 2.8), (168, 168, 172), "wall"))
+    boxes.append(Box((-12, 0, 1.4), (0.3, 24, 2.8), (168, 168, 172), "wall"))
+    boxes.append(Box((12, 0, 1.4), (0.3, 24, 2.8), (168, 168, 172), "wall"))
+    for bx in (-5.0, 0.0, 5.0):
+        cloths.append(ClothSpec(anchor=(bx, 9.5, 3.0), width=1.6, height=0.9, color=_jit((210, 80, 80), int(bx + 6)),
+                                label="promo-banner", kind="banner", plane="xz"))
+
+    # Shopping carts + a knocked-over stock box the AC nudges.
+    rigids = [
+        RigidSpec("cart", (180, 184, 190), (0.6, 0.9, 0.7), mass=0.5, pos=(-5.0, -8.0, 0.4), spin=(0.0, 0.0, 0.1)),
+        RigidSpec("cart", (180, 184, 190), (0.6, 0.9, 0.7), mass=0.5, pos=(5.0, -7.0, 0.4)),
+        RigidSpec("stock-box", (175, 140, 85), (0.5, 0.5, 0.5), mass=0.25, pos=(0.0, 5.0, 0.3)),
+    ]
+    flows = [
+        FlowSpec("wind", {"dir": (0.0, 0.9, 0.0), "gust": 0.4, "period": 7.0, "turbulence": 0.3, "shear_ref": 2.5}),
+        FlowSpec("fan", {"pos": (0.0, -11.0, 2.9), "dir": (0.0, 1.0, -0.1), "speed": 5.0, "radius": 1.6, "reach": 20.0, "spread": 0.8}, label="ac-vent"),
+    ]
+    return Scene(
+        id="retail_store", name="Retail store (indoor)", kind="indoor",
+        sky_top=(110, 112, 122), sky_bottom=(158, 158, 168),
+        ground_color=(158, 152, 144), ground_alt=(148, 142, 134), grid_color=(176, 170, 160),
+        boxes=boxes, flows=flows, rigids=rigids, cloths=cloths,
+        ceiling_z=3.2, ceiling_color=(208, 208, 214),
+    )
+
+
+def _house_on_fire() -> Scene:
+    """A house interior with rooms (walls = collision geometry), furniture, an
+    active fire with heavy volumetric smoke, heat updrafts, falling debris and
+    a burning curtain. The firefighter-rescue search scenario."""
+    boxes: list[Box] = []
+
+    # Outer shell + internal partitions forming four rooms with doorway gaps.
+    boxes.append(Box((0, -9, 1.4), (20, 0.3, 2.8), (140, 120, 110), "wall"))
+    boxes.append(Box((0, 9, 1.4), (20, 0.3, 2.8), (140, 120, 110), "wall"))
+    boxes.append(Box((-10, 0, 1.4), (0.3, 18, 2.8), (140, 120, 110), "wall"))
+    boxes.append(Box((10, 0, 1.4), (0.3, 18, 2.8), (140, 120, 110), "wall"))
+    # Internal cross-walls (leave doorway gaps by splitting into segments).
+    for seg in ((-7.5, -3.5), (3.5, 7.5)):  # horizontal partition on y=0 with a central door
+        cx = (seg[0] + seg[1]) / 2
+        boxes.append(Box((cx, 0, 1.4), (seg[1] - seg[0], 0.3, 2.8), (134, 116, 106), "wall"))
+    for seg in ((-7.0, -2.5), (2.5, 7.0)):  # vertical partition on x=0
+        cy = (seg[0] + seg[1]) / 2
+        boxes.append(Box((0, cy, 1.4), (0.3, seg[1] - seg[0], 2.8), (134, 116, 106), "wall"))
+
+    # Furniture (collision + clutter): sofa, table, beds, shelves, fridge.
+    boxes.append(Box((-6, -5, 0.45), (3.0, 1.2, 0.9), (90, 100, 130), "sofa"))
+    boxes.append(Box((-5, 4.5, 0.4), (2.0, 1.2, 0.8), (150, 110, 70), "table"))
+    boxes.append(Box((6, -5, 0.45), (2.4, 1.6, 0.9), (160, 150, 170), "bed"))
+    boxes.append(Box((6, 5, 0.45), (2.4, 1.6, 0.9), (170, 160, 150), "bed"))
+    boxes.append(Box((8.6, 0, 1.0), (0.6, 2.0, 2.0), (190, 192, 198), "fridge"))
+    boxes.append(Box((-9, 6, 1.0), (0.5, 3.0, 2.0), (140, 110, 80), "shelf"))
+
+    # The fire: seated at the sofa, throwing a tall smoke column; a second
+    # smouldering source by the table fills the adjoining room with haze.
+    fires = [
+        FireSpec((-6.0, -5.0, 0.6), radius=0.8, height=2.2, intensity=1.3,
+                 smoke_rate=90, flame_rate=40, rise=4.0, smoke_color=(46, 44, 46), label="sofa-fire"),
+        FireSpec((-5.0, 4.5, 0.5), radius=0.5, height=1.2, intensity=0.7,
+                 smoke_rate=60, flame_rate=22, rise=3.0, smoke_color=(54, 52, 54), label="table-fire"),
+    ]
+    # Extra drifting smoke pooling under the ceiling (search-and-rescue haze).
+    smokes = [
+        SmokeSpec((-6.0, -5.0, 2.4), radius=1.4, color=(60, 58, 60), rate=70, rise=0.6, lifetime=8.0, density=0.6, end_radius=3.4),
+        SmokeSpec((4.0, 4.0, 2.2), radius=1.6, color=(72, 70, 72), rate=50, rise=0.5, lifetime=8.0, density=0.5, end_radius=3.0),
+    ]
+    # Heat updrafts over each fire (buoyant plume drives the drones too).
+    flows = [
+        FlowSpec("updraft", {"cx": -6.0, "cy": -5.0, "radius": 3.0, "speed": 3.5, "top": 3.0}),
+        FlowSpec("updraft", {"cx": -5.0, "cy": 4.5, "radius": 2.2, "speed": 2.2, "top": 3.0}),
+        FlowSpec("wind", {"dir": (0.6, 0.3, 0.0), "gust": 0.5, "period": 5.0, "turbulence": 0.6, "shear_ref": 2.5}),
+    ]
+    # Falling ceiling debris (free rigid bodies dropping into the rooms).
+    rigids = [
+        RigidSpec("debris", (110, 96, 86), (0.5, 0.5, 0.3), mass=0.3, pos=(-6.0, -5.0, 2.6)),
+        RigidSpec("debris", (120, 104, 92), (0.4, 0.6, 0.3), mass=0.25, pos=(-4.0, 4.0, 2.6), spin=(0.5, 0.0, 0.3)),
+        RigidSpec("debris", (100, 90, 84), (0.6, 0.4, 0.35), mass=0.35, pos=(5.0, -4.5, 2.6)),
+    ]
+    # A burning curtain (deformable cloth) by the window.
+    cloths = [
+        ClothSpec(anchor=(-9.5, -6.0, 2.6), width=1.2, height=2.0, color=(180, 90, 60), label="curtain", kind="curtain", plane="yz"),
+        ClothSpec(anchor=(9.6, 3.0, 2.6), width=1.2, height=2.0, color=(150, 140, 150), label="curtain", kind="curtain", plane="yz"),
+    ]
+    return Scene(
+        id="house_on_fire", name="House on fire (indoor)", kind="indoor",
+        sky_top=(40, 30, 28), sky_bottom=(70, 54, 46),
+        ground_color=(96, 84, 78), ground_alt=(86, 76, 70), grid_color=(120, 96, 80),
+        boxes=boxes, flows=flows, rigids=rigids, cloths=cloths, fires=fires, smokes=smokes,
+        ceiling_z=2.9, ceiling_color=(54, 44, 42), fog_density=0.05,
+    )
+
+
 _BUILDERS = {
     "open_field": _open_field,
     "warehouse": _warehouse,
@@ -477,6 +590,8 @@ _BUILDERS = {
     "construction": _construction,
     "atrium": _atrium,
     "clothing_store": _clothing_store,
+    "retail_store": _retail_store,
+    "house_on_fire": _house_on_fire,
 }
 
 DEFAULT_SCENE = "open_field"
