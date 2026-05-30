@@ -54,7 +54,7 @@ batched VLA controller. Closed-loop eval (the deploy path): untrained hovers
 
 ### Intended VLA input enrichment (next)
 In addition to the camera, feed each drone's VLA the **egocentric**:
-- immediate depth map (from `perception/depth.py`),
+- immediate metric depth map (multi-view SLAM, `perception/slam.py`),
 - nearby point-cloud density (from the accumulated cloud),
 - nearby gaussian-splat density (from the live splat).
 Seam: `BatchedVLAController._build_payload` + a per-drone egocentric summary

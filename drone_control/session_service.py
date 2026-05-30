@@ -30,7 +30,8 @@ import numpy as np
 from drone_control.environment.real_env import RealEnvironment
 from drone_control.environment.sim_env import SimEnvironment
 from drone_control.perception import live_splat
-from drone_control.perception.depth import DepthEstimator, write_ply
+from drone_control.perception.depth import write_ply
+from drone_control.perception.slam import MultiViewSLAM
 from drone_control.perception.segmentation import Segmenter
 from drone_control.runtime.manager import RuntimeManager
 from drone_control.sim.session import SimSessionConfig
@@ -61,8 +62,14 @@ class SessionService:
         self.recorder_hz = recorder_hz
 
         self.segmenter = Segmenter()
-        self.depth = DepthEstimator()
-        self._depth_every = 2  # run depth every Nth perception tick (it is heavier)
+        # Multi-view SLAM front-end: triangulates metric depth from the camera's
+        # own motion across a posed keyframe window (dense plane-sweep MVS). It
+        # replaced the monocular prior, which a raycast-oracle eval showed was
+        # structurally broken on these frames (see drone_control/perception/slam.py
+        # and tools/depth_eval). Environment-agnostic: frames + calibrated poses
+        # only, identical for sim and real.
+        self.depth = MultiViewSLAM()
+        self._depth_every = 3  # run depth every Nth perception tick (plane-sweep is heavier)
 
         self._lock = threading.RLock()
         self._env: SimEnvironment | RealEnvironment | None = None

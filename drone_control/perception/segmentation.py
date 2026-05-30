@@ -338,10 +338,21 @@ def _pose_center(pose: dict[str, Any] | None) -> np.ndarray | None:
 
 
 def _pose_rotation(pose: dict[str, Any] | None) -> np.ndarray | None:
-    """Rotation matrix (3x3) from a pose dict, accepting wxyz or xyzw quats."""
+    """Rotation matrix (3x3) from a pose dict.
+
+    Prefers an explicit ``R`` (3x3, row-major) when present — a quaternion can
+    only encode *proper* rotations, but the camera's optical frame (right, down,
+    forward) is left-handed (det −1), so encoding it as a quat silently corrupts
+    it. Camera calibration therefore ships the matrix directly; quats remain
+    supported for body/IMU poses that are genuinely proper rotations.
+    """
 
     if not pose:
         return None
+    if pose.get("R") is not None:
+        R = np.asarray(pose["R"], dtype=float)
+        if R.shape == (3, 3):
+            return R
     if {"qw", "qx", "qy", "qz"} <= pose.keys():
         w, x, y, z = (float(pose["qw"]), float(pose["qx"]), float(pose["qy"]), float(pose["qz"]))
     elif pose.get("rotation_xyzw") is not None or pose.get("rotation") is not None:

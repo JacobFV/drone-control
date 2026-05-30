@@ -74,10 +74,14 @@ class SimEnvironment:
             return None
         r = _pose_rotation(pose)  # body -> world (columns = body x, y, z in world)
         cam_rot = np.column_stack([r[:, 1], -r[:, 2], r[:, 0]])  # cols: right, down, forward
+        # The optical frame is left-handed (det −1) so it cannot be carried by a
+        # quaternion without corruption — ship the matrix directly. (rotation_xyzw
+        # is kept for any legacy consumer but is lossy for this frame.)
         return {
             "x": float(pose["x"]),
             "y": float(pose["y"]),
             "z": float(pose["z"]),
+            "R": cam_rot.tolist(),
             "rotation_xyzw": rotmat_to_quat_xyzw(cam_rot),
         }
 
