@@ -76,6 +76,17 @@ def _intrinsics(w: int, h: int, fov_deg: float) -> np.ndarray:
     return np.array([[focal, 0, w / 2.0], [0, focal, h / 2.0], [0, 0, 1.0]], dtype=np.float64)
 
 
+def _intrinsics_from_pose(pose: dict | None, w: int, h: int, fov_deg: float) -> np.ndarray:
+    """Prefer the pose's calibrated intrinsics (true focal for the fitted lens);
+    fall back to an FOV guess only when none are supplied."""
+    intr = (pose or {}).get("intrinsics")
+    if intr and all(k in intr for k in ("fx", "fy", "cx", "cy")):
+        return np.array([[float(intr["fx"]), 0, float(intr["cx"])],
+                         [0, float(intr["fy"]), float(intr["cy"])],
+                         [0, 0, 1.0]], dtype=np.float64)
+    return _intrinsics(w, h, fov_deg)
+
+
 def _projection(K: np.ndarray, R: np.ndarray, C: np.ndarray) -> np.ndarray:
     """world->image projection for a camera->world rotation R and centre C."""
     Rcw = R.T                       # world->camera
@@ -315,6 +326,100 @@ from .depth import _Cloud, _colorize, _encode_jpeg  # reuse cloud + colour helpe
 from . import mvs
 
 
+class _VoxelGrid:
+    """Voxel-fused point cloud — the key to a cloud that STAYS STABLE as dozens
+    of frames stream in.
+
+    Naively appending every frame's points makes re-observed surfaces pile up
+    and, because each frame's depth is slightly noisy, grow fuzzier and heavier
+    without end. Instead each voxel keeps a running mean of the positions/colours
+    that fall in it plus an observation count. Re-observing a real surface just
+    refines its single fused point (noise averages out → it converges and stops
+    moving); a transient bad point lands in a voxel that never gets confirmed
+    again. Displaying only voxels seen ``min_obs+`` times yields a bounded,
+    denoised, temporally stable cloud.
+    """
+
+    def __init__(self, voxel: float = 0.1, min_obs: int = 2, max_voxels: int = 1_500_000,
+                 strong_obs: int = 4, stale_frames: int = 20) -> None:
+        self.voxel = voxel
+        self.min_obs = min_obs
+        self.max_voxels = max_voxels
+        # A voxel is "permanent" once seen strong_obs+ times; weakly-seen voxels
+        # not re-observed within stale_frames are evicted — that is how moving
+        # objects (forklifts/AGV) get cleaned up instead of smearing a permanent
+        # ghost trail through the cloud as the sim runs for dozens of frames.
+        self.strong_obs = strong_obs
+        self.stale_frames = stale_frames
+        # key (ix,iy,iz) -> [sx, sy, sz, sr, sg, sb, n, last_seen]
+        self._acc: dict[tuple, np.ndarray] = {}
+
+    def add(self, xyz: np.ndarray, rgb: np.ndarray, frame: int = 0) -> None:
+        if xyz.shape[0] == 0:
+            return
+        keys = np.floor(np.asarray(xyz) / self.voxel).astype(np.int64)
+        rgb = np.asarray(rgb, dtype=np.float64).reshape(-1, 3)
+        # Aggregate within this batch first (one dict op per occupied voxel), so
+        # a frame that hits a voxel 50× costs one update, not 50.
+        uniq, inv = np.unique(keys, axis=0, return_inverse=True)
+        sums = np.zeros((uniq.shape[0], 6))
+        np.add.at(sums, inv, np.concatenate([xyz, rgb], axis=1))
+        counts = np.bincount(inv, minlength=uniq.shape[0]).astype(np.float64)
+        for k, s, c in zip(map(tuple, uniq), sums, counts):
+            a = self._acc.get(k)
+            if a is None:
+                self._acc[k] = np.array([*s, c, frame])
+            else:
+                a[:6] += s
+                a[6] += c
+                a[7] = frame
+        if len(self._acc) > self.max_voxels:
+            self._evict()
+
+    def decay(self, frame: int) -> None:
+        """Evict weakly-observed voxels that have gone stale (moving-object trails
+        and one-off noise); keep everything seen strong_obs+ times."""
+        stale = frame - self.stale_frames
+        self._acc = {
+            k: v for k, v in self._acc.items()
+            if v[6] >= self.strong_obs or v[7] >= stale
+        }
+
+    def _evict(self) -> None:
+        # Drop the least-observed voxels first (most likely noise) down to 90%.
+        target = int(self.max_voxels * 0.9)
+        items = sorted(self._acc.items(), key=lambda kv: kv[1][6], reverse=True)
+        self._acc = dict(items[:target])
+
+    def arrays(self) -> tuple[np.ndarray, np.ndarray]:
+        if not self._acc:
+            return np.zeros((0, 3)), np.zeros((0, 3), np.uint8)
+        data = np.array([v for v in self._acc.values()])
+        keep = data[:, 6] >= self.min_obs
+        data = data[keep]
+        if data.shape[0] == 0:
+            return np.zeros((0, 3)), np.zeros((0, 3), np.uint8)
+        n = data[:, 6:7]
+        xyz = data[:, 0:3] / n
+        rgb = np.clip(data[:, 3:6] / n, 0, 255).astype(np.uint8)
+        return xyz, rgb
+
+    def snapshot(self, max_points: int) -> list[list[float]]:
+        xyz, rgb = self.arrays()
+        if xyz.shape[0] > max_points:
+            idx = np.linspace(0, xyz.shape[0] - 1, max_points).astype(int)
+            xyz, rgb = xyz[idx], rgb[idx]
+        return [[round(float(p[0]), 2), round(float(p[1]), 2), round(float(p[2]), 2),
+                 int(c[0]), int(c[1]), int(c[2])] for p, c in zip(xyz, rgb)]
+
+    @property
+    def occupied(self) -> int:
+        return len(self._acc)
+
+    def clear(self) -> None:
+        self._acc.clear()
+
+
 @dataclass(slots=True)
 class _Window:
     """Per-drone parallax-gated keyframe window for dense MVS."""
@@ -328,25 +433,30 @@ class _Window:
 class MultiViewSLAM:
     """Multi-view SLAM depth front-end — drop-in for ``DepthEstimator``.
 
-    Two cooperating estimators, both fed only frames + calibrated poses:
+    Fed only frames + calibrated poses, it maintains a parallax-gated keyframe
+    window per drone and runs a dense **plane-sweep MVS** stage
+    (``mvs.plane_sweep`` + ``mvs.densify``) that produces the per-pixel metric
+    depth map and the metric point cloud.
 
-      * a sparse feature tracker (``_DroneMapper``) that triangulates ORB tracks
-        across the keyframe window — the structural map skeleton, and
-      * a dense **plane-sweep MVS** stage (``mvs.plane_sweep`` + ``mvs.densify``)
-        that produces the per-pixel metric depth map and the bulk of the cloud.
-
-    Plane-sweep carries the depth: on the real input (tiny, noisy, repetitive
-    frames) discrete feature matching collapses, whereas per-pixel photo-
-    consistency aggregated across the posed window stays robust. The dense map
-    feeds the depth tile + segmentation grounding; the confident plane-sweep
-    pixels (pre-densification) back-project into the metric point cloud.
+    Plane-sweep carries the depth because on the real input (noisy, JPEG-crushed,
+    repetitive frames) discrete feature matching collapses — every descriptor has
+    a near-twin — whereas per-pixel photo-consistency aggregated across the posed
+    window stays robust. (The sparse ``_DroneMapper`` tracker remains for offline
+    structural mapping but is not in the live depth path: it adds almost nothing
+    on this imagery.) Depth is computed at a capped internal width then upsampled;
+    the dense map feeds the depth tile + segmentation grounding, and the confident
+    plane-sweep pixels back-project into the cloud after outlier removal.
     """
 
     def __init__(self, *, fov_deg: float = 75.0, near: float = 0.4, far: float = 25.0,
                  window: int = 8, min_baseline: float = 0.12,
                  n_depths: int = 64, census_radius: int = 3, patch: int = 7,
                  aggregate: int = 9, uniqueness: float = 0.93, max_cost: float = 0.6,
-                 cloud_stride: int = 2) -> None:
+                 cloud_stride: int = 2, depth_width: int = 160,
+                 outlier_k: int = 8, outlier_std: float = 2.0,
+                 cloud_min_conf: float = 0.12, cloud_far_frac: float = 0.9,
+                 cloud_max_depth: float = 8.0,
+                 voxel_size: float = 0.1, voxel_min_obs: int = 2) -> None:
         self.fov_deg = fov_deg
         self.near = near
         self.far = far
@@ -359,14 +469,32 @@ class MultiViewSLAM:
         self.uniqueness = uniqueness
         self.max_cost = max_cost
         self.cloud_stride = cloud_stride
+        # Depth is computed at a capped internal width: the ESP32 JPEG stream is
+        # compression/noise-limited, so plane-sweep at the full sensor resolution
+        # is slower AND noisier than at ~160 px (measured). The dense result is
+        # upsampled back to the frame for the tile + segmentation grounding.
+        self.depth_width = depth_width
+        self.outlier_k = outlier_k        # statistical outlier removal: neighbours
+        self.outlier_std = outlier_std    # drop points beyond mean+std*σ neighbour dist
+        # Cloud-only gating (the depth MAP keeps everything for the tile): the
+        # cloud should be clean metric structure, so we drop low-confidence pixels
+        # and the unreliable far band where disparity is too small to trust —
+        # that band is what sprays points through/past distant walls.
+        self.cloud_min_conf = cloud_min_conf
+        self.cloud_far_frac = cloud_far_frac
+        # Absolute near cap for cloud points: beyond this, MVS disparity at this
+        # resolution/noise is too small to trust and the points scatter (and
+        # never stabilise). The depth MAP still keeps far values for the tile.
+        self.cloud_max_depth = cloud_max_depth
         self._lock = threading.RLock()
-        self._mappers: dict[str, _DroneMapper] = {}
         self._windows: dict[str, _Window] = {}
         self._K: np.ndarray | None = None
         self._depth_jpeg: dict[str, bytes] = {}
         self._depth_map: dict[str, np.ndarray] = {}   # dense Euclidean depth [H,W]
         self._conf: dict[str, np.ndarray] = {}
-        self._cloud = _Cloud()
+        self._cloud = _Cloud()                                   # full-fidelity disk stream (export)
+        self._voxels = _VoxelGrid(voxel_size, voxel_min_obs)     # fused, stable display cloud
+        self._frame_idx = 0                                      # drives voxel staleness/decay
 
     def available(self) -> bool:
         return available()
@@ -377,7 +505,8 @@ class MultiViewSLAM:
                 "available": available(),
                 "reason": unavailable_reason(),
                 "method": "multi-view-slam",
-                "points": self._cloud.total,
+                "points": self._cloud.total,           # lifetime observations (streamed)
+                "fusedVoxels": self._voxels.occupied,  # stable fused-cloud size
                 "keyframes": {d: len(w.grays) for d, w in self._windows.items()},
                 "dronesWithDepth": sorted(self._depth_jpeg.keys()),
             }
@@ -403,29 +532,22 @@ class MultiViewSLAM:
         h, w = gray.shape
         with self._lock:
             if self._K is None:
-                self._K = _intrinsics(w, h, self.fov_deg)
+                self._K = _intrinsics_from_pose(pose, w, h, self.fov_deg)
             K = self._K
-            mapper = self._mappers.get(drone_id)
-            if mapper is None:
-                mapper = _DroneMapper(K, window=self.window, min_baseline=self.min_baseline,
-                                      near=self.near, far=self.far)
-                self._mappers[drone_id] = mapper
             win = self._windows.setdefault(drone_id, _Window(
                 deque(maxlen=self.window), deque(maxlen=self.window),
                 deque(maxlen=self.window), deque(maxlen=self.window)))
 
-        # Sparse feature tracks (bonus structure → cloud).
-        sxyz, scolors, _ = mapper.process(gray, rgb, center, R)
-        if sxyz.shape[0]:
-            with self._lock:
-                self._cloud.add(sxyz, scolors)
+        # Downscale to the internal compute width (cheaper + de-noises). The
+        # compute-resolution intrinsics K_c scale with the resize factor.
+        gray_c, rgb_c, K_c, scale = self._downscale(gray, rgb, K)
+        gf = gray_c.astype(np.float32)
 
         # Parallax-gate the dense window: only keep a keyframe that adds baseline,
         # so the plane-sweep always has translation to triangulate against.
         if win.grays and np.linalg.norm(center - win.Cs[-1]) < self.min_baseline:
             return
-        gf = gray.astype(np.float32)
-        win.grays.append(gf); win.rgbs.append(rgb); win.Rs.append(R); win.Cs.append(center)
+        win.grays.append(gf); win.rgbs.append(rgb_c); win.Rs.append(R); win.Cs.append(center)
         if len(win.grays) < 3:
             return
 
@@ -433,24 +555,73 @@ class MultiViewSLAM:
         ref = len(views) - 1
         try:
             z, conf = mvs.plane_sweep(
-                views, ref, K, near=self.near, far=self.far, n_depths=self.n_depths,
+                views, ref, K_c, near=self.near, far=self.far, n_depths=self.n_depths,
                 patch=self.patch, aggregate=self.aggregate, cost_mode="census",
                 census_radius=self.census_radius, uniqueness=self.uniqueness,
                 max_cost=self.max_cost)
         except Exception:
             return
 
-        # Confident pixels (pre-densification) → metric cloud points.
-        cxyz, ccol = mvs.backproject_zdepth(z, rgb, K, R, center, stride=self.cloud_stride)
+        # Confident pixels (pre-densification) → metric cloud points. Gate to
+        # high-confidence, non-far-band pixels (the far band's tiny disparity is
+        # what sprays points past distant walls), then strip statistical outliers
+        # (isolated triangulation flyers) so the cloud stays clean.
+        far_cap = min(self.far * self.cloud_far_frac, self.cloud_max_depth)
+        cloud_z = np.where((conf >= self.cloud_min_conf) & (z < far_cap), z, np.nan)
+        cxyz, ccol = mvs.backproject_zdepth(cloud_z, rgb_c, K_c, R, center, stride=self.cloud_stride)
+        cxyz, ccol = self._filter_outliers(cxyz, ccol)
         dense_z = mvs.densify(z, gf, near=self.near, far=self.far)
-        euclid = mvs.zdepth_to_euclidean(dense_z, K)
+        # Upsample the metric z-depth back to the full frame (z-depth is
+        # resolution-invariant in value) for the tile + segmentation grounding.
+        euclid = mvs.zdepth_to_euclidean(self._upsample(dense_z, w, h), K)
         with self._lock:
+            self._frame_idx += 1
             if cxyz.shape[0]:
-                self._cloud.add(cxyz, ccol)
+                self._cloud.add(cxyz, ccol)                       # full fidelity → disk (export)
+                self._voxels.add(cxyz, ccol, self._frame_idx)     # fused → stable live cloud
+            # Periodically retire stale, weakly-seen voxels (moving-object trails)
+            # so the live cloud stays stable as the sim runs for dozens of frames.
+            if self._frame_idx % 5 == 0:
+                self._voxels.decay(self._frame_idx)
             self._depth_map[drone_id] = euclid
-            self._conf[drone_id] = conf
+            self._conf[drone_id] = self._upsample(conf, w, h)
             colorized = (self.far - np.nan_to_num(euclid, nan=self.far)) / (self.far - self.near)
             self._depth_jpeg[drone_id] = _encode_jpeg(_colorize(np.clip(colorized, 0, 1)))
+
+    def _downscale(self, gray: np.ndarray, rgb: np.ndarray, K: np.ndarray):
+        import cv2
+        h, w = gray.shape
+        if w <= self.depth_width:
+            return gray, rgb, K, 1.0
+        s = self.depth_width / float(w)
+        wc, hc = int(round(w * s)), int(round(h * s))
+        g = cv2.resize(gray, (wc, hc), interpolation=cv2.INTER_AREA)
+        r = cv2.resize(rgb, (wc, hc), interpolation=cv2.INTER_AREA)
+        Kc = K.copy()
+        Kc[0, 0] *= s; Kc[1, 1] *= s; Kc[0, 2] *= s; Kc[1, 2] *= s
+        return g, r, Kc, s
+
+    def _upsample(self, depth: np.ndarray, w: int, h: int) -> np.ndarray:
+        import cv2
+        if depth.shape == (h, w):
+            return depth
+        return cv2.resize(depth, (w, h), interpolation=cv2.INTER_LINEAR)
+
+    def _filter_outliers(self, xyz: np.ndarray, colors: np.ndarray):
+        """Statistical outlier removal: drop points whose mean distance to their
+        k nearest neighbours exceeds the batch mean by ``outlier_std`` sigma."""
+        if xyz.shape[0] < self.outlier_k + 1:
+            return xyz, colors
+        try:
+            from scipy.spatial import cKDTree
+        except Exception:
+            return xyz, colors
+        tree = cKDTree(xyz)
+        d, _ = tree.query(xyz, k=self.outlier_k + 1)
+        mean_d = d[:, 1:].mean(axis=1)            # exclude self (distance 0)
+        thresh = mean_d.mean() + self.outlier_std * mean_d.std()
+        keep = mean_d <= thresh
+        return xyz[keep], colors[keep]
 
     # -- accessors ---------------------------------------------------------
 
@@ -467,23 +638,26 @@ class MultiViewSLAM:
             return self._conf.get(drone_id)
 
     def cloud_snapshot(self, max_points: int = 2500) -> list[list[float]]:
+        # The live UI cloud is the FUSED voxel cloud — stable + denoised across
+        # dozens of frames, not the raw ever-growing append stream.
         with self._lock:
-            return self._cloud.snapshot(max_points)
+            return self._voxels.snapshot(max_points)
 
     def cloud_arrays(self):
         with self._lock:
-            return self._cloud.display_arrays()
+            return self._voxels.arrays()      # fused display cloud (splat seeding)
 
     def cloud_full_arrays(self):
         with self._lock:
-            return self._cloud.all_arrays()
+            return self._cloud.all_arrays()   # full-fidelity stream (export)
 
     def reset(self, stream_path=None) -> None:
         with self._lock:
-            self._mappers.clear()
             self._windows.clear()
             self._depth_jpeg.clear()
             self._depth_map.clear()
             self._conf.clear()
+            self._voxels.clear()
+            self._frame_idx = 0
             self._cloud.close()
             self._cloud = _Cloud(stream_path)

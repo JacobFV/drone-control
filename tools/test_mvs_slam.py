@@ -105,7 +105,48 @@ class MultiViewDepthTest(unittest.TestCase):
         # observed corr~0.65 / absRel~0.43 so the test is stable, not flaky.
         self.assertGreater(corr, 0.4)
         self.assertLess(abs_rel, 0.65)
-        self.assertGreater(slam.status()["points"], 1000)
+        # Cloud has real structure (gating/outlier removal keeps it lean + clean).
+        self.assertGreater(slam.status()["points"], 400)
+
+
+class CloudStabilityTest(unittest.TestCase):
+    def test_fused_cloud_is_stable_under_revisit(self) -> None:
+        """Re-observing the same surfaces for dozens of frames must NOT grow the
+        cloud without bound. Across 3 orbit loops the raw append stream keeps
+        growing every loop, while the voxel-fused cloud plateaus after loop 1 and
+        its centroid stays put (no drift / blow-up)."""
+        from tools.depth_eval.sequence import generate
+        from drone_control.perception.slam import MultiViewSLAM
+        warnings.simplefilter("ignore")
+
+        def orbit(i, n):
+            ang = 2 * np.pi * 3 * i / max(1, n - 1)   # 3 loops
+            center = np.array([0.0, 0.0, 1.6])
+            cam = center + np.array([5.0 * np.cos(ang), 5.0 * np.sin(ang), 0.3 * np.sin(ang * 2)])
+            fwd = center - cam
+            return cam, fwd / np.linalg.norm(fwd)
+
+        frames = generate("warehouse", n=60, noise="medium", seed=4,
+                          image_size=160, camera_model="ov2640", path=orbit)
+        slam = MultiViewSLAM(far=22, near=0.5)
+        fused, naive, cents = [], [], []
+        for f in frames:
+            slam.process("sim-0", f.jpeg, f.pose)
+            xyz, _ = slam.cloud_arrays()
+            fused.append(xyz.shape[0]); naive.append(slam.cloud_full_arrays()[0].shape[0])
+            if xyz.shape[0] > 50:
+                cents.append(xyz.mean(0))
+        l1, l3 = len(frames) // 3, len(frames) - 1
+        naive_growth = naive[l3] / max(1, naive[l1])
+        fused_growth = fused[l3] / max(1, fused[l1])
+        # The raw append stream keeps growing loop over loop; the fused cloud is
+        # bounded — it grows far slower (voxel fusion + decay) and converges.
+        self.assertGreater(naive_growth, 2.0)
+        self.assertLess(fused_growth, naive_growth * 0.7, "fused cloud not stabilising vs naive")
+        self.assertGreater(fused[l3], 150, "fused cloud should have real structure")
+        # The fused centroid stays put (no drift / blow-up) across the revisits.
+        cents = np.array(cents)
+        self.assertLess(float(np.linalg.norm(cents[-1] - cents[len(cents) // 2])), 0.6)
 
 
 if __name__ == "__main__":

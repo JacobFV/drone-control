@@ -6,7 +6,7 @@ import { DEFAULT_VIEW, panView, type OrbitView } from "../../lib/pose3d";
  * Returns a ref holding the live OrbitView (mutated in place) and a reset fn.
  * Shared by the interactive 3D tiles (trajectory, world segmentation).
  */
-export function useOrbit(canvasRef: React.RefObject<HTMLCanvasElement | null>) {
+export function useOrbit(canvasRef: React.RefObject<HTMLElement | null>) {
   const viewRef = useRef<OrbitView>({ ...DEFAULT_VIEW, target: [...DEFAULT_VIEW.target] });
 
   useEffect(() => {

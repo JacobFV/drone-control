@@ -14,16 +14,28 @@ export function DepthTile({ droneId }: { droneId: string }) {
     if (!serviceBase || !available) return;
     let raf = 0;
     let last = 0;
+    let pending = false;
     const path = sessionDepthPath(droneId);
     const tick = (t: number) => {
-      if (t - last > 180 && imgRef.current) {
+      if (!pending && t - last > 180 && imgRef.current) {
         last = t;
+        pending = true;
         imgRef.current.src = `${serviceBase.replace(/\/$/, "")}${path}?t=${Math.floor(t)}`;
       }
       raf = requestAnimationFrame(tick);
     };
+    const img = imgRef.current;
+    const settle = () => {
+      pending = false;
+    };
+    img?.addEventListener("load", settle);
+    img?.addEventListener("error", settle);
     raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
+    return () => {
+      cancelAnimationFrame(raf);
+      img?.removeEventListener("load", settle);
+      img?.removeEventListener("error", settle);
+    };
   }, [serviceBase, droneId, available]);
 
   return (

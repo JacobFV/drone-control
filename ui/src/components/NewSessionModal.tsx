@@ -10,6 +10,16 @@ interface SceneOption {
   kind: string;
 }
 
+interface CameraOption {
+  id: string;
+  name: string;
+  width: number;
+  height: number;
+  fps: number;
+  hfovDeg: number;
+  sensor: string;
+}
+
 /**
  * Session-creation lives here, not in the Flight tab — these are start-time
  * choices you don't edit mid-session, so the wall surfaces a modal first and
@@ -22,7 +32,8 @@ export function NewSessionModal() {
   const [scene, setScene] = useState("open_field");
   const [numDrones, setNumDrones] = useState(4);
   const [task, setTask] = useState("goto");
-  const [rateHz, setRateHz] = useState(15);
+  const [cameras, setCameras] = useState<CameraOption[]>([]);
+  const [cameraModel, setCameraModel] = useState("ov2640");
   const [cameraNoise, setCameraNoise] = useState("medium");
   const [speed, setSpeed] = useState<"realtime" | "max">("realtime");
   const [worldModel, setWorldModel] = useState(true);
@@ -33,7 +44,12 @@ export function NewSessionModal() {
     void api.getScenes().then((r) => {
       if (r?.scenes) setScenes(r.scenes);
     });
+    void api.getCameras().then((r) => {
+      if (r?.cameras) setCameras(r.cameras);
+    });
   }, [newSessionOpen]);
+
+  const cam = cameras.find((c) => c.id === cameraModel);
 
   if (!newSessionOpen) return null;
 
@@ -41,7 +57,7 @@ export function NewSessionModal() {
     setBusy(true);
     const options =
       kind === "sim"
-        ? { numDrones, task, scene, rateHz, cameraNoise, maxSpeed: speed === "max", record: true }
+        ? { numDrones, task, scene, cameraModel, cameraNoise, maxSpeed: speed === "max", record: true }
         : { worldModel, record: true };
     const result = await api.sessionStart(kind, `${kind} session`, options);
     setBusy(false);
@@ -102,9 +118,21 @@ export function NewSessionModal() {
                   <option value="formation">formation</option>
                 </select>
               </Field>
-              <Field label="Rate (Hz)">
-                <input type="number" min={1} max={120} value={rateHz} onChange={(e) => setRateHz(Number(e.target.value))} />
+              <Field label="Camera (E99 sensor)">
+                <select value={cameraModel} onChange={(e) => setCameraModel(e.target.value)}>
+                  {cameras.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name} · {c.width}×{c.height} @ {c.fps}fps
+                    </option>
+                  ))}
+                </select>
               </Field>
+              {cam && (
+                <p className="modal-hint">
+                  {cam.sensor}. Rendered + sampled at the sensor's realistic ESP32-bridged rate
+                  ({cam.width}×{cam.height}, ~{cam.fps} fps, {cam.hfovDeg}° HFOV).
+                </p>
+              )}
               <Field label="Camera noise">
                 <select value={cameraNoise} onChange={(e) => setCameraNoise(e.target.value)}>
                   <option value="off">Off (clean)</option>

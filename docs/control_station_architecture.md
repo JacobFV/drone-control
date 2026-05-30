@@ -383,13 +383,21 @@ drone_control/perception/
   imu.py             JSONL/CSV IMU extraction
   pipeline.py        frame, pose, IMU, and map aggregation
   estimator.py       realtime estimator interface
-  slam.py            multi-view SLAM depth front-end (sparse ORB tracks +
-                     dense plane-sweep); produces the metric depth map + cloud
-  mvs.py             dense plane-sweep multi-view stereo + edge-aware densify
+  slam.py            multi-view SLAM depth front-end: dense plane-sweep at a
+                     capped internal resolution + edge-aware densify, voxel-fused
+                     point cloud (stable across dozens of frames), confidence/
+                     far-band/outlier gating. Uses calibrated intrinsics from the
+                     pose. Produces the metric depth map + cloud
+  mvs.py             dense plane-sweep multi-view stereo (Census cost, guided-
+                     filter cost-volume aggregation) + edge-aware densify
   depth.py           monocular depth prior (DEPRECATED front-end; eval showed it
                      structurally broken on these frames — kept for the point
                      cloud / PLY helpers only)
   segmentation.py    open-vocab detection + world-space grounding via depth
+
+drone_control/cameras.py — OV-series sensor models (OV2640/3660/5640/7670):
+  streamed resolution + lens FOV + realistic ESP32-bridged fps for the E99-class
+  drones. Drives the sim render resolution/cadence and the calibrated intrinsics.
 
 drone_control/controllers/
   base.py            controller protocol

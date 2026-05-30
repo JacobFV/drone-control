@@ -143,6 +143,40 @@ class CameraRenderer:
         r = rot[i]
         forward, up, right = r[:, 0], r[:, 2], r[:, 1]
 
+        img, draw, project = self._paint_world(cam, forward, up, right, dyn_quads, wind, t, particles, meshes, smoke)
+
+        # Other drones as cyan markers.
+        for j in range(pos.shape[0]):
+            if j == i:
+                continue
+            pj = project(pos[j])
+            if pj is None:
+                continue
+            rad = max(1.0, 60.0 / pj[2])
+            draw.ellipse([pj[0] - rad, pj[1] - rad, pj[0] + rad, pj[1] + rad], fill=(90, 200, 220))
+
+        # Own goal marker (bright magenta) — the target cue.
+        pg = project(goals[i])
+        if pg is not None:
+            rad = max(2.0, 120.0 / pg[2])
+            draw.ellipse([pg[0] - rad, pg[1] - rad, pg[0] + rad, pg[1] + rad], outline=(255, 60, 220), width=2)
+            draw.line([self.cx, self.cy, pg[0], pg[1]], fill=(255, 60, 220), width=1)
+
+        quality = cfg.jpeg_quality
+        if self.noise is not None and self.noise.enabled:
+            img = self._apply_noise(img)
+            quality = self.noise.jpeg_quality
+        buffer = io.BytesIO()
+        img.save(buffer, format="JPEG", quality=quality)
+        return buffer.getvalue()
+
+    def _paint_world(self, cam, forward, up, right, dyn_quads, wind, t, particles=None, meshes=(), smoke=None):
+        """Paint everything that is part of the WORLD (sky, scene geometry,
+        atmospherics, cloth, smoke) from an arbitrary camera. Returns
+        ``(img, draw, project)`` so callers add their own cues (per-drone markers,
+        goals) on top. Shared by the egocentric drone view and the omniscient view.
+        """
+        cfg = self.config
         img = Image.new("RGB", (cfg.width, cfg.height))
         draw = ImageDraw.Draw(img)
         self._fill_sky(img, draw, forward, up, right)
@@ -210,23 +244,6 @@ class CameraRenderer:
         if meshes:
             self._draw_cloth_meshes(draw, project_batch, meshes, depth_tris if want_depth else None)
 
-        # Other drones as cyan markers.
-        for j in range(pos.shape[0]):
-            if j == i:
-                continue
-            pj = project(pos[j])
-            if pj is None:
-                continue
-            rad = max(1.0, 60.0 / pj[2])
-            draw.ellipse([pj[0] - rad, pj[1] - rad, pj[0] + rad, pj[1] + rad], fill=(90, 200, 220))
-
-        # Own goal marker (bright magenta) — the target cue.
-        pg = project(goals[i])
-        if pg is not None:
-            rad = max(2.0, 120.0 / pg[2])
-            draw.ellipse([pg[0] - rad, pg[1] - rad, pg[0] + rad, pg[1] + rad], outline=(255, 60, 220), width=2)
-            draw.line([self.cx, self.cy, pg[0], pg[1]], fill=(255, 60, 220), width=1)
-
         # Volumetric smoke + fire: composite soft depth-sorted puffs, occluded
         # per-pixel by the scene depth buffer (smoke behind a wall stays hidden).
         if want_depth:
@@ -234,12 +251,69 @@ class CameraRenderer:
             img = self._composite_smoke(img, project, smoke, zbuf)
             draw = ImageDraw.Draw(img)
 
-        quality = cfg.jpeg_quality
-        if self.noise is not None and self.noise.enabled:
-            img = self._apply_noise(img)
-            quality = self.noise.jpeg_quality
+        return img, draw, project
+
+    def render_omniscient(
+        self,
+        cam_pos: np.ndarray,
+        target: np.ndarray,
+        pos: np.ndarray,
+        quat_wxyz: np.ndarray,
+        goals: np.ndarray,
+        colors: list[tuple[int, int, int]] | None = None,
+        t: float = 0.0,
+        wind: tuple[float, float, float] | None = None,
+        rigids: list | None = None,
+        particles: tuple | None = None,
+        meshes: list | None = None,
+        smoke: dict | None = None,
+    ) -> bytes:
+        """God's-eye view of the whole sim world from a free camera at
+        ``cam_pos`` looking at ``target``. Draws the scene plus EVERY drone as a
+        colored, heading-tagged marker and its goal — the omniscient ground-truth
+        view (no sensor noise; this is not what any drone sees)."""
+        cam_pos = np.asarray(cam_pos, float)
+        target = np.asarray(target, float)
+        pos = np.asarray(pos, float)
+        forward = target - cam_pos
+        forward = forward / (np.linalg.norm(forward) + 1e-9)
+        world_up = np.array([0.0, 0.0, 1.0])
+        if abs(float(forward @ world_up)) > 0.98:
+            world_up = np.array([0.0, 1.0, 0.0])
+        right = np.cross(forward, world_up); right /= np.linalg.norm(right) + 1e-9
+        up = np.cross(right, forward); up /= np.linalg.norm(up) + 1e-9
+
+        dyn_quads = []
+        for box in dynamic_objects(self.scene, t):
+            dyn_quads.extend(_box_faces(box))
+        if rigids:
+            dyn_quads.extend(rigids)
+
+        img, draw, project = self._paint_world(
+            cam_pos, forward, up, right, dyn_quads, wind, t, particles, meshes or [], smoke)
+
+        rot = _rotmats(np.asarray(quat_wxyz, float))
+        goals = np.asarray(goals, float)
+        for j in range(pos.shape[0]):
+            color = tuple(colors[j]) if colors and j < len(colors) else (120, 200, 255)
+            pj = project(pos[j])
+            pg = project(goals[j]) if j < len(goals) else None
+            if pg is not None and pj is not None:
+                draw.line([pj[0], pj[1], pg[0], pg[1]], fill=(*color, ), width=1)
+                gr = max(2.0, 90.0 / pg[2])
+                draw.ellipse([pg[0] - gr, pg[1] - gr, pg[0] + gr, pg[1] + gr], outline=color, width=1)
+            if pj is None:
+                continue
+            rad = max(2.5, 130.0 / pj[2])
+            draw.ellipse([pj[0] - rad, pj[1] - rad, pj[0] + rad, pj[1] + rad], fill=color, outline=(15, 18, 22))
+            # Heading whisker: project a short segment along the body +x (forward).
+            head = pos[j] + rot[j][:, 0] * 0.5
+            ph = project(head)
+            if ph is not None:
+                draw.line([pj[0], pj[1], ph[0], ph[1]], fill=(245, 245, 250), width=1)
+
         buffer = io.BytesIO()
-        img.save(buffer, format="JPEG", quality=quality)
+        img.save(buffer, format="JPEG", quality=self.config.jpeg_quality)
         return buffer.getvalue()
 
     # -------------------------------------------------------------- texturing

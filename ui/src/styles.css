@@ -241,6 +241,7 @@ select option { background: var(--menu-bg); color: var(--ink); }
 
 .camera-body { position: absolute; inset: 0; }
 .camera-img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.orbit-surface { touch-action: none; cursor: grab; user-select: none; }
 .seg-canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
 .orbit-canvas { width: 100%; height: 100%; display: block; touch-action: none; cursor: grab; }
 .orbit-legend {

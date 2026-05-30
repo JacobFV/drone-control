@@ -53,6 +53,10 @@ class SimEnvironment:
     def trajectories(self) -> list[dict[str, Any]]:
         return self.session.trajectories().get("drones", [])
 
+    def omniscient_frame(self, view: dict[str, list[float]] | None = None) -> bytes | None:
+        """God's-eye view of the sim world (sim-only; no real-world analogue)."""
+        return self.session.omniscient_frame(view)
+
     def world_model_status(self) -> dict[str, Any]:
         # The session owns the splat engine and feeds it the SAME (frame, pose)
         # any real environment would — never sim ground truth.
@@ -77,12 +81,14 @@ class SimEnvironment:
         # The optical frame is left-handed (det −1) so it cannot be carried by a
         # quaternion without corruption — ship the matrix directly. (rotation_xyzw
         # is kept for any legacy consumer but is lossy for this frame.)
+        intr = self.session.camera_intrinsics()
         return {
             "x": float(pose["x"]),
             "y": float(pose["y"]),
             "z": float(pose["z"]),
             "R": cam_rot.tolist(),
             "rotation_xyzw": rotmat_to_quat_xyzw(cam_rot),
+            "intrinsics": intr,  # calibration: true focal for the chosen OV lens
         }
 
     def set_speed(self, mode: str) -> None:

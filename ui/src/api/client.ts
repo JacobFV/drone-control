@@ -73,6 +73,11 @@ export const api = {
 
   // ----- Scenes / environments -----
   getScenes: () => request<{ scenes: { id: string; name: string; kind: string }[] }>("GET", "/api/scenes"),
+  getCameras: () =>
+    request<{ cameras: { id: string; name: string; width: number; height: number; fps: number; hfovDeg: number; sensor: string }[] }>(
+      "GET",
+      "/api/cameras",
+    ),
   createEnvironment: (name: string, kind: string, config: Record<string, unknown> = {}) =>
     request<{ id: string }>("POST", "/api/environments", { name, kind, config }),
 
@@ -191,6 +196,11 @@ export function sessionFramePath(droneId: string): string {
 /** Service-relative colorized depth-map frame path for a drone. */
 export function sessionDepthPath(droneId: string): string {
   return `/api/session/drones/${encodeURIComponent(droneId)}/depth`;
+}
+
+/** Service-relative omniscient god's-eye view of the sim world (sim sessions only). */
+export function sessionOmniscientPath(): string {
+  return `/api/session/omniscient`;
 }
 
 /** Open the backend's gsplat orbit viewer for a stored splat record. */

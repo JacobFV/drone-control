@@ -104,7 +104,7 @@ class SessionService:
                         task=str(options.get("task") or "goto"),
                         scene=str(options.get("scene") or "open_field"),
                         camera_noise=options.get("cameraNoise", "medium"),
-                        rate_hz=float(options.get("rateHz") or 15.0),
+                        camera_model=str(options.get("cameraModel") or "ov2640"),
                         max_speed=bool(options.get("maxSpeed", False)),
                         render=bool(options.get("render", True)),
                     )
@@ -234,6 +234,13 @@ class SessionService:
 
     def depth_frame(self, drone_id: str) -> bytes | None:
         return self.depth.latest_depth_jpeg(drone_id)
+
+    def omniscient_frame(self, view: dict[str, list[float]] | None = None) -> bytes | None:
+        """Omniscient god's-eye view — only for the simulator."""
+        env = self._env
+        if env is None or not hasattr(env, "omniscient_frame"):
+            return None
+        return env.omniscient_frame(view)
 
     def point_cloud(self, max_points: int = 2500) -> dict[str, Any]:
         return {"points": self.depth.cloud_snapshot(max_points)}

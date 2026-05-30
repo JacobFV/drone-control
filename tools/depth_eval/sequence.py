@@ -19,6 +19,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from drone_control.cameras import get_camera
 from drone_control.perception.segmentation import rotmat_to_quat_xyzw
 from drone_control.sim.render import CameraConfig, CameraRenderer
 from drone_control.sim.scenes import build_scene
@@ -68,17 +69,23 @@ def default_path(i: int, n: int) -> tuple[np.ndarray, np.ndarray]:
 def generate(
     scene_name: str = "warehouse",
     n: int = 24,
-    image_size: int = 128,
+    image_size: int | None = None,
     noise: str = "medium",
     dt: float = 0.2,
     path=default_path,
     seed: int = 0,
+    camera_model: str = "ov2640",
 ) -> list[Frame]:
     scene = build_scene(scene_name)
-    cfg = CameraConfig(width=image_size, height=int(image_size * 0.75))
+    cam = get_camera(camera_model)
+    w = int(image_size) if image_size else cam.width
+    h = int(round(w / cam.aspect))
+    cfg = CameraConfig(width=w, height=h, fov_deg=cam.hfov_deg)
     cfg.far = max(cfg.far, scene.far)
     renderer = CameraRenderer(cfg, scene=scene, noise=noise)
     renderer._rng = np.random.default_rng(seed)  # deterministic sensor noise
+    focal = (w / 2.0) / np.tan(np.deg2rad(cam.hfov_deg) / 2.0)
+    intrinsics = {"fx": focal, "fy": focal, "cx": w / 2.0, "cy": h / 2.0, "width": w, "height": h}
 
     frames: list[Frame] = []
     for i in range(n):
@@ -99,6 +106,7 @@ def generate(
             "x": float(center[0]), "y": float(center[1]), "z": float(center[2]),
             "R": cam_rot.tolist(),  # lossless; the optical frame is left-handed
             "rotation_xyzw": rotmat_to_quat_xyzw(cam_rot),
+            "intrinsics": intrinsics,
         }
         gt = raycast_depth(scene, center, cam_rot, cfg, t_sim=t, include_dynamic=True)
         frames.append(Frame(i, t, jpeg, pose, center, cam_rot, gt))

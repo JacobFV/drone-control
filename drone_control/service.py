@@ -40,6 +40,7 @@ from drone_control.coordinator.llm import LLMConfig, LLMDirector
 from drone_control.models import ModelStore
 from drone_control.runtime.manager import RuntimeManager, RuntimeManagerConfig
 from drone_control.session_service import SessionService
+from drone_control.cameras import list_cameras
 from drone_control.sim.scenes import list_scenes
 from drone_control.sim.session import SimSession, SimSessionConfig
 from drone_control.store import ControlStationStore
@@ -51,6 +52,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 class ControlStationHandler(BaseHTTPRequestHandler):
     server: "ControlStationServer"
+
+    def handle_one_request(self) -> None:
+        try:
+            super().handle_one_request()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            return
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
@@ -123,6 +130,14 @@ class ControlStationHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/scenes":
             self.send_json({"scenes": list_scenes()})
+            return
+        if parsed.path == "/api/cameras":
+            self.send_json({"cameras": list_cameras()})
+            return
+        if parsed.path == "/api/session/omniscient":
+            query = parse_qs(parsed.query)
+            view = parse_omniscient_view(query)
+            self.send_jpeg(self.server.session_service.omniscient_frame(view))
             return
         if parsed.path == "/api/sim/status":
             self.send_json(self.server.sim.status())
@@ -1580,6 +1595,15 @@ def optional_float(payload: dict[str, object], key: str) -> float | None:
     if key not in payload or payload[key] in {None, ""}:
         return None
     return float(payload[key])
+
+
+def parse_omniscient_view(query: dict[str, list[str]]) -> dict[str, list[float]] | None:
+    try:
+        eye = [float(query[key][0]) for key in ("eyeX", "eyeY", "eyeZ")]
+        target = [float(query[key][0]) for key in ("targetX", "targetY", "targetZ")]
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None
+    return {"eye": eye, "target": target}
 
 
 def optional_bool(payload: dict[str, object], key: str) -> bool | None:

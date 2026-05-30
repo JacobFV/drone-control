@@ -22,6 +22,7 @@ from typing import Any
 import numpy as np
 import torch
 
+from ..cameras import CameraModel, get_camera
 from .dynamics import QuadParams
 from .env import EnvConfig, SwarmEnv
 from .expert import ExpertController
@@ -47,13 +48,13 @@ class SimSessionConfig:
     task: str = "goto"
     scene: str = "open_field"       # named scene plan rendered by the synthetic camera
     camera_noise: object = "medium" # OV2640-style sensor noise: off|low|medium|high or dict
-    rate_hz: float = 15.0
+    camera_model: str = "ov2640"    # OV sensor: sets render resolution + lens FOV + realistic fps
+    rate_hz: float = 30.0           # physics/sim step rate (Hz); camera fps comes from the model
     max_speed: bool = False         # run the sim as fast as the CPU allows (ignore rate_hz pacing)
     max_trajectory: int = 400
     render: bool = True
-    render_every: int = 2          # render frames every N ticks (CPU bound)
     arrival_radius: float = 0.6     # resample a drone's goal once it arrives
-    image_size: int = 128
+    image_size: int | None = None   # override the sensor's streamed width (None = use the model)
     seed: int = 0
     # Airflow coupling: aerodynamic frontal area (m^2) + drag coeff used to turn
     # the local wind into a force on each (very light) drone. F = 0.5*rho*Cd*A*|v|v.
@@ -79,10 +80,14 @@ class SimSession:
         self._env: SwarmEnv | None = None
         self._expert: ExpertController | None = None
         self._renderer: CameraRenderer | None = None
+        self._omni_renderer: CameraRenderer | None = None
+        self._camera: CameraModel = get_camera(self.config.camera_model)
         self._tracks: list[_DroneTrack] = []
         self._thread: threading.Thread | None = None
         self._running = False
         self._step = 0
+        self._next_frame_t = 0.0       # sim-time of the next camera frame (fps cadence)
+        self._frame_rng = np.random.default_rng(0)  # link-jitter RNG
         # Airflow + PyBullet physics world (rigid + deformable cloth) + atmospherics.
         self._scene: Scene | None = None
         self._flow: FlowField | None = None
@@ -118,9 +123,17 @@ class SimSession:
                 params=self.params,
             )
             self._expert = ExpertController(self.params)
+            # The drone carries a specific OV sensor: render at its streamed
+            # resolution + lens FOV so perception sees exactly what the ESP32
+            # bridge would deliver (not an idealised square thumbnail).
+            cam = get_camera(cfg.camera_model)
+            cam_w = int(cfg.image_size) if cfg.image_size else cam.width
+            cam_h = int(round(cam_w / cam.aspect))
+            self._camera = cam
+            self._omni_renderer = None   # rebuilt lazily for the active scene
             self._renderer = (
                 CameraRenderer(
-                    CameraConfig(width=cfg.image_size, height=int(cfg.image_size * 0.75)),
+                    CameraConfig(width=cam_w, height=cam_h, fov_deg=cam.hfov_deg),
                     scene=cfg.scene,
                     noise=cfg.camera_noise,
                 )
@@ -157,6 +170,7 @@ class SimSession:
 
             self._env.reset()
             self._step = 0
+            self._next_frame_t = 0.0
             self._running = True
             self._thread = threading.Thread(target=self._loop, name="sim-session", daemon=True)
             self._thread.start()
@@ -335,14 +349,22 @@ class SimSession:
         quat = env.state.quat.detach().cpu()
         goals = env.goals.detach().cpu()
         frames = None
-        if self._renderer is not None and self._step % max(1, self.config.render_every) == 0:
+        # Camera frames emit at the sensor's realistic ESP32-bridged fps (with
+        # bursty link jitter) — NOT every physics tick. Poses still record every
+        # step so trajectories stay smooth; only the image stream is throttled to
+        # what the real link delivers.
+        t = self._step * self.params.dt
+        if self._renderer is not None and t >= self._next_frame_t:
+            fps = max(1.0, self._camera.fps)
+            jit = 1.0 + self._camera.jitter * float(self._frame_rng.uniform(-1.0, 1.0))
+            self._next_frame_t = t + (1.0 / fps) * max(0.2, jit)
             with self._lock:
                 rigid_render = list(self._rigid_render)
                 cloth_meshes = list(self._cloth_meshes)
                 particle_render = self._particle_render
                 smoke_render = self._smoke_render
             frames = self._renderer.render(
-                pos.numpy(), quat.numpy(), goals.numpy(), t=self._step * self.params.dt,
+                pos.numpy(), quat.numpy(), goals.numpy(), t=t,
                 wind=self._wind_ambient, rigids=rigid_render, particles=particle_render,
                 meshes=cloth_meshes, smoke=smoke_render,
             )
@@ -383,6 +405,13 @@ class SimSession:
                 "task": self.config.task,
                 "scene": self.config.scene,
                 "cameraNoise": self.config.camera_noise,
+                "camera": {
+                    "id": self._camera.id, "name": self._camera.name,
+                    "width": self._renderer.config.width if self._renderer else self._camera.width,
+                    "height": self._renderer.config.height if self._renderer else self._camera.height,
+                    "fps": self._camera.fps, "hfovDeg": self._camera.hfov_deg,
+                    "sensor": self._camera.sensor,
+                },
                 "numDrones": self.config.num_drones,
                 "rateHz": self.config.rate_hz,
                 "step": self._step,
@@ -398,6 +427,63 @@ class SimSession:
                     "smoke": (len(self._smoke_render["pos"]) if self._smoke_render is not None else 0),
                 },
             }
+
+    def omniscient_frame(self, view: dict[str, list[float]] | None = None) -> bytes | None:
+        """Render the whole sim world from a slowly-orbiting god's-eye camera —
+        the omniscient ground-truth view (all drones, goals, scene, bodies)."""
+        with self._lock:
+            env = self._env
+            if env is None or self._scene is None:
+                return None
+            pos = env.state.pos.detach().cpu().numpy()
+            quat = env.state.quat.detach().cpu().numpy()
+            goals = env.goals.detach().cpu().numpy()
+            rigid_render = list(self._rigid_render)
+            cloth_meshes = list(self._cloth_meshes)
+            particle_render = self._particle_render
+            smoke_render = self._smoke_render
+            wind = self._wind_ambient
+            t = self._step * self.params.dt
+            if self._omni_renderer is None:
+                self._omni_renderer = CameraRenderer(
+                    CameraConfig(width=480, height=360, fov_deg=72.0),
+                    scene=self._scene, noise=None,
+                )
+            renderer = self._omni_renderer
+        colors = [
+            tuple(int(_PALETTE[i % len(_PALETTE)].lstrip("#")[k:k + 2], 16) for k in (0, 2, 4))
+            for i in range(pos.shape[0])
+        ]
+        centroid = pos.mean(axis=0) if pos.shape[0] else np.zeros(3)
+        spread = float(np.linalg.norm(pos - centroid, axis=1).max()) if pos.shape[0] > 1 else 0.0
+        # Pull back far enough to frame the scene geometry (walls/shelves), not
+        # just the swarm — render's grid_range bounds the world at ~14 m.
+        world_extent = float(getattr(self._omni_renderer.config, "grid_range", 14.0))
+        radius = max(world_extent * 1.4, spread * 1.8 + 8.0)
+        if view and "eye" in view and "target" in view:
+            cam_pos = np.asarray(view["eye"], dtype=float)
+            target = np.asarray(view["target"], dtype=float)
+        else:
+            ang = 0.1 * t
+            cam_pos = centroid + np.array([radius * np.cos(ang), radius * np.sin(ang), radius * 0.55])
+            target = centroid + np.array([0.0, 0.0, 1.0])
+        return renderer.render_omniscient(
+            cam_pos, target, pos, quat, goals, colors=colors, t=t, wind=wind,
+            rigids=rigid_render, particles=particle_render, meshes=cloth_meshes, smoke=smoke_render,
+        )
+
+    def camera_intrinsics(self) -> dict[str, float]:
+        """Pinhole intrinsics matching the active renderer (lens FOV + resolution).
+
+        This is camera *calibration* — the one sim-specific fact perception is
+        allowed — so it rides along in ``camera_pose`` and the depth front-end
+        uses the true focal length for the chosen OV lens instead of a guess.
+        """
+        cam = self._camera
+        w = self._renderer.config.width if self._renderer else cam.width
+        h = self._renderer.config.height if self._renderer else cam.height
+        fx = (w / 2.0) / float(np.tan(np.deg2rad(cam.hfov_deg) / 2.0))
+        return {"fx": fx, "fy": fx, "cx": w / 2.0, "cy": h / 2.0, "width": w, "height": h}
 
     def trajectories(self) -> dict[str, Any]:
         with self._lock:

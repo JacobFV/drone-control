@@ -8,6 +8,7 @@ import { TrajectoryTile } from "./tiles/TrajectoryTile";
 import { WorldSegTile } from "./tiles/WorldSegTile";
 import { PointCloudTile } from "./tiles/PointCloudTile";
 import { SplatTile } from "./tiles/SplatTile";
+import { OmniscientTile } from "./tiles/OmniscientTile";
 
 /**
  * The main video-tile wall. One camera + segmentation tile per drone, plus the
@@ -17,6 +18,7 @@ import { SplatTile } from "./tiles/SplatTile";
 export function TileGrid() {
   const { snapshot, setNewSessionOpen } = useSession();
   const session = snapshot?.session;
+  const isSim = session?.kind === "sim";
   const drones = session?.drones ?? [];
   const tracks = session?.trajectories ?? [];
   const colorOf = (id: string) => tracks.find((t) => t.droneId === id)?.color;
@@ -40,6 +42,8 @@ export function TileGrid() {
 
   return (
     <div className="tile-grid">
+      {/* Omniscient world view first — only for simulated sessions. */}
+      {isSim && <OmniscientTile />}
       {drones.map((id) => (
         <CameraTile key={`cam-${id}`} droneId={id} color={colorOf(id)} />
       ))}
