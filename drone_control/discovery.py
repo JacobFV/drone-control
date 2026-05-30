@@ -34,6 +34,24 @@ class WifiInterface:
     kind: str = "wifi"
 
 
+# Espressif's USB vendor id (native USB-JTAG/serial on ESP32-S3/C3/C6).
+ESP_VENDOR_IDS = frozenset({"303a"})
+
+
+@dataclass(slots=True)
+class SerialBridge:
+    """A USB serial device that can act as an ESP32 drone-link bridge."""
+
+    port: str  # e.g. /dev/ttyACM0
+    by_id: str  # stable /dev/serial/by-id path (Linux), else ""
+    serial: str
+    vendor_id: str
+    product_id: str
+    manufacturer: str
+    product: str
+    is_esp: bool
+
+
 @dataclass(slots=True)
 class AccessPoint:
     ssid: str
@@ -65,6 +83,96 @@ def scan_access_points(iface: str | None = None, *, rescan: bool = True) -> list
     if system == "windows":
         return _windows_scan_access_points(iface)
     return _linux_scan_access_points(iface, rescan=rescan)
+
+
+def serial_bridges() -> list[SerialBridge]:
+    """USB serial devices that could be ESP32 drone-link bridges.
+
+    Dependency-free (no pyserial): on Linux we read the device's USB metadata
+    from sysfs and the stable name from /dev/serial/by-id; other platforms fall
+    back to listing the obvious device nodes with best-effort metadata.
+    """
+
+    system = platform.system().lower()
+    if system == "linux":
+        return _linux_serial_bridges()
+    if system == "darwin":
+        return _macos_serial_bridges()
+    return []
+
+
+def _linux_serial_bridges() -> list[SerialBridge]:
+    by_id_map: dict[str, str] = {}
+    by_id_dir = Path("/dev/serial/by-id")
+    if by_id_dir.is_dir():
+        for link in by_id_dir.iterdir():
+            try:
+                by_id_map[os.path.realpath(link)] = str(link)
+            except OSError:
+                continue
+
+    bridges: list[SerialBridge] = []
+    nodes = sorted(Path("/dev").glob("ttyACM*")) + sorted(Path("/dev").glob("ttyUSB*"))
+    for node in nodes:
+        if not re.fullmatch(r"tty(ACM|USB)\d+", node.name):
+            continue  # skip stray nodes like a bare /dev/ttyACM
+        dev = str(node)
+        info = _linux_usb_sysfs(node.name)
+        vendor = info.get("idVendor", "")
+        bridges.append(
+            SerialBridge(
+                port=dev,
+                by_id=by_id_map.get(os.path.realpath(dev), ""),
+                serial=info.get("serial", ""),
+                vendor_id=vendor,
+                product_id=info.get("idProduct", ""),
+                manufacturer=info.get("manufacturer", ""),
+                product=info.get("product", ""),
+                is_esp=vendor.lower() in ESP_VENDOR_IDS,
+            )
+        )
+    return bridges
+
+
+def _linux_usb_sysfs(tty_name: str) -> dict[str, str]:
+    """Walk up from /sys/class/tty/<name>/device to the USB device node."""
+    try:
+        cur = Path(f"/sys/class/tty/{tty_name}/device").resolve()
+    except OSError:
+        return {}
+    for _ in range(6):
+        if (cur / "idVendor").exists():
+            out: dict[str, str] = {}
+            for key in ("idVendor", "idProduct", "manufacturer", "product", "serial"):
+                path = cur / key
+                if path.exists():
+                    try:
+                        out[key] = path.read_text().strip()
+                    except OSError:
+                        pass
+            return out
+        if cur.parent == cur:
+            break
+        cur = cur.parent
+    return {}
+
+
+def _macos_serial_bridges() -> list[SerialBridge]:
+    bridges: list[SerialBridge] = []
+    for node in sorted(Path("/dev").glob("cu.usbmodem*")) + sorted(Path("/dev").glob("cu.usbserial*")):
+        bridges.append(
+            SerialBridge(
+                port=str(node),
+                by_id="",
+                serial="",
+                vendor_id="",
+                product_id="",
+                manufacturer="",
+                product="",
+                is_esp="usbmodem" in node.name,  # native-USB Espressif shows as usbmodem
+            )
+        )
+    return bridges
 
 
 def current_wifi_connection(iface: str) -> str:

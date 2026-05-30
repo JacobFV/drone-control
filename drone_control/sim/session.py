@@ -19,12 +19,18 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
+import numpy as np
 import torch
 
+from .cloth import ClothFlag
 from .dynamics import QuadParams
 from .env import EnvConfig, SwarmEnv
 from .expert import ExpertController
+from .flow import AIR_DENSITY, FlowField, aero_accel
+from .particles import ParticleField
 from .render import CameraConfig, CameraRenderer
+from .rigid import RigidWorld
+from .scenes import Scene, build_scene
 
 
 # Distinct-ish hues (HSL-ish) for up to a handful of drones; cycles beyond that.
@@ -48,6 +54,11 @@ class SimSessionConfig:
     arrival_radius: float = 0.6     # resample a drone's goal once it arrives
     image_size: int = 128
     seed: int = 0
+    # Airflow coupling: aerodynamic frontal area (m^2) + drag coeff used to turn
+    # the local wind into a force on each (very light) drone. F = 0.5*rho*Cd*A*|v|v.
+    drag_area: float = 0.006
+    drag_cd: float = 1.1
+    wind_enabled: bool = True
 
 
 @dataclass(slots=True)
@@ -68,6 +79,17 @@ class SimSession:
         self._thread: threading.Thread | None = None
         self._running = False
         self._step = 0
+        # Airflow + soft bodies.
+        self._scene: Scene | None = None
+        self._flow: FlowField | None = None
+        self._flags: list[ClothFlag] = []
+        self._flag_render: list[tuple] = []  # (grid[ny,nx,3], color)
+        self._rigid: RigidWorld | None = None
+        self._rigid_render: list[tuple] = []  # (corners, color, label) face quads
+        self._particles: ParticleField | None = None
+        self._particle_render: tuple | None = None  # (pos, rgba, size)
+        self._c_aero = 0.0
+        self._wind_ambient = (0.0, 0.0, 0.0)
 
     @property
     def running(self) -> bool:
@@ -101,6 +123,22 @@ class SimSession:
                 else None
             )
             self._tracks = [_DroneTrack(poses=deque(maxlen=cfg.max_trajectory)) for _ in range(cfg.num_drones)]
+
+            # Airflow field + cloth soft bodies from the scene plan.
+            self._scene = build_scene(cfg.scene)
+            self._flow = FlowField(self._scene.flows, seed=cfg.seed) if cfg.wind_enabled else None
+            self._flags = [
+                ClothFlag(spec.mast_top, spec.direction, width=spec.width, height=spec.height,
+                          color=spec.color, label=spec.label)
+                for spec in self._scene.flags
+            ]
+            self._rigid = RigidWorld(self._scene.rigids, seed=cfg.seed) if self._scene.rigids else None
+            self._rigid_render = []
+            self._particles = ParticleField(self._scene.particles, seed=cfg.seed) if self._scene.particles else None
+            self._particle_render = None
+            self._c_aero = 0.5 * AIR_DENSITY * cfg.drag_cd * cfg.drag_area
+            self._wind_ambient = (0.0, 0.0, 0.0)
+
             self._env.reset()
             self._step = 0
             self._running = True
@@ -129,7 +167,12 @@ class SimSession:
 
             obs = env._observe()
             command = expert.command(obs)
-            obs, _reward, _done = env.step(command)
+            t = self._step * self.params.dt
+            ext_accel = self._airflow_accel(env, t)
+            obs, _reward, _done = env.step(command, ext_accel=ext_accel)
+            # Advance soft bodies (cloth), rigid bodies, and particles against the
+            # wind at the post-step instant.
+            self._advance_bodies(env, t + self.params.dt)
 
             # Resample arrived drones' goals so the swarm keeps flying.
             dist = obs.goal_rel.norm(dim=1)
@@ -146,14 +189,87 @@ class SimSession:
             elapsed = time.monotonic() - started
             time.sleep(max(0.0, interval - elapsed))
 
+    # ----------------------------------------------------------------- airflow
+
+    def _object_kinematics(self, t: float):
+        """(pos[M,3], vel[M,3]) of moving scene objects at time ``t`` (or None)."""
+        specs = self._scene.dynamics if self._scene is not None else []
+        if not specs:
+            return None
+        h = 0.05
+        pos = np.array([s.position_at(t) for s in specs], dtype=float)
+        nxt = np.array([s.position_at(t + h) for s in specs], dtype=float)
+        prv = np.array([s.position_at(max(0.0, t - h)) for s in specs], dtype=float)
+        vel = (nxt - prv) / (2 * h)
+        return pos, vel
+
+    def _rotor_sources(self, env: SwarmEnv):
+        pos = env.state.pos.detach().cpu().numpy()
+        if env.last_command is not None and env.last_command.numel():
+            thr = np.clip(env.last_command[:, 2].detach().cpu().numpy(), 0.0, 1.0)
+        else:
+            thr = np.full(pos.shape[0], 0.5)
+        return pos, thr
+
+    def _airflow_accel(self, env: SwarmEnv, t: float) -> torch.Tensor | None:
+        """World-frame [K,3] aero acceleration on the drones from the flow field."""
+        if self._flow is None:
+            return None
+        pos = env.state.pos.detach().cpu().numpy()
+        vel = env.state.vel.detach().cpu().numpy()
+        wind = self._flow.sample(
+            pos, t, objects=self._object_kinematics(t), rotors=self._rotor_sources(env)
+        )
+        self._wind_ambient = tuple(float(v) for v in self._flow.ambient(t, z=2.0))
+        acc = aero_accel(wind, vel, self.params.mass, self._c_aero)
+        return torch.from_numpy(acc.astype(np.float32))
+
+    def _advance_bodies(self, env: SwarmEnv, t: float) -> None:
+        """Step cloth, rigid bodies, and particles against the shared wind field."""
+        if self._flow is None and not (self._flags or self._rigid or self._particles):
+            return
+        objects = self._object_kinematics(t)
+        rotors = self._rotor_sources(env)
+
+        def wind_at(points):
+            if self._flow is None:
+                return np.zeros_like(points)
+            return self._flow.sample(points, t, objects=objects, rotors=rotors)
+
+        flag_render = []
+        for flag in self._flags:
+            flag.step(self.params.dt, wind_at(flag.pos))
+            flag_render.append((flag.grid(), flag.color))
+
+        rigid_render: list = []
+        if self._rigid is not None:
+            self._rigid.step(self.params.dt, wind_at)
+            rigid_render = self._rigid.face_quads()
+
+        particle_render = None
+        if self._particles is not None:
+            self._particles.step(self.params.dt, wind_at)
+            particle_render = self._particles.points()
+
+        with self._lock:
+            self._flag_render = flag_render
+            self._rigid_render = rigid_render
+            self._particle_render = particle_render
+
     def _record(self, env: SwarmEnv) -> None:
         pos = env.state.pos.detach().cpu()
         quat = env.state.quat.detach().cpu()
         goals = env.goals.detach().cpu()
         frames = None
         if self._renderer is not None and self._step % max(1, self.config.render_every) == 0:
+            with self._lock:
+                flag_render = list(self._flag_render)
+                rigid_render = list(self._rigid_render)
+                particle_render = self._particle_render
             frames = self._renderer.render(
-                pos.numpy(), quat.numpy(), goals.numpy(), t=self._step * self.params.dt
+                pos.numpy(), quat.numpy(), goals.numpy(), t=self._step * self.params.dt,
+                flags=flag_render, wind=self._wind_ambient,
+                rigids=rigid_render, particles=particle_render,
             )
         with self._lock:
             for i, track in enumerate(self._tracks):
@@ -186,6 +302,7 @@ class SimSession:
                             "hasFrame": self._tracks[i].frame is not None if i < len(self._tracks) else False,
                         }
                     )
+            wind = self._wind_ambient
             return {
                 "running": self._running,
                 "task": self.config.task,
@@ -196,6 +313,14 @@ class SimSession:
                 "step": self._step,
                 "render": self.config.render,
                 "drones": drones,
+                "wind": {
+                    "ambient": [round(v, 3) for v in wind],
+                    "speed": round(float(np.linalg.norm(wind)), 3),
+                    "sources": len(self._scene.flows) if self._scene is not None else 0,
+                    "flags": len(self._flags),
+                    "rigidBodies": (self._rigid.centers().shape[0] if self._rigid is not None else 0),
+                    "particles": (len(self._particle_render[0]) if self._particle_render is not None else 0),
+                },
             }
 
     def trajectories(self) -> dict[str, Any]:

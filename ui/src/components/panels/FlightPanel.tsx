@@ -22,6 +22,9 @@ export function FlightPanel() {
 
   const seg = session?.segmentation?.status;
   const env = (session?.env ?? {}) as Record<string, unknown>;
+  const wind = env.wind as
+    | { speed?: number; ambient?: number[]; sources?: number; flags?: number; rigidBodies?: number; particles?: number }
+    | undefined;
   const currentSession = state?.environments
     .flatMap((e) => e.sessions)
     .find((s) => s.id === session?.sessionId);
@@ -30,10 +33,12 @@ export function FlightPanel() {
     return (
       <div className="panel-stack">
         <Panel title="Session" right={<Pill>idle</Pill>}>
-          <p className="muted">No active flight session. Start one to begin streaming.</p>
-          <Button variant="primary" onClick={() => setNewSessionOpen(true)} className="with-icon">
-            <PlusIcon size={15} /> New session
-          </Button>
+          <div className="session-empty">
+            <p className="muted">No active flight session. Start one to begin streaming.</p>
+            <Button variant="primary" onClick={() => setNewSessionOpen(true)} className="with-icon">
+              <PlusIcon size={15} /> New session
+            </Button>
+          </div>
         </Panel>
       </div>
     );
@@ -88,6 +93,21 @@ export function FlightPanel() {
       <Panel title="Configuration" right={<Pill>read-only</Pill>}>
         <KeyValue entries={configEntries} />
       </Panel>
+
+      {session?.kind === "sim" && wind && (
+        <Panel title="Airflow" right={<Pill>{wind.sources ?? 0} sources</Pill>}>
+          <KeyValue
+            entries={[
+              { key: "Wind (m/s)", value: wind.speed ?? 0 },
+              { key: "Vector", value: (wind.ambient ?? []).map((v) => v.toFixed(1)).join(", ") || "—" },
+              { key: "Cloth flags", value: wind.flags ?? 0 },
+              { key: "Rigid bodies", value: wind.rigidBodies ?? 0 },
+              { key: "Particles", value: wind.particles ?? 0 },
+            ]}
+          />
+          <p className="muted">Drones are pushed by wind, fans, moving-object wakes, and each other's rotor downwash; cloth, rigid debris, and dust/smoke react to the same field.</p>
+        </Panel>
+      )}
 
       <Panel title="Drones">
         <ul className="roster">

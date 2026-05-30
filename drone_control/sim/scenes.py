@@ -15,7 +15,23 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
+from .flow import FlowSpec
+from .particles import ParticleSpec
+from .rigid import RigidSpec
+
 Color = tuple[int, int, int]
+
+
+@dataclass(slots=True)
+class FlagSpec:
+    """A cloth flag the session instantiates as a soft-body mass-spring grid."""
+
+    mast_top: tuple[float, float, float]
+    direction: tuple[float, float, float]
+    width: float = 2.8
+    height: float = 1.5
+    color: Color = (210, 70, 70)
+    label: str = "flag"
 
 
 @dataclass(slots=True)
@@ -77,9 +93,14 @@ class Scene:
     grid_color: Color
     boxes: list[Box] = field(default_factory=list)
     dynamics: list[DynamicSpec] = field(default_factory=list)   # moving objects
+    flows: list[FlowSpec] = field(default_factory=list)          # airflow primitives
+    flags: list[FlagSpec] = field(default_factory=list)          # cloth soft bodies
+    rigids: list[RigidSpec] = field(default_factory=list)        # free rigid bodies
+    particles: list[ParticleSpec] = field(default_factory=list)  # dust / smoke
     ceiling_z: float | None = None     # indoor scenes have a ceiling plane
     ceiling_color: Color = (40, 44, 50)
     far: float = 45.0
+    fog_density: float = 0.0           # atmospheric depth fade (0 = none)
 
 
 # ---------------------------------------------------------------- builders
@@ -135,11 +156,18 @@ def _warehouse() -> Scene:
         DynamicSpec("agv", (90, 170, 200), (0.9, 0.9, 0.5), "line",
                     {"a": (-11, 0), "b": (11, 0), "period": 12.0}, z=0.3),
     ]
+    # Big roll-up door draft blowing down the central aisle + a ceiling HVAC fan.
+    flows = [
+        FlowSpec("wind", {"dir": (0.0, -1.4, 0.0), "gust": 0.4, "period": 10.0, "turbulence": 0.3, "shear_ref": 4.0}),
+        FlowSpec("fan", {"pos": (0.0, 11.6, 3.2), "dir": (0.0, -1.0, -0.1), "speed": 6.5, "radius": 1.4, "reach": 14.0, "spread": 0.7}, label="dock-fan"),
+    ]
+    # A loose crate sitting in the dock-fan's draft.
+    rigids = [RigidSpec("crate", (175, 130, 70), (0.9, 0.9, 0.9), mass=0.7, pos=(0.0, 8.0, 0.45))]
     return Scene(
         id="warehouse", name="Warehouse", kind="indoor",
         sky_top=(50, 54, 62), sky_bottom=(74, 78, 86),
         ground_color=(98, 100, 106), ground_alt=(86, 88, 94), grid_color=(120, 122, 130),
-        boxes=boxes, dynamics=dynamics, ceiling_z=5.0, ceiling_color=(44, 46, 52),
+        boxes=boxes, dynamics=dynamics, flows=flows, rigids=rigids, ceiling_z=5.0, ceiling_color=(44, 46, 52),
     )
 
 
@@ -159,11 +187,12 @@ def _office() -> Scene:
     # Glass curtain walls.
     for y in (-9, 9):
         boxes.append(Box((0, y, 1.3), (20, 0.18, 2.6), (96, 156, 166), "glass-wall"))
+    flows = [FlowSpec("fan", {"pos": (-9.0, 0.0, 2.6), "dir": (1.0, 0.0, -0.1), "speed": 4.5, "radius": 1.1, "reach": 12.0, "spread": 0.6}, label="ac-vent")]
     return Scene(
         id="office", name="Office", kind="indoor",
         sky_top=(58, 64, 72), sky_bottom=(86, 92, 100),
         ground_color=(70, 96, 104), ground_alt=(62, 86, 94), grid_color=(96, 120, 128),
-        boxes=boxes, ceiling_z=3.2, ceiling_color=(74, 78, 84),
+        boxes=boxes, flows=flows, ceiling_z=3.2, ceiling_color=(74, 78, 84),
     )
 
 
@@ -198,11 +227,22 @@ def _city() -> Scene:
         DynamicSpec("car", (90, 200, 120), (2.0, 1.0, 0.7), "line", {"a": (12, -1.5), "b": (-12, -1.5), "period": 15.0}, z=0.35),
         DynamicSpec("bus", (220, 160, 50), (2.6, 1.2, 1.1), "line", {"a": (-1.5, 12), "b": (-1.5, -12), "period": 22.0}, z=0.55),
     ]
+    # Wind channels down the avenues (urban canyon) with strong gusts; a banner
+    # flies off one of the central buildings.
+    flows = [
+        FlowSpec("wind", {"dir": (0.6, 4.2, 0.0), "gust": 0.5, "period": 8.5, "turbulence": 1.1, "shear_ref": 6.0}),
+    ]
+    flags = [FlagSpec(mast_top=(4.0, 4.0, 9.0), direction=(0.0, 1.0, 0.1), width=3.2, height=1.8, color=(80, 120, 210), label="banner")]
+    rigids = [
+        RigidSpec("debris", (180, 180, 175), (0.4, 0.4, 0.25), mass=0.08, pos=(0.0, -2.0, 0.2)),
+        RigidSpec("debris", (160, 150, 140), (0.5, 0.3, 0.3), mass=0.1, pos=(-1.0, 1.0, 0.2), spin=(0.0, 0.0, 0.6)),
+    ]
+    particles = [ParticleSpec("dust", (0.0, -4.0, 0.3), count=50, color=(150, 150, 156), spawn_radius=6.0, lifetime=4.0)]
     return Scene(
         id="city", name="City block (outdoor)", kind="outdoor",
         sky_top=(56, 90, 150), sky_bottom=(152, 180, 206),
         ground_color=(56, 58, 64), ground_alt=(66, 68, 74), grid_color=(150, 150, 90),
-        boxes=boxes, dynamics=dynamics, far=70.0,
+        boxes=boxes, dynamics=dynamics, flows=flows, flags=flags, rigids=rigids, particles=particles, far=70.0, fog_density=0.016,
     )
 
 
@@ -231,11 +271,14 @@ def _park() -> Scene:
         DynamicSpec("dog", (180, 150, 90), (0.7, 0.4, 0.5), "patrol",
                     {"points": [(-6, 2), (-2, -2), (2, 3)], "speed": 2.2}, z=0.25),
     ]
+    flows = [
+        FlowSpec("wind", {"dir": (1.8, 1.2, 0.0), "gust": 0.6, "period": 9.0, "turbulence": 0.6, "shear_ref": 4.0}),
+    ]
     return Scene(
         id="park", name="Park (outdoor)", kind="outdoor",
         sky_top=(70, 120, 175), sky_bottom=(170, 198, 216),
         ground_color=(70, 122, 64), ground_alt=(60, 110, 56), grid_color=(90, 140, 80),
-        boxes=boxes, dynamics=dynamics, far=60.0,
+        boxes=boxes, dynamics=dynamics, flows=flows, far=60.0, fog_density=0.014,
     )
 
 
@@ -266,11 +309,29 @@ def _construction() -> Scene:
         DynamicSpec("truck", (180, 150, 60), (1.6, 1.0, 1.1), "line",
                     {"a": (-11, -10), "b": (11, -10), "period": 18.0}, z=0.6),
     ]
+    # Open-site wind, a big industrial fan blowing across the deck, and a dusty
+    # thermal updraft rising through the open structure.
+    flows = [
+        FlowSpec("wind", {"dir": (2.6, -1.4, 0.0), "gust": 0.6, "period": 7.5, "turbulence": 1.0, "shear_ref": 6.0}),
+        FlowSpec("fan", {"pos": (-11.0, 0.0, 1.4), "dir": (1.0, 0.0, 0.15), "speed": 9.0, "radius": 1.6, "reach": 16.0, "spread": 0.8}, label="site-fan"),
+        FlowSpec("updraft", {"cx": -3.0, "cy": 0.0, "radius": 4.5, "speed": 2.6, "top": 12.0}),
+    ]
+    flags = [FlagSpec(mast_top=(8.2, -8.0, 13.8), direction=(-1.0, 0.0, 0.05), width=2.0, height=1.1, color=(230, 200, 60), label="crane-flag")]
+    # Loose materials the fan/wind can shove, plus a smoke plume and site dust.
+    rigids = [
+        RigidSpec("pallet", (170, 130, 75), (1.0, 0.9, 0.4), mass=0.6, pos=(-7.0, 1.5, 0.3), spin=(0.0, 0.0, 0.3)),
+        RigidSpec("debris", (150, 145, 135), (0.5, 0.5, 0.4), mass=0.2, pos=(-9.0, 0.5, 0.3)),
+        RigidSpec("debris", (165, 150, 120), (0.4, 0.6, 0.3), mass=0.18, pos=(-8.0, -1.0, 0.3), spin=(0.4, 0.2, 0.0)),
+    ]
+    particles = [
+        ParticleSpec("smoke", (-8.0, 6.0, 1.4), count=55, color=(120, 120, 126), spawn_radius=0.8, lifetime=4.5, rise=2.6, size=2.2),
+        ParticleSpec("dust", (-3.0, 0.0, 0.2), count=60, color=(170, 150, 120), spawn_radius=7.0, lifetime=4.0),
+    ]
     return Scene(
         id="construction", name="Construction site (outdoor)", kind="outdoor",
         sky_top=(120, 130, 150), sky_bottom=(186, 192, 200),
         ground_color=(126, 110, 88), ground_alt=(116, 100, 80), grid_color=(150, 130, 90),
-        boxes=boxes, dynamics=dynamics, far=70.0,
+        boxes=boxes, dynamics=dynamics, flows=flows, flags=flags, rigids=rigids, particles=particles, far=70.0, fog_density=0.02,
     )
 
 
@@ -292,11 +353,13 @@ def _atrium() -> Scene:
         boxes.append(Box((x, y, 0.6), (1.2, 1.2, 1.2), (60, 130, 72), "planter"))
     for (x, y) in [(-7, 0), (7, 0)]:
         boxes.append(Box((x, y, 0.9), (1.6, 2.2, 1.8), _jit((120, 90, 160), int(x)), "kiosk"))
+    # Warm air rising through the open central void (stack effect).
+    flows = [FlowSpec("updraft", {"cx": 0.0, "cy": 0.0, "radius": 5.0, "speed": 2.2, "top": 8.0})]
     return Scene(
         id="atrium", name="Atrium (indoor)", kind="indoor",
         sky_top=(70, 76, 88), sky_bottom=(120, 126, 138),
         ground_color=(120, 122, 130), ground_alt=(106, 108, 118), grid_color=(140, 142, 150),
-        boxes=boxes, ceiling_z=8.0, ceiling_color=(60, 64, 72),
+        boxes=boxes, flows=flows, ceiling_z=8.0, ceiling_color=(60, 64, 72),
     )
 
 
@@ -311,11 +374,21 @@ def _open_field() -> Scene:
     for k, (x, y) in enumerate([(-4, 3), (3, -2), (5, 4)]):
         boxes.append(Box((x, y, 0.5), (1.4, 0.9, 1.0), _jit((180, 160, 80), k), "hay-bale"))
     boxes.append(Box((0, 0, 1.5), (0.2, 0.2, 3.0), (200, 200, 210), "windsock"))
+    wind_dir = (3.6, 0.8, 0.0)
+    flows = [
+        FlowSpec("wind", {"dir": wind_dir, "gust": 0.55, "period": 7.0, "turbulence": 0.7, "shear_ref": 3.0}),
+    ]
+    flags = [FlagSpec(mast_top=(0.12, 0.0, 3.0), direction=(1.0, 0.22, 0.0), color=(220, 80, 70), label="windsock-flag")]
+    rigids = [
+        RigidSpec("crate", (185, 150, 90), (0.7, 0.7, 0.7), mass=0.4, pos=(-5.0, 1.0, 0.4), spin=(0.3, 0.0, 0.4)),
+        RigidSpec("debris", (170, 165, 150), (0.5, 0.5, 0.3), mass=0.15, pos=(-3.0, -2.0, 0.3)),
+    ]
+    particles = [ParticleSpec("dust", (-6.0, 0.0, 0.2), count=70, color=(206, 196, 170), spawn_radius=9.0, lifetime=5.0)]
     return Scene(
         id="open_field", name="Open field (outdoor)", kind="outdoor",
         sky_top=(64, 104, 162), sky_bottom=(160, 188, 212),
         ground_color=(78, 118, 70), ground_alt=(70, 108, 62), grid_color=(96, 132, 84),
-        boxes=boxes, far=60.0,
+        boxes=boxes, flows=flows, flags=flags, rigids=rigids, particles=particles, far=60.0, fog_density=0.012,
     )
 
 

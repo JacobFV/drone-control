@@ -97,8 +97,20 @@ class QuadrotorDynamics:
         quat[:, 0] = 1.0
         return SwarmState(pos=z3.clone(), vel=z3.clone(), quat=quat, omega=z3.clone())
 
-    def step(self, state: SwarmState, command_norm: torch.Tensor, *, substeps: int = 1) -> SwarmState:
-        """Advance one control tick. ``command_norm`` is [K,4] normalised."""
+    def step(
+        self,
+        state: SwarmState,
+        command_norm: torch.Tensor,
+        *,
+        substeps: int = 1,
+        ext_accel: torch.Tensor | None = None,
+    ) -> SwarmState:
+        """Advance one control tick. ``command_norm`` is [K,4] normalised.
+
+        ``ext_accel`` is an optional [K,3] world-frame acceleration applied to
+        every body each substep — used to inject airflow (wind / fan / wake /
+        downwash) disturbances from the flow field.
+        """
 
         dt = self.params.dt / max(1, substeps)
         pos, vel, quat, omega = state.pos, state.vel, state.quat, state.omega
@@ -128,9 +140,12 @@ class QuadrotorDynamics:
             )
             torque = self.inertia * ang_accel
 
-            # Linear: thrust along body z, gravity, linear drag.
+            # Linear: thrust along body z, gravity, linear drag, + external
+            # airflow acceleration (wind / fans / wakes / rotor downwash).
             thrust_world = rot[:, :, 2] * thrust.unsqueeze(1)
             accel = thrust_world / self.params.mass + self.g_vec - self.params.drag * vel / self.params.mass
+            if ext_accel is not None:
+                accel = accel + ext_accel
             vel = vel + accel * dt
             pos = pos + vel * dt
 

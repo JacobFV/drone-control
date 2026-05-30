@@ -162,6 +162,38 @@ export interface NetworkSummary {
   notes?: string;
 }
 
+/** A usable PC Wi-Fi radio (one association per drone AP). */
+export interface WifiInterface {
+  name: string;
+  state: string; // connected | disconnected | …
+  connection: string; // currently-joined SSID, "" when idle
+  platform?: string;
+  kind?: string; // wifi
+}
+
+/** A USB serial device that can act as an ESP32 drone-link bridge. */
+export interface SerialBridge {
+  port: string; // /dev/ttyACM0
+  by_id: string; // stable /dev/serial/by-id path, "" if unknown
+  serial: string;
+  vendor_id: string;
+  product_id: string;
+  manufacturer: string;
+  product: string;
+  is_esp: boolean;
+}
+
+/** A network seen by a radio's scan. */
+export interface AccessPoint {
+  ssid: string;
+  bssid: string;
+  channel: string;
+  frequency: string;
+  signal: number; // 0–100
+  security: string;
+  likely_drone: boolean;
+}
+
 export interface ConfigStatus {
   platform?: string;
   network?: NetworkSummary;

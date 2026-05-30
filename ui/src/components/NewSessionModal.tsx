@@ -79,11 +79,17 @@ export function NewSessionModal() {
             <>
               <Field label="Scene plan">
                 <select value={scene} onChange={(e) => setScene(e.target.value)}>
-                  {scenes.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.name} · {s.kind}
-                    </option>
-                  ))}
+                  {scenes.map((s) => {
+                    // Several scene names already carry their kind, e.g.
+                    // "City block (outdoor)" — strip it so we don't render
+                    // "City block (outdoor) · outdoor".
+                    const base = s.name.replace(/\s*\((indoor|outdoor)\)\s*$/i, "").trim();
+                    return (
+                      <option key={s.id} value={s.id}>
+                        {base} · {s.kind}
+                      </option>
+                    );
+                  })}
                 </select>
               </Field>
               <Field label="Drones">

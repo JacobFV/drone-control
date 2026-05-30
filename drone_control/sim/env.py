@@ -98,13 +98,25 @@ class SwarmEnv:
         self.state.quat[idx, 0] = 1.0
         self.goals[idx] = self.task.sample_goals(n, self.device)[: n]
 
-    def step(self, command: torch.Tensor, *, as_bytes: bool = False, substeps: int = 2):
-        """Advance one tick. ``command`` is [K,4] or [B,N,4]. Returns (obs, reward, done)."""
+    def step(
+        self,
+        command: torch.Tensor,
+        *,
+        as_bytes: bool = False,
+        substeps: int = 2,
+        ext_accel: torch.Tensor | None = None,
+    ):
+        """Advance one tick. ``command`` is [K,4] or [B,N,4]. Returns (obs, reward, done).
+
+        ``ext_accel`` ([K,3] world-frame) injects airflow disturbances.
+        """
 
         command = command.reshape(self.k, 4).to(self.device)
         norm = byte_to_norm(command) if as_bytes else command
         self.last_command = norm
-        self.state = self.dyn.step(self.state, norm, substeps=substeps)
+        if ext_accel is not None:
+            ext_accel = ext_accel.reshape(self.k, 3).to(self.device)
+        self.state = self.dyn.step(self.state, norm, substeps=substeps, ext_accel=ext_accel)
         self.t += 1
         reward = self.task.reward(self.state, self.goals, self.t)
         done = self.task.done(self.state, self.goals, self.t, self.config.max_steps)
