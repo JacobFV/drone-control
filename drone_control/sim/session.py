@@ -25,11 +25,12 @@ import torch
 from .dynamics import QuadParams
 from .env import EnvConfig, SwarmEnv
 from .expert import ExpertController
+from .cloth_instancer import expand_cloth_instances
 from .flow import AIR_DENSITY, FlowField, aero_accel
 from .particles import ParticleField
 from .physics import PyBulletWorld
 from .render import CameraConfig, CameraRenderer
-from .scenes import ClothSpec, Scene, build_scene
+from .scenes import Scene, build_scene
 from .smoke import VolumetricField
 
 
@@ -136,7 +137,9 @@ class SimSession:
             # ClothSpec; the static scene boxes become collision geometry so the
             # drones can crash into walls/shelves/furniture.
             static_boxes = [(b.center, b.size) for b in scene.boxes]
-            self._physics = PyBulletWorld(scene.rigids, scene.cloths, dt=self.params.dt,
+            # Standalone cloths + one simulated master per instance group.
+            cloths = list(scene.cloths) + [g.master for g in scene.cloth_groups]
+            self._physics = PyBulletWorld(scene.rigids, cloths, dt=self.params.dt,
                                           static_boxes=static_boxes, seed=cfg.seed)
             self._physics.set_drones(cfg.num_drones, radius=cfg.drone_radius)
             self._rigid_render = []
@@ -266,7 +269,7 @@ class SimSession:
             self._physics.update_drones(env.state.pos.detach().cpu().numpy())
             self._physics.step(self.params.dt, wind_at)
             rigid_render = self._physics.rigid_faces()
-            cloth_meshes = self._physics.cloth_meshes()
+            cloth_meshes = self._expand_cloth(self._physics.cloth_meshes(), t, wind_at)
             self._resolve_collisions(env)
 
         particle_render = None
@@ -284,6 +287,28 @@ class SimSession:
             self._cloth_meshes = cloth_meshes
             self._particle_render = particle_render
             self._smoke_render = smoke_render
+
+    def _expand_cloth(self, meshes: list, t: float, wind_at) -> list:
+        """Split simulated cloth into standalone panels (rendered directly) and
+        instance-group masters (expanded into many swaying instances)."""
+        if self._scene is None or not self._scene.cloth_groups:
+            return meshes
+        masters: dict = {}
+        render: list = []
+        for verts, faces, color, label in meshes:
+            if label.startswith("__master__"):
+                masters[label] = (np.asarray(verts, dtype=float), faces)
+            else:
+                render.append((verts, faces, color, label))
+        for group in self._scene.cloth_groups:
+            entry = masters.get(group.master.label)
+            if entry is None:
+                continue
+            mv, faces = entry
+            render.extend(
+                expand_cloth_instances(mv, group.master.anchor, faces, group.placements(), t, wind_at)
+            )
+        return render
 
     def _resolve_collisions(self, env: SwarmEnv) -> None:
         """Push drones out of walls/bodies and kill the inward velocity component

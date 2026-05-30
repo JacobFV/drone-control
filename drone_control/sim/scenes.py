@@ -56,6 +56,29 @@ class ClothSpec:
 
 
 @dataclass(slots=True)
+class ClothInstanceGroup:
+    """Cloth instancing: ONE simulated master panel rendered as many instances.
+
+    Only ``master`` is simulated (PyBullet); every placement re-uses its live
+    deformed mesh with a per-instance sway, so a shop can show hundreds of
+    swaying garments from a handful of soft-body sims."""
+
+    master: ClothSpec
+    anchors: list[tuple[float, float, float]] = field(default_factory=list)
+    colors: list[Color] = field(default_factory=list)
+    label: str = "garment"
+
+    def placements(self) -> list[tuple]:
+        """(anchor, color, label, phase) per instance — deterministic phases."""
+        out = []
+        for i, anchor in enumerate(self.anchors):
+            color = self.colors[i % len(self.colors)] if self.colors else self.master.color
+            phase = (i * 0.61803398875) * 2.0 * math.pi  # golden-ratio spread
+            out.append((anchor, color, self.label, phase))
+        return out
+
+
+@dataclass(slots=True)
 class Box:
     center: tuple[float, float, float]
     size: tuple[float, float, float]
@@ -117,6 +140,7 @@ class Scene:
     flows: list[FlowSpec] = field(default_factory=list)          # airflow primitives
     rigids: list[RigidSpec] = field(default_factory=list)        # free rigid bodies
     cloths: list[ClothSpec] = field(default_factory=list)        # deformable cloth
+    cloth_groups: list[ClothInstanceGroup] = field(default_factory=list)  # instanced cloth
     particles: list[ParticleSpec] = field(default_factory=list)  # dust tracers
     smokes: list[SmokeSpec] = field(default_factory=list)        # volumetric smoke
     fires: list[FireSpec] = field(default_factory=list)          # fire + smoke columns
@@ -418,23 +442,52 @@ def _clothing_store() -> Scene:
     draft. Designed to show off the high-fidelity (PyBullet) physics backend —
     the garments are real deformable cloth that sways in the airflow."""
     boxes: list[Box] = []
-    cloths: list[ClothSpec] = []
-    garment_palette = [(196, 86, 96), (78, 120, 180), (84, 154, 110), (210, 178, 86), (150, 110, 180), (90, 96, 110)]
+    garment_palette = [(196, 86, 96), (78, 120, 180), (84, 154, 110), (210, 178, 86), (150, 110, 180), (90, 96, 110),
+                       (220, 140, 80), (60, 150, 160), (200, 90, 150), (130, 130, 140)]
 
-    # Garment racks: two posts + a top rail, garments hanging off it. Cloth is
-    # expensive, so a few well-placed racks (4 garments each) — enough to read as
-    # a shop floor while staying real-time on the deformable solver.
-    racks = [(-5.0, -4.0), (5.0, -4.0), (-5.0, 4.0), (5.0, 4.0)]
+    # Garment racks: full shop floor. CLOTH INSTANCING — three master panels are
+    # simulated as soft bodies; every garment on every rail is a rendered instance
+    # of a master with its own sway. Hundreds of garments, three sims.
+    rack_anchors_a: list[tuple] = []  # master 0 (shirts, plane xz)
+    rack_anchors_b: list[tuple] = []  # master 1 (dresses, longer)
+    rack_anchors_c: list[tuple] = []  # master 2 (jackets, plane yz on side racks)
+    colors_a: list = []
+    colors_b: list = []
+    colors_c: list = []
+    rail_z = 1.65
+    # A large spread-out shop floor: 12 racks × 10 garments = 120 deformable
+    # garments, all instanced from three simulated masters.
+    racks = [(rx, ry) for rx in (-9.0, -3.0, 3.0, 9.0) for ry in (-7.0, 0.0, 7.0)]
     for ri, (rx, ry) in enumerate(racks):
-        rail_z = 1.6
-        boxes.append(Box((rx - 1.3, ry, rail_z / 2), (0.1, 0.1, rail_z), (150, 150, 158), "rack-post"))
-        boxes.append(Box((rx + 1.3, ry, rail_z / 2), (0.1, 0.1, rail_z), (150, 150, 158), "rack-post"))
-        boxes.append(Box((rx, ry, rail_z), (2.7, 0.1, 0.08), (170, 172, 180), "rack-rail"))
-        for gi in range(4):
-            gx = rx - 1.05 + gi * (2.1 / 3)
-            color = garment_palette[(ri * 4 + gi) % len(garment_palette)]
-            cloths.append(ClothSpec(anchor=(gx, ry, rail_z), color=color, width=0.5,
-                                    height=0.95, mass=0.08, label="garment", kind="garment", plane="xz"))
+        boxes.append(Box((rx - 1.4, ry, rail_z / 2), (0.1, 0.1, rail_z), (150, 150, 158), "rack-post"))
+        boxes.append(Box((rx + 1.4, ry, rail_z / 2), (0.1, 0.1, rail_z), (150, 150, 158), "rack-post"))
+        boxes.append(Box((rx, ry, rail_z), (2.9, 0.1, 0.08), (170, 172, 180), "rack-rail"))
+        for gi in range(10):  # 10 garments per rail
+            gx = rx - 1.25 + gi * (2.5 / 9)
+            anchor = (gx, ry, rail_z)
+            color = garment_palette[(ri * 10 + gi) % len(garment_palette)]
+            kindsel = (ri + gi) % 3
+            if kindsel == 0:
+                rack_anchors_a.append(anchor); colors_a.append(color)
+            elif kindsel == 1:
+                rack_anchors_b.append(anchor); colors_b.append(color)
+            else:
+                rack_anchors_c.append(anchor); colors_c.append(color)
+
+    cloth_groups = [
+        ClothInstanceGroup(
+            master=ClothSpec(anchor=(-9.0, -7.0, rail_z), color=(196, 86, 96), width=0.5, height=0.9,
+                             mass=0.08, label="__master__0", kind="garment", plane="xz"),
+            anchors=rack_anchors_a, colors=colors_a, label="shirt"),
+        ClothInstanceGroup(
+            master=ClothSpec(anchor=(9.0, -7.0, rail_z), color=(78, 120, 180), width=0.55, height=1.15,
+                             mass=0.1, label="__master__1", kind="garment", plane="xz"),
+            anchors=rack_anchors_b, colors=colors_b, label="dress"),
+        ClothInstanceGroup(
+            master=ClothSpec(anchor=(3.0, -7.0, rail_z), color=(120, 110, 100), width=0.6, height=0.95,
+                             mass=0.1, label="__master__2", kind="garment", plane="xz"),
+            anchors=rack_anchors_c, colors=colors_c, label="jacket"),
+    ]
 
     # Wall shelves with folded stock, mannequins, a checkout counter, fitting rooms.
     for sx in (-10.5, 10.5):
@@ -463,7 +516,7 @@ def _clothing_store() -> Scene:
         id="clothing_store", name="Clothing store (indoor)", kind="indoor",
         sky_top=(96, 98, 110), sky_bottom=(150, 150, 162),
         ground_color=(150, 142, 132), ground_alt=(140, 132, 122), grid_color=(168, 160, 150),
-        boxes=boxes, flows=flows, rigids=rigids, cloths=cloths,
+        boxes=boxes, flows=flows, rigids=rigids, cloth_groups=cloth_groups,
         ceiling_z=3.2, ceiling_color=(196, 196, 204),
     )
 
